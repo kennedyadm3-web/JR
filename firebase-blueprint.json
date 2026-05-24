@@ -1,0 +1,172 @@
+{
+  "entities": {
+    "Attachment": {
+      "title": "Attachment",
+      "description": "A file, image, or link attached to a record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "url": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["image", "pdf", "link"] }
+      },
+      "required": ["id", "url", "name"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "A company or entity that receives services.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "The name of the client." },
+        "billingCycleInfo": { "type": "string", "description": "Information or link about the billing cycle." },
+        "billingDay": { "type": "integer", "description": "The fixed day of the month for billing (1-31)." }
+      },
+      "required": ["name"]
+    },
+    "Address": {
+      "title": "Address",
+      "description": "A specific location belonging to a client.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string", "description": "Reference to the client document ID." },
+        "street": { "type": "string", "description": "The full address or name of the location." },
+        "route": { "type": "string", "description": "The route or region this address belongs to." },
+        "totalMachines": { "type": "integer", "description": "Total number of machines at this address." }
+      },
+      "required": ["clientId", "street", "route", "totalMachines"]
+    },
+    "MaintenanceRecord": {
+      "title": "Maintenance Record",
+      "description": "A specific maintenance task for an address in a given month.",
+      "type": "object",
+      "properties": {
+        "month": { "type": "string", "description": "The month of the record (e.g., '2026-05')." },
+        "addressId": { "type": "string", "description": "Reference to the address document ID." },
+        "scheduledWeek": { "type": "integer", "description": "The week of the month (1, 2, 3, 4, 5)." },
+        "technician1": { "type": "string", "description": "Name of the primary technician." },
+        "technician2": { "type": "string", "description": "Name of the secondary technician (optional)." },
+        "executionDate": { "type": "string", "format": "date-time", "description": "When the maintenance was actually completed." },
+        "executedQuantity": { "type": "integer", "description": "Number of machines serviced." },
+        "attachmentUrl": { "type": "string", "description": "Link to PDF or photo." },
+        "attachments": { "type": "array", "items": { "$ref": "Attachment" } },
+        "status": { "type": "string", "enum": ["pending", "partial", "completed"], "description": "Current status of the maintenance." },
+        "notes": { "type": "string", "description": "Observation from the field." }
+      },
+      "required": ["month", "addressId", "scheduledWeek", "status"]
+    },
+    "Technician": {
+      "title": "Technician",
+      "description": "A worker who performs maintenance.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Name of the technician." }
+      },
+      "required": ["name"]
+    },
+    "AppSetting": {
+      "title": "App Setting",
+      "description": "Global application settings.",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "object" }
+      }
+    },
+    "EditHistory": {
+      "title": "Edit History",
+      "description": "Audit log of changes.",
+      "type": "object",
+      "properties": {
+        "entityId": { "type": "string" },
+        "entityType": { "type": "string" },
+        "action": { "type": "string" },
+        "changes": { "type": "object" },
+        "userId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ServiceCall": {
+      "title": "Service Call",
+      "description": "An on-demand service request or repair.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string" },
+        "addressId": { "type": "string" },
+        "maintenanceRecordId": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["open", "in_progress", "resolved", "cancelled"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "resolvedAt": { "type": "string", "format": "date-time" },
+        "resolvedBy": { "type": "string" },
+        "resolutionNotes": { "type": "string" },
+        "attachmentUrl": { "type": "string" },
+        "attachments": { "type": "array", "items": { "$ref": "Attachment" } },
+        "forecastDate": { "type": "string" },
+        "clientName": { "type": "string" },
+        "addressLabel": { "type": "string" }
+      },
+      "required": ["clientId", "addressId", "description", "status", "priority", "createdAt"]
+    },
+    "RouteConfiguration": {
+      "title": "Route Configuration",
+      "description": "Settings for a specific route, like its type and assigned technicians.",
+      "type": "object",
+      "properties": {
+        "routeName": { "type": "string" },
+        "type": { "type": "string", "enum": ["variable", "fixed"] },
+        "technician1": { "type": "string" },
+        "technician2": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["routeName", "type"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A system user with a role and optional client association.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "assistant", "manager", "technician"] },
+        "clientId": { "type": "string", "description": "For managers, the client they belong to." }
+      },
+      "required": ["uid", "email", "role"]
+    }
+  },
+  "firestore": {
+    "clients": {
+      "schema": "Client",
+      "description": "Collection of clients."
+    },
+    "addresses": {
+      "schema": "Address",
+      "description": "Collection of addresses for all clients."
+    },
+    "maintenanceRecords": {
+      "schema": "MaintenanceRecord",
+      "description": "Monthly maintenance plans and executions."
+    },
+    "technicians": {
+      "schema": "Technician",
+      "description": "List of available technicians."
+    },
+    "editHistory": {
+      "schema": "EditHistory",
+      "description": "History of edits for audit purposes."
+    },
+    "serviceCalls": {
+      "schema": "ServiceCall",
+      "description": "On-demand repairs and service requests."
+    },
+    "routeConfigurations": {
+      "schema": "RouteConfiguration",
+      "description": "Permanent settings for routes."
+    },
+    "users": {
+        "schema": "User",
+        "description": "System users and their roles."
+    }
+  }
+}

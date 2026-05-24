@@ -1,0 +1,6 @@
+{
+  "name": "Le Frio",
+  "description": "Sistema de Gestão de Manutenção Preventiva - Le Frio",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
