@@ -13,15 +13,6 @@ jobs:
       - name: Baixar Código do Repositório (Checkout)
         uses: actions/checkout@v4
 
-      - name: Baixar e Preparar Módulo Android
-        run: |
-          mkdir -p android-app
-          echo "Baixando arquivos do aplicativo Android..."
-          curl -fsSL -o android-app.zip https://ais-dev-ar7bordx5nsnyiemayswdy-507910401461.us-west2.run.app/android-app.zip
-          unzip -q -o android-app.zip
-          echo "Arquivos prontos:"
-          ls -la android-app
-
       - name: Configurar Java JDK 17
         uses: actions/setup-java@v4
         with:
@@ -31,7 +22,7 @@ jobs:
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v3
 
-      - name: Preparar Wrapper e Compilar APK
+      - name: Compilar APK (assembleDebug)
         run: |
           cd android-app
           gradle wrapper --gradle-version 8.5
