@@ -13,6 +13,28 @@ jobs:
       - name: Baixar Código do Repositório (Checkout)
         uses: actions/checkout@v4
 
+      - name: Localizar Projeto Android
+        run: |
+          echo "Estrutura do repositório:"
+          ls -la
+          
+          MANIFEST_PATH=$(find . -name "AndroidManifest.xml" | head -n 1)
+          echo "AndroidManifest encontrado em: $MANIFEST_PATH"
+          
+          if [ -z "$MANIFEST_PATH" ]; then
+            echo "ERRO: Nenhum AndroidManifest.xml encontrado no repositório."
+            exit 1
+          fi
+          
+          APP_DIR=$(dirname $(dirname $(dirname $(dirname "$MANIFEST_PATH"))))
+          PROJECT_ROOT=$(dirname "$APP_DIR")
+          if [ "$APP_DIR" = "./app" ] || [ "$APP_DIR" = "app" ]; then
+            PROJECT_ROOT="."
+          fi
+          
+          echo "Raiz do projeto Android: $PROJECT_ROOT"
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> $GITHUB_ENV
+
       - name: Configurar Java JDK 17
         uses: actions/setup-java@v4
         with:
@@ -24,16 +46,38 @@ jobs:
 
       - name: Compilar APK (assembleDebug)
         run: |
-          cd android-app
+          cd ${{ env.PROJECT_ROOT }}
+          echo "Compilando a partir de: $(pwd)"
+          
+          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
+            echo 'pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }' > settings.gradle.kts
+            echo 'dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }' >> settings.gradle.kts
+            echo 'rootProject.name = "LeFrioAtendimento"' >> settings.gradle.kts
+            echo 'include(":app")' >> settings.gradle.kts
+          fi
+
+          if [ ! -f "build.gradle.kts" ] && [ ! -f "build.gradle" ]; then
+            echo 'plugins { id("com.android.application") version "8.2.2" apply false; id("org.jetbrains.kotlin.android") version "1.9.22" apply false; id("com.google.gms.google-services") version "4.4.1" apply false }' > build.gradle.kts
+          fi
+
+          if [ ! -f "gradle.properties" ]; then
+            echo 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' > gradle.properties
+            echo 'android.useAndroidX=true' >> gradle.properties
+            echo 'android.nonTransitiveRClass=true' >> gradle.properties
+          fi
+
           gradle wrapper --gradle-version 8.5
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon --stacktrace
+
           mkdir -p build/outputs/apk/release-ready
-          cp app/build/outputs/apk/debug/app-debug.apk build/outputs/apk/release-ready/lefrio-atendimento-debug.apk
+          APK_FILE=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          cp "$APK_FILE" build/outputs/apk/release-ready/lefrio-atendimento-debug.apk
+          echo "APK gerado com sucesso!"
 
       - name: Disponibilizar APK para Download (GitHub Artifacts)
         uses: actions/upload-artifact@v4
         with:
           name: lefrio-atendimento-android-apk
-          path: android-app/build/outputs/apk/release-ready/lefrio-atendimento-debug.apk
+          path: ${{ env.PROJECT_ROOT }}/build/outputs/apk/release-ready/lefrio-atendimento-debug.apk
           retention-days: 30
