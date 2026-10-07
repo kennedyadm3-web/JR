@@ -1,0 +1,27 @@
+Original Le Frio Logo SVG:
+
+<svg viewBox="0 0 140 100" className="w-16 h-16">
+  <g fill="none" stroke="#68B7F2" strokeWidth="6.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M 15,8 Q 41.25,-1 67.5,8 T 120,8" />
+    <path d="M 15,20 Q 41.25,10 67.5,20 T 120,20" />
+    <path d="M 15,32 Q 41.25,21 67.5,32 T 120,32" />
+    <path d="M 15,44 Q 41.25,32 67.5,44 T 120,44" />
+  </g>
+  <g fill="none" stroke="#3556A8" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round">
+    {/* L */}
+    <path d="M 16,60 L 16,90 L 29,90" />
+    {/* E */}
+    <path d="M 49,60 L 37,60 L 37,90 L 49,90" />
+    <path d="M 37,75 L 46,75" />
+    {/* F */}
+    <path d="M 57,90 L 57,60 L 69,60" />
+    <path d="M 57,75 L 66,75" />
+    {/* R */}
+    <path d="M 77,90 L 77,60 L 86,60 A 7.5,7.5 0 0,1 86,75 L 77,75" />
+    <path d="M 83,75 L 89,90" />
+    {/* I */}
+    <path d="M 99,60 L 99,90" />
+    {/* O */}
+    <path d="M 114,60 L 120,60 A 6,6 0 0,1 126,66 L 126,84 A 6,6 0 0,1 120,90 L 114,90 A 6,6 0 0,1 108,84 L 108,66 A 6,6 0 0,1 114,60 Z" />
+  </g>
+</svg>

@@ -1,8 +1,210 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    
+    // Global Safety Net
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        ("email" in request.auth.token && request.auth.token.email.lower() == "kennedy.adm3@gmail.com") ||
+        ("email" in request.auth.token && request.auth.token.email.lower() == "kennedy2026@lefrio.com") ||
+        ("email" in request.auth.token && request.auth.token.email.lower() == "admin@preventivas.com") ||
+        ("email" in request.auth.token && request.auth.token.email.lower() == "admin@lefrio.com") ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == "admin")
+      );
+    }
+
+    function isAssistant() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == "assistant";
+    }
+
+    function isSupport() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == "support";
+    }
+
+    function isManager() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == "manager";
+    }
+
+    function isSupervisor() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == "supervisor";
+    }
+
+    function isTechnician() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserData().role == "technician";
+    }
+
+    function isStaff() {
+      return isAdmin() || isAssistant() || isSupport();
+    }
+
+    // 1. Users
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (
+        isAdmin() || (
+          request.auth.uid == userId && 
+          (!request.resource.data.keys().hasAll(['role']) || request.resource.data.role == 'technician')
+        )
+      );
+      allow update: if isSignedIn() && (
+        isAdmin() || (
+          request.auth.uid == userId && 
+          (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'clientId']))
+        )
+      );
+      allow delete: if isSignedIn() && isAdmin();
+    }
+
+    // 2. Clients
+    match /clients/{clientId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isAdmin();
+    }
+
+    // 3. Addresses
+    match /addresses/{addressId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant());
+    }
+
+    // 4. Maintenance Records
+    match /maintenanceRecords/{recordId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant() || isTechnician() || isStaff());
+    }
+
+    // 5. Technicians
+    match /technicians/{techId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && isAdmin();
+    }
+
+    // 6. Edit History
+    match /editHistory/{historyId} {
+      allow read: if isSignedIn() && isStaff();
+      allow create: if isSignedIn();
+      allow update, delete: if false; // Immutable audit log!
+    }
+
+    // 7. Service Calls
+    match /serviceCalls/{callId} {
+      allow read: if isSignedIn() && (isStaff() || (isManager() && getUserData().clientId == resource.data.clientId));
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (isStaff() || (isManager() && getUserData().clientId == resource.data.clientId));
+      allow delete: if isSignedIn() && isAdmin();
+    }
+
+    // 8. Route Configurations
+    match /routeConfigurations/{routeId} {
+      allow read: if isSignedIn() && isStaff();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant());
+    }
+
+    // 9. Notifications
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // 10. Tasks (Gestão de Tarefas)
+    match /tasks/{taskId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn();
+    }
+
+    // 11. Mural de Postagens (Comunicação Geral de Rotas)
+    match /muralPosts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn();
+    }
+
+    // 12. Inspections (Fiscalização de Manutenções)
+    match /inspections/{inspectionId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (isAdmin() || isAssistant() || isSupport() || isSupervisor());
+      allow update: if isSignedIn() && (isAdmin() || isAssistant() || isSupport() || isSupervisor());
+      allow delete: if isSignedIn() && isAdmin();
+    }
+
+    // 13. Travel Cards (Cartões de despesas de viagem)
+    match /travelCards/{cardId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant());
+    }
+
+    // 14. Contracts Performance (Área de análise de desempenho dos contratos)
+    match /contractsPerformance/{perfId} {
+      allow read: if isSignedIn() && (isStaff() || (isManager() && getUserData().clientId == resource.data.clientId));
+      allow write: if isSignedIn() && (isAdmin() || isAssistant());
+    }
+
+    // 15. Equipments (Equipamentos cadastrados nos endereços)
+    match /equipments/{equipmentId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant() || isTechnician());
+    }
+
+    // 16. Adjustments (Ajustes de bônus e penalidades de técnicos)
+    match /adjustments/{adjustmentId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant());
+    }
+
+    // 17. Jetting Control (Centro de Controle de Jateamento)
+    match /jettingControl/{jettingId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+
+    // 18. Settings (Configurações do sistema/dispositivos)
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+
+    // 19. Route Plannings (Planejamento e Imagens de Viagens de Rotas)
+    match /routePlannings/{planningId} {
+      allow read: if isSignedIn() && (isStaff() || isTechnician() || isManager());
+      allow write: if isSignedIn() && (isAdmin() || isAssistant());
+    }
+
+    // 20. Service Orders (Ordens de Serviço)
+    match /serviceOrders/{orderId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+
+    // 21. Service Catalog (Catálogo de Produtos e Serviços e Tabela de Preços por Cliente)
+    match /serviceCatalog/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (isAdmin() || isAssistant() || isStaff());
+    }
+
+    // 22. Route Expenses (Despesas de Rotas e Viagens dos Técnicos)
+    match /routeExpenses/{expenseId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update: if isSignedIn();
+      allow delete: if isSignedIn() && (isAdmin() || isAssistant());
     }
   }
 }

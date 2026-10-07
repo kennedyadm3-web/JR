@@ -2,5 +2,7 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-files-path name="service_photos" path="Pictures/ServicePhotos" />
     <external-files-path name="signatures" path="Pictures/Signatures" />
+    <external-path name="external_downloads" path="Download" />
     <cache-path name="cache" path="." />
+    <cache-path name="cache_apk" path="apk" />
 </paths>

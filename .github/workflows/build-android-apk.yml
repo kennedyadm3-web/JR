@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     name: Compilar APK Android
@@ -151,7 +154,7 @@ jobs:
           echo "Iniciando compilação do APK..."
           gradle assembleDebug --no-daemon --stacktrace
 
-          # 6. Encontra e copia o APK compilado
+          # 6. Encontra e copia o APK compilado com nome direto
           mkdir -p build/outputs/apk/release-ready
           APK_FILE=$(find app/build/outputs/apk -name "*.apk" | head -n 1)
           if [ -z "$APK_FILE" ]; then
@@ -159,13 +162,30 @@ jobs:
             exit 1
           fi
           
-          cp "$APK_FILE" build/outputs/apk/release-ready/lefrio-atendimento-debug.apk
-          echo "Sucesso absoluto! APK gerado em: $(pwd)/build/outputs/apk/release-ready/lefrio-atendimento-debug.apk"
-          echo "EXPORT_PATH=$(pwd)/build/outputs/apk/release-ready/lefrio-atendimento-debug.apk" >> $GITHUB_ENV
+          cp "$APK_FILE" build/outputs/apk/release-ready/lefrio-atendimento.apk
+          echo "Sucesso! APK salvo em: $(pwd)/build/outputs/apk/release-ready/lefrio-atendimento.apk"
+          echo "EXPORT_PATH=$(pwd)/build/outputs/apk/release-ready/lefrio-atendimento.apk" >> $GITHUB_ENV
 
-      - name: Disponibilizar APK para Download (GitHub Artifacts)
+      - name: Disponibilizar APK nos Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lefrio-atendimento-android-apk
           path: ${{ env.EXPORT_PATH }}
           retention-days: 30
+
+      - name: Criar Link Direto de Download (GitHub Release)
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          tag_name: latest
+          name: "LeFrio Atendimento Android (Versão Recente)"
+          body: |
+            ### 📱 LeFrio Atendimento Técnico — Aplicativo Android
+            Nova versão compilada automaticamente.
+            
+            - **Download direto:** Baixe o arquivo `lefrio-atendimento.apk` abaixo no seu smartphone.
+            - **Instalação:** Toque no arquivo e confirme a instalação no seu aparelho Android.
+          files: ${{ env.EXPORT_PATH }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

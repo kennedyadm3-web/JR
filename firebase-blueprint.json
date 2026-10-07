@@ -19,7 +19,8 @@
       "properties": {
         "name": { "type": "string", "description": "The name of the client." },
         "billingCycleInfo": { "type": "string", "description": "Information or link about the billing cycle." },
-        "billingDay": { "type": "integer", "description": "The fixed day of the month for billing (1-31)." }
+        "billingDay": { "type": "integer", "description": "The fixed day of the month for billing (1-31)." },
+        "serviceCompany": { "type": "string", "enum": ["lefrio", "alclima"], "description": "The service company provider linked to this client." }
       },
       "required": ["name"]
     },
@@ -31,7 +32,8 @@
         "clientId": { "type": "string", "description": "Reference to the client document ID." },
         "street": { "type": "string", "description": "The full address or name of the location." },
         "route": { "type": "string", "description": "The route or region this address belongs to." },
-        "totalMachines": { "type": "integer", "description": "Total number of machines at this address." }
+        "totalMachines": { "type": "integer", "description": "Total number of machines at this address." },
+        "notes": { "type": "string", "description": "Persistent observation for this address replicated across months until removed." }
       },
       "required": ["clientId", "street", "route", "totalMachines"]
     },
@@ -50,7 +52,8 @@
         "attachmentUrl": { "type": "string", "description": "Link to PDF or photo." },
         "attachments": { "type": "array", "items": { "$ref": "Attachment" } },
         "status": { "type": "string", "enum": ["pending", "partial", "completed"], "description": "Current status of the maintenance." },
-        "notes": { "type": "string", "description": "Observation from the field." }
+        "notes": { "type": "string", "description": "Observation from the field." },
+        "routeCardId": { "type": "string", "description": "Reference to the travel card used for this route." }
       },
       "required": ["month", "addressId", "scheduledWeek", "status"]
     },
@@ -59,7 +62,8 @@
       "description": "A worker who performs maintenance.",
       "type": "object",
       "properties": {
-        "name": { "type": "string", "description": "Name of the technician." }
+        "name": { "type": "string", "description": "Name of the technician." },
+        "pricePerMachine": { "type": "number", "description": "Default price paid per serviced machine." }
       },
       "required": ["name"]
     },
@@ -133,6 +137,150 @@
         "clientId": { "type": "string", "description": "For managers, the client they belong to." }
       },
       "required": ["uid", "email", "role"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "A collaborative task managed on the timeline or list.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "The task title." },
+        "description": { "type": "string", "description": "A detailed layout of what needs to be done." },
+        "status": { "type": "string", "enum": ["pending", "in_progress", "completed"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "dueDate": { "type": "string" },
+        "taggedUserIds": { "type": "array", "items": { "type": "string" } },
+        "createdBy": { "type": "string" },
+        "createdByName": { "type": "string" }
+      },
+      "required": ["title", "status", "priority", "createdBy"]
+    },
+    "MuralPost": {
+      "title": "Mural Post",
+      "description": "An announcement or general route communication post for a given month.",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdByName": { "type": "string" },
+        "month": { "type": "string" }
+      },
+      "required": ["content", "createdBy", "month"]
+    },
+    "Inspection": {
+      "title": "Inspection",
+      "description": "Supervisor inspections of completed maintenance tasks.",
+      "type": "object",
+      "properties": {
+        "addressId": { "type": "string" },
+        "addressStreet": { "type": "string" },
+        "clientId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "maintenanceRecordId": { "type": "string" },
+        "maintenanceDate": { "type": "string" },
+        "month": { "type": "string" },
+        "inspectorId": { "type": "string" },
+        "inspectorName": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "ratingEmoji": { "type": "string" },
+        "ratingComments": { "type": "string" },
+        "assignedAt": { "type": "string", "format": "date-time" },
+        "inspectedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["addressId", "clientId", "month", "status"]
+    },
+    "TravelCard": {
+      "title": "Travel Card",
+      "description": "A credit/debit card used for travel expenses.",
+      "type": "object",
+      "properties": {
+        "lastFourDigits": { "type": "string", "description": "Last 4 digits of the card." },
+        "bank": { "type": "string", "description": "The bank associated with the card." },
+        "holderName": { "type": "string", "description": "The name of the card holder." }
+      },
+      "required": ["lastFourDigits", "bank", "holderName"]
+    },
+    "ContractPerformance": {
+      "title": "Contract Performance",
+      "description": "Manual monthly contract performance metrics for a client.",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string", "description": "The client identifier." },
+        "month": { "type": "string", "description": "The month in YYYY-MM format." },
+        "openedOrders": { "type": "integer", "description": "Number of service orders opened." },
+        "closedOrders": { "type": "integer", "description": "Number of service orders closed." },
+        "sandblastings": { "type": "integer", "description": "Number of sandblastings performed." },
+        "totalValue": { "type": "number", "description": "Total value generated in BRL." }
+      },
+      "required": ["clientId", "month", "openedOrders", "closedOrders", "sandblastings", "totalValue"]
+    },
+    "JettingControl": {
+      "title": "Jetting Control",
+      "description": "Control for deep washing and jetting services requested by technicians.",
+      "type": "object",
+      "properties": {
+        "addressId": { "type": "string", "description": "Reference to the address ID." },
+        "clientName": { "type": "string", "description": "Name of the client." },
+        "addressStreet": { "type": "string", "description": "Street of the address." },
+        "equipmentsText": { "type": "string", "description": "Descriptive text of the machines requiring jetting." },
+        "status": { "type": "string", "enum": ["Pendente", "Em Andamento", "Concluído"], "description": "Status of the jetting control item." },
+        "serviceOrders": { "type": "string", "description": "Service order numbers." },
+        "notes": { "type": "string", "description": "Additional notes." },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["addressId", "clientName", "addressStreet", "equipmentsText", "status"]
+    },
+    "DeviceSettings": {
+      "title": "Device Settings",
+      "description": "Global settings for technician mobile devices.",
+      "type": "object",
+      "properties": {
+        "shortcutText": { "type": "string" },
+        "expirationDays": { "type": "integer" },
+        "startTriggerEnabled": { "type": "boolean" },
+        "finishTriggerEnabled": { "type": "boolean" },
+        "notifiedTechnicians": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["shortcutText", "expirationDays"]
+    },
+    "ServiceCatalogItem": {
+      "title": "Service Catalog Item",
+      "description": "A standard product or service item that can be included in Service Orders with customizable pricing per client.",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "description": "Unique short code for item." },
+        "description": { "type": "string", "description": "Item name or description." },
+        "type": { "type": "string", "enum": ["service", "product"] },
+        "unit": { "type": "string" },
+        "defaultPrice": { "type": "number" },
+        "defaultDiscountPercent": { "type": "number" },
+        "clientPrices": { "type": "object" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["code", "description", "type", "unit", "defaultPrice"]
+    },
+    "RouteExpense": {
+      "title": "Route Expense",
+      "description": "An expense registered by a technician during a route with cost forecast matching and receipt.",
+      "type": "object",
+      "properties": {
+        "routeName": { "type": "string", "description": "The name of the route." },
+        "month": { "type": "string", "description": "The month in YYYY-MM format." },
+        "technicianId": { "type": "string", "description": "User ID of technician." },
+        "technicianName": { "type": "string", "description": "Name of technician who incurred the expense." },
+        "plannedCostItemId": { "type": "string", "description": "Optional ID of the planned cost item." },
+        "category": { "type": "string", "description": "Category (Alimentação, Combustível, Hospedagem, etc.)" },
+        "description": { "type": "string", "description": "Description of the expense." },
+        "actualValue": { "type": "number", "description": "The monetary amount in BRL." },
+        "expenseDate": { "type": "string", "description": "Date the expense was incurred (YYYY-MM-DD)." },
+        "receiptUrl": { "type": "string", "description": "URL or base64 of the receipt photo." },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"], "description": "Approval status." },
+        "reviewedBy": { "type": "string" },
+        "reviewedByName": { "type": "string" },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "reviewNotes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["routeName", "month", "technicianName", "description", "actualValue", "expenseDate", "status"]
     }
   },
   "firestore": {
@@ -167,6 +315,46 @@
     "users": {
         "schema": "User",
         "description": "System users and their roles."
+    },
+    "tasks": {
+        "schema": "Task",
+        "description": "Task management items."
+    },
+    "muralPosts": {
+        "schema": "MuralPost",
+        "description": "General communication messages / announcements bound to a specific month."
+    },
+    "inspections": {
+        "schema": "Inspection",
+        "description": "Collection of address-level maintenance inspections assigned to supervisors."
+    },
+    "travelCards": {
+        "schema": "TravelCard",
+        "description": "Collection of corporate credit/debit cards used for travel expenses."
+    },
+    "contractsPerformance": {
+        "schema": "ContractPerformance",
+        "description": "Collection of monthly contract performance metrics."
+    },
+    "jettingControl": {
+        "schema": "JettingControl",
+        "description": "Collection of jetting control items."
+    },
+    "settings": {
+        "schema": "DeviceSettings",
+        "description": "Collection of global or device settings."
+    },
+    "serviceOrders": {
+        "schema": "ServiceOrder",
+        "description": "Collection of service orders."
+    },
+    "serviceCatalog": {
+        "schema": "ServiceCatalogItem",
+        "description": "Collection of standard products and services for service orders with customizable client price tables."
+    },
+    "routeExpenses": {
+        "schema": "RouteExpense",
+        "description": "Collection of travel and route expenses submitted by technicians with receipts and approval workflows."
     }
   }
 }

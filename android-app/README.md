@@ -35,12 +35,15 @@ Este diretório contém o código-fonte, arquitetura e configurações exclusiva
 
 ---
 
-### 🛠️ Dia 3: Execução de Atendimento & Checklist Operacional dos Equipamentos
-- Detalhes da Ordem de Serviço com visualização do endereço e navegação GPS (Google Maps / Waze).
-- Listagem de todas as máquinas instaladas no local (Split, ACJ, Chiller, etc.).
-- Modal/Tela de preenchimento do checklist para cada equipamento.
-- Captura de fotos obrigatórias com compressão automática e salvamento local imediato.
-- Justificativas operacionais para equipamentos não executados ou com pendências.
+### 🛠️ Dia 3: Execução de Atendimento & Checklist Operacional dos Equipamentos (CONCLUÍDO)
+- [x] Tela de Detalhes da O.S. (`OrderDetailScreen.kt` & `OrderDetailViewModel.kt`).
+- [x] Botão de Navegação GPS integrado diretamente com Google Maps e Waze via Intent nativa.
+- [x] Barra de progresso percentual e contagem de máquinas inspecionadas em tempo real.
+- [x] Card de Equipamento (`EquipmentCard.kt`) com especificações (BTUs, setor, marca, patrimônio).
+- [x] Modal de Checklist Operacional (`EquipmentInspectionDialog.kt`) com testes rápidos e justificativa obrigatória para não-execução.
+- [x] Módulo de Câmera Nativa (`PhotoCaptureManager.kt`) com salvamento seguro local e compressão automática de imagem.
+- [x] Miniaturas com galeria de fotos de evidência e exclusão individual.
+- [x] Navegação fluida no `MainActivity.kt` entre Dashboard e Detalhes da O.S.
 
 ---
 

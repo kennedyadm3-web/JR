@@ -9,7 +9,10 @@ import {
   ResponsiveContainer, 
   Cell,
   PieChart,
-  Pie
+  Pie,
+  ComposedChart,
+  Line,
+  Legend
 } from 'recharts';
 import { 
   TrendingUp, 
@@ -26,20 +29,23 @@ import {
   X
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
-import { MaintenanceRecord, Address, Client, MaintenanceStatus, ServiceCall, ServiceCallStatus } from '../types';
+import { MaintenanceRecord, Address, Client, MaintenanceStatus, ServiceCall, ServiceCallStatus, Inspection } from '../types';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { cn } from '../lib/utils';
 import { ScheduleReport } from './ScheduleReport';
 import { TechnicalProduction } from './TechnicalProduction';
 import { RouteAnalysisReport } from './RouteAnalysisReport';
-import { DailyScheduleReport } from './DailyScheduleReport';
+
+import { ServiceCallAnalysisReport } from './ServiceCallAnalysisReport';
+import { ClientBillingReport } from './ClientBillingReport';
+import { RouteExpensesReport } from './RouteExpensesReport';
 
 interface Props {
   managerClientId?: string;
 }
 
-type ReportTab = 'dashboard' | 'schedule' | 'production' | 'route-analysis' | 'daily-schedule';
+type ReportTab = 'dashboard' | 'service-calls' | 'schedule' | 'production' | 'route-analysis' | 'daily-schedule' | 'billing-status' | 'route-expenses';
 
 export default function ReportsView({ managerClientId }: Props) {
   const [activeTab, setActiveTab] = useState<ReportTab>('dashboard');
@@ -93,7 +99,14 @@ export default function ReportsView({ managerClientId }: Props) {
       calls = serviceCalls.filter(call => call.clientId === selectedClientId);
     }
 
-    return { filteredRecords: r, filteredAddresses: a, filteredCalls: calls };
+    // Sort filtered addresses alphabetically by street name
+    const sortedA = a.slice().sort((addrA, addrB) => {
+      const nameA = addrA.street || addrA.name || '';
+      const nameB = addrB.street || addrB.name || '';
+      return nameA.localeCompare(nameB);
+    });
+
+    return { filteredRecords: r, filteredAddresses: sortedA, filteredCalls: calls };
   }, [records, addresses, serviceCalls, selectedClientId]);
 
   const stats = useMemo(() => {
@@ -139,6 +152,63 @@ export default function ReportsView({ managerClientId }: Props) {
     { name: 'Pendente', value: stats.pending, color: '#ef4444' },
   ];
 
+  const dailyEvolutionData = useMemo(() => {
+    const { filteredRecords } = filteredData;
+    const [yearStr, monthStr] = month.split('-');
+    
+    // Parse year and month
+    const yearParsed = parseInt(yearStr, 10);
+    const monthParsed = parseInt(monthStr, 10);
+    
+    // Get total days in month
+    const daysInMonth = new Date(yearParsed, monthParsed, 0).getDate();
+    
+    // Initialize array for each day of the month
+    const dailyData = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      dailyData.push({
+        day,
+        formattedDay: `${day.toString().padStart(2, '0')}/${monthStr}`,
+        dailyQuantity: 0,
+        cumulativeQuantity: 0
+      });
+    }
+    
+    // Sum executed quantities
+    filteredRecords.forEach(rec => {
+      if (rec.status === MaintenanceStatus.COMPLETED && rec.executedQuantity) {
+        const dateStr = rec.executionDate;
+        if (dateStr) {
+          try {
+            const parts = dateStr.split('T')[0].split('-');
+            if (parts.length === 3) {
+              const rYear = parseInt(parts[0], 10);
+              const rMonth = parseInt(parts[1], 10);
+              const rDay = parseInt(parts[2], 10);
+              
+              if (rYear === yearParsed && rMonth === monthParsed) {
+                if (rDay >= 1 && rDay <= daysInMonth) {
+                  dailyData[rDay - 1].dailyQuantity += rec.executedQuantity;
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Error parsing executionDate for daily evolution chart:", dateStr, e);
+          }
+        }
+      }
+    });
+    
+    // Compute cumulative sum
+    let runningSum = 0;
+    dailyData.forEach(item => {
+      runningSum += item.dailyQuantity;
+      item.cumulativeQuantity = runningSum;
+    });
+    
+    return dailyData;
+  }, [filteredData, month]);
+
   const selectedClient = clients.find(c => c.id === selectedClientId);
   const { filteredRecords, filteredAddresses } = filteredData;
 
@@ -150,6 +220,12 @@ export default function ReportsView({ managerClientId }: Props) {
           className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'dashboard' ? "bg-blue-600 text-white shadow-md shadow-blue-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
         >
           Análise de Produtividade
+        </button>
+        <button
+          onClick={() => setActiveTab('service-calls')}
+          className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'service-calls' ? "bg-cyan-600 text-white shadow-md shadow-cyan-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
+        >
+          Análise de Chamados
         </button>
         <button
           onClick={() => setActiveTab('schedule')}
@@ -170,21 +246,30 @@ export default function ReportsView({ managerClientId }: Props) {
           Análise de Rotas
         </button>
         <button
-          onClick={() => setActiveTab('daily-schedule')}
-          className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'daily-schedule' ? "bg-emerald-600 text-white shadow-md shadow-emerald-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
+          onClick={() => setActiveTab('billing-status')}
+          className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'billing-status' ? "bg-rose-600 text-white shadow-md shadow-rose-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
         >
-          Agenda Diária
+          Status Faturamento
+        </button>
+        <button
+          onClick={() => setActiveTab('route-expenses')}
+          className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'route-expenses' ? "bg-emerald-600 text-white shadow-md shadow-emerald-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
+        >
+          Despesas de Rotas
         </button>
       </div>
 
       {activeTab === 'schedule' && <ScheduleReport managerClientId={managerClientId} />}
       {activeTab === 'production' && <TechnicalProduction managerClientId={managerClientId} />}
       {activeTab === 'route-analysis' && <RouteAnalysisReport managerClientId={managerClientId} />}
-      {activeTab === 'daily-schedule' && <DailyScheduleReport managerClientId={managerClientId} />}
+      {activeTab === 'service-calls' && <ServiceCallAnalysisReport managerClientId={managerClientId} />}
+      {activeTab === 'billing-status' && <ClientBillingReport managerClientId={managerClientId} />}
+      {activeTab === 'route-expenses' && <RouteExpensesReport managerClientId={managerClientId} />}
 
       {activeTab === 'dashboard' && (
         <>
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200 shadow-sm print:shadow-none">
+          <div className={cn("space-y-6", showAddressList && "print:hidden")}>
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200 shadow-sm print:shadow-none">
             <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
               <TrendingUp className="w-5 h-5 text-blue-600" />
               Análise de Produtividade
@@ -360,6 +445,114 @@ export default function ReportsView({ managerClientId }: Props) {
         </div>
       </div>
 
+      {/* Daily Evolution Chart of the Month */}
+      <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+          <div>
+            <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+              <TrendingUp className="w-5 h-5 text-blue-600" />
+              Evolução Diária de Produção do Mês
+            </h3>
+            <p className="text-xs text-gray-400 mt-1 uppercase tracking-wider font-bold">Acompanhamento do volume diário e evolução acumulada de máquinas atendidas</p>
+          </div>
+          
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <div className="flex items-center gap-2">
+              <div className="w-3.5 h-3.5 bg-blue-500 rounded-sm" />
+              <span className="font-bold text-gray-600">Produção Diária</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="w-4 h-0.5 bg-emerald-500 relative flex items-center justify-center">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 absolute" />
+              </div>
+              <span className="font-bold text-gray-600">Evolução Acumulada</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="h-80 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={dailyEvolutionData} margin={{ top: 10, right: 15, left: -10, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F3F4F6" />
+              <XAxis 
+                dataKey="day" 
+                stroke="#9CA3AF" 
+                fontSize={11} 
+                tickLine={false} 
+                axisLine={false}
+                tickFormatter={(day) => `${day}`}
+              />
+              <YAxis 
+                yAxisId="left"
+                stroke="#3B82F6" 
+                fontSize={11} 
+                tickLine={false} 
+                axisLine={false}
+                allowDecimals={false}
+                label={{ value: 'Produção Diária', angle: -90, position: 'insideLeft', style: { textAnchor: 'middle', fontSize: '9px', fontWeight: 'bold', fill: '#3B82F6' }, offset: 0 }}
+              />
+              <YAxis 
+                yAxisId="right"
+                orientation="right"
+                stroke="#10B981" 
+                fontSize={11} 
+                tickLine={false} 
+                axisLine={false}
+                allowDecimals={false}
+                label={{ value: 'Total Acumulado', angle: 90, position: 'insideRight', style: { textAnchor: 'middle', fontSize: '9px', fontWeight: 'bold', fill: '#10B981' }, offset: 0 }}
+              />
+              <Tooltip 
+                cursor={{ fill: 'rgba(59, 130, 246, 0.04)' }}
+                contentStyle={{ borderRadius: '16px', border: '1px solid #E5E7EB', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.05)' }}
+                content={({ active, payload }) => {
+                  if (active && payload && payload.length) {
+                    const data = payload[0].payload;
+                    return (
+                      <div className="bg-white p-3.5 rounded-xl border border-gray-100 shadow-md">
+                        <p className="text-xs font-black text-gray-800 border-b border-gray-100 pb-1.5 mb-2 uppercase tracking-wider">{data.formattedDay}</p>
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-6 text-xs text-gray-600">
+                            <span className="flex items-center gap-1.5 font-bold">
+                              <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                              Máquinas Concluídas:
+                            </span>
+                            <span className="font-extrabold text-blue-600 text-right">{data.dailyQuantity}</span>
+                          </div>
+                          <div className="flex items-center justify-between gap-6 text-xs text-gray-600">
+                            <span className="flex items-center gap-1.5 font-bold">
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
+                              Total Acumulado:
+                            </span>
+                            <span className="font-extrabold text-emerald-600 text-right">{data.cumulativeQuantity}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                }}
+              />
+              <Bar 
+                yAxisId="left" 
+                dataKey="dailyQuantity" 
+                fill="#3B82F6" 
+                radius={[3, 3, 0, 0]} 
+                barSize={18}
+              />
+              <Line 
+                yAxisId="right" 
+                type="monotone" 
+                dataKey="cumulativeQuantity" 
+                stroke="#10B981" 
+                strokeWidth={3} 
+                dot={{ r: 3, stroke: '#10B981', strokeWidth: 1, fill: '#FFFFFF' }}
+                activeDot={{ r: 5, stroke: '#10B981', strokeWidth: 2, fill: '#FFFFFF' }}
+              />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
          {/* List of services with notes */}
          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden min-h-[400px]">
@@ -433,10 +626,36 @@ export default function ReportsView({ managerClientId }: Props) {
          </div>
       </div>
 
+        </div>
+
       {/* Address List Modal */}
       {showAddressList && selectedClientId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/40 backdrop-blur-sm animate-in fade-in print:block print:bg-white print:p-0 print:absolute print:inset-0 print:z-[9999]">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] print:max-h-none overflow-hidden flex flex-col border border-gray-200 print:shadow-none print:border-none print:rounded-none">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/40 backdrop-blur-sm animate-in fade-in print:block print:bg-white print:p-0 print:static print:w-full print:h-auto print:z-[9999]">
+          <style>{`
+            @media print {
+              body, #root, main, .container {
+                background: white !important;
+                color: black !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                max-width: 100% !important;
+                width: 100% !important;
+                box-shadow: none !important;
+                overflow: visible !important;
+              }
+              @page {
+                size: A4 portrait;
+                margin: 1.5cm 1.2cm 1.5cm 1.2cm;
+              }
+              tr {
+                page-break-inside: avoid !important;
+              }
+              thead {
+                display: table-header-group !important;
+              }
+            }
+          `}</style>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-4xl max-h-[90vh] print:max-h-none overflow-hidden flex flex-col border border-gray-200 print:block print:static print:w-full print:h-auto print:shadow-none print:border-none print:rounded-none">
             <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50 shrink-0 print:bg-white">
               <h3 className="font-bold text-gray-900 flex items-center gap-2">
                 <LayoutList className="w-5 h-5 text-blue-600 print:hidden" />
@@ -480,9 +699,9 @@ export default function ReportsView({ managerClientId }: Props) {
                     
                     return (
                       <tr key={addr.id} className={cn("hover:bg-gray-50 transition-colors", isDone ? "bg-emerald-50/10" : "")}>
-                        <td className="px-6 py-3 max-w-[300px]">
-                          <p className="font-bold text-gray-900 text-sm truncate" title={addr.name}>{addr.name}</p>
-                          <p className="text-xs text-gray-500 truncate" title={`${addr.street}${addr.number ? `, ${addr.number}` : ''}`}>{addr.street}{addr.number ? `, ${addr.number}` : ''}</p>
+                        <td className="px-6 py-3 max-w-[300px] print:max-w-none">
+                          <p className="font-bold text-gray-900 text-sm truncate print:whitespace-normal print:overflow-visible" title={addr.name}>{addr.name}</p>
+                          <p className="text-xs text-gray-500 truncate print:whitespace-normal print:overflow-visible" title={`${addr.street}${addr.number ? `, ${addr.number}` : ''}`}>{addr.street}{addr.number ? `, ${addr.number}` : ''}</p>
                         </td>
                         <td className="px-3 py-3 text-sm font-medium text-gray-500 text-center w-20">
                           {addr.totalMachines || 0}
