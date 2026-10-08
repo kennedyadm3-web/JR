@@ -36,7 +36,9 @@ import {
   ExternalLink,
   TrendingUp,
   Receipt,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Sparkles,
+  Download
 } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import { cn } from './lib/utils';
@@ -79,10 +81,23 @@ const menuItems = [
   { id: 'profile', label: 'Meu Perfil', icon: User, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT, UserRole.TECHNICIAN] },
 ];
 
+// Versão atual base do aplicativo
+const CURRENT_APP_VERSION = "1.0.0";
+
+interface AppUpdateConfig {
+  versionCode: number;
+  versionName: string;
+  downloadUrl: string;
+  releaseNotes?: string;
+  releasedAt?: string;
+}
+
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateConfig | null>(null);
+  const [showUpdateBanner, setShowUpdateBanner] = useState(true);
   const [activeView, setActiveView] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('lefrio_active_view');
@@ -113,6 +128,24 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [activePopup]);
+
+  // Busca e compara a versão do aplicativo com update-config.json
+  useEffect(() => {
+    const checkAppVersion = async () => {
+      try {
+        const response = await fetch('/update-config.json?v=' + Date.now());
+        if (response.ok) {
+          const config: AppUpdateConfig = await response.json();
+          if (config && config.versionName && config.versionName !== CURRENT_APP_VERSION) {
+            setAvailableUpdate(config);
+          }
+        }
+      } catch (err) {
+        console.warn('Verificação de atualização de aplicativo:', err);
+      }
+    };
+    checkAppVersion();
+  }, []);
 
   // Carrega e atualiza notificações do usuário em tempo real por assinatura (otimizado!)
   useEffect(() => {
@@ -666,11 +699,50 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="h-screen w-screen flex flex-col items-center justify-center bg-gray-50 p-4">
+      <div className="h-screen w-screen flex flex-col items-center justify-center bg-gray-50 p-4 relative overflow-y-auto">
+        {availableUpdate && showUpdateBanner && (
+          <div className="fixed top-0 left-0 right-0 bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-4 py-2.5 flex items-center justify-between shadow-md z-50 border-b border-blue-500/40">
+            <div className="flex items-center gap-2.5 flex-1 min-w-0">
+              <div className="bg-white/20 p-1.5 rounded-lg shrink-0">
+                <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+              </div>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-wider bg-white/20 px-2 py-0.5 rounded text-white shrink-0 w-fit">
+                  Atualização Disponível
+                </span>
+                <span className="text-xs font-medium text-white truncate">
+                  Nova versão <strong>v{availableUpdate.versionName}</strong> do aplicativo Android pronta para download!
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 ml-3">
+              <a
+                href={availableUpdate.downloadUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                download
+                className="px-3 py-1 bg-white hover:bg-blue-50 text-blue-700 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all"
+                title="Baixar nova versão do aplicativo Android"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Baixar APK</span>
+                <span className="sm:hidden">Baixar</span>
+              </a>
+              <button
+                onClick={() => setShowUpdateBanner(false)}
+                className="p-1 text-white/70 hover:text-white hover:bg-white/10 rounded-lg transition"
+                title="Fechar aviso"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full"
+          className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full mt-10 sm:mt-0"
         >
           <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">
             <Wind className="w-10 h-10 text-blue-600 animate-pulse" />
@@ -920,6 +992,46 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 print:overflow-visible overflow-hidden">
+        {/* Banner de Atualização do Aplicativo Android */}
+        {availableUpdate && showUpdateBanner && (
+          <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-4 py-2.5 flex items-center justify-between shadow-md shrink-0 print:hidden z-30 transition-all border-b border-blue-500/40">
+            <div className="flex items-center gap-2.5 flex-1 min-w-0">
+              <div className="bg-white/20 p-1.5 rounded-lg shrink-0">
+                <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+              </div>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-wider bg-white/20 px-2 py-0.5 rounded text-white shrink-0 w-fit">
+                  Atualização Disponível
+                </span>
+                <span className="text-xs font-medium text-white truncate">
+                  Nova versão <strong>v{availableUpdate.versionName}</strong> do aplicativo Android disponível para instalação!
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 ml-3">
+              <a
+                href={availableUpdate.downloadUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                download
+                className="px-3 py-1 bg-white hover:bg-blue-50 text-blue-700 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all"
+                title="Baixar nova versão do aplicativo Android"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Baixar APK</span>
+                <span className="sm:hidden">Baixar</span>
+              </a>
+              <button
+                onClick={() => setShowUpdateBanner(false)}
+                className="p-1 text-white/70 hover:text-white hover:bg-white/10 rounded-lg transition"
+                title="Fechar aviso"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+
         <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0 print:hidden">
           <div className="flex items-center gap-4">
             <button 
