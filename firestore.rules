@@ -206,5 +206,11 @@ service cloud.firestore {
       allow update: if isSignedIn();
       allow delete: if isSignedIn() && (isAdmin() || isAssistant());
     }
+
+    // 23. App Config & Android Version (Permite leitura pública para auto-atualização in-app)
+    match /app_config/{configId} {
+      allow read: if true;
+      allow write: if isSignedIn() && isAdmin();
+    }
   }
 }

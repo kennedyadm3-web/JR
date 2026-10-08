@@ -334,6 +334,50 @@ async function startServer() {
     }
   });
 
+  // Endpoints para controle de atualização do Aplicativo Android
+  app.get("/api/android-version", async (req, res) => {
+    try {
+      const docRef = clientDoc(dbClient, "app_config", "android_version");
+      const snap = await clientGetDoc(docRef);
+      if (snap.exists()) {
+        return res.json(snap.data());
+      }
+
+      // Configuração padrão se ainda não existir
+      const defaultConfig = {
+        versionCode: 1,
+        versionName: "1.0.0",
+        downloadUrl: "https://ais-dev-ar7bordx5nsnyiemayswdy-507910401461.us-west2.run.app/android-app.zip",
+        releaseNotes: "Versão inicial com checklist e fotos.",
+        isMandatory: false,
+        updatedAt: new Date().toISOString()
+      };
+      await robustSetDoc("app_config", "android_version", defaultConfig);
+      return res.json(defaultConfig);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/android-version", async (req, res) => {
+    try {
+      const { versionCode, versionName, downloadUrl, releaseNotes, isMandatory } = req.body;
+      const updatePayload = {
+        versionCode: Number(versionCode) || 1,
+        versionName: String(versionName || "1.0.0"),
+        downloadUrl: String(downloadUrl || ""),
+        releaseNotes: String(releaseNotes || "Melhorias de estabilidade e novas telas."),
+        isMandatory: Boolean(isMandatory),
+        updatedAt: new Date().toISOString()
+      };
+
+      await robustSetDoc("app_config", "android_version", updatePayload);
+      res.json({ success: true, message: "Versão do aplicativo Android atualizada com sucesso!", config: updatePayload });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get("/api/clients_list", async (req, res) => {
     try {
       let snapshot;
