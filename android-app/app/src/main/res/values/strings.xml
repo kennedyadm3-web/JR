@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">LeFrio Atendimento Técnico</string>
+    <string name="sync_status_synced">Todos os dados sincronizados</string>
+    <string name="sync_status_pending">Alterações pendentes de sincronização (Salvas localmente)</string>
+    <string name="sync_status_offline">Modo Offline ativo - Dados gravados com segurança no dispositivo</string>
+    <string name="os_status_aberta">Aberta</string>
+    <string name="os_status_em_andamento">Em Andamento</string>
+    <string name="os_status_pre_finalizada">Pré-Finalizada</string>
+    <string name="os_status_finalizada">Finalizada</string>
+</resources>
