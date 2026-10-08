@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Smartphone, Clock, Save, Check, Loader2, Sparkles, CheckSquare, Square, AlertCircle, Volume2, VolumeX, Play } from 'lucide-react';
+import { Smartphone, Clock, Save, Check, Loader2, Sparkles, CheckSquare, Square, AlertCircle, Volume2, VolumeX, Play, RefreshCw, Download, Rocket } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { dataService } from '../services/dataService';
 import { soundService } from '../services/soundService';
@@ -23,6 +23,15 @@ export default function DeviceSettingsView() {
   // Available technicians
   const [technicians, setTechnicians] = useState<Technician[]>([]);
 
+  // Estados de Controle do App Android
+  const [androidVersionCode, setAndroidVersionCode] = useState<number>(2);
+  const [androidVersionName, setAndroidVersionName] = useState<string>('1.0.1');
+  const [androidDownloadUrl, setAndroidDownloadUrl] = useState<string>('https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk');
+  const [androidReleaseNotes, setAndroidReleaseNotes] = useState<string>('Nova versão com checklist e fotos.');
+  const [androidIsMandatory, setAndroidIsMandatory] = useState<boolean>(false);
+  const [savingAndroid, setSavingAndroid] = useState<boolean>(false);
+  const [androidSuccess, setAndroidSuccess] = useState<string | null>(null);
+
   useEffect(() => {
     async function loadSettingsAndTechs() {
       setLoading(true);
@@ -45,6 +54,19 @@ export default function DeviceSettingsView() {
         }
         
         setTechnicians(techs || []);
+
+        // Carrega versão atual do Android
+        try {
+          const vResp = await fetch('/api/android-version');
+          if (vResp.ok) {
+            const vData = await vResp.json();
+            if (vData.versionCode) setAndroidVersionCode(vData.versionCode);
+            if (vData.versionName) setAndroidVersionName(vData.versionName);
+            if (vData.downloadUrl) setAndroidDownloadUrl(vData.downloadUrl);
+            if (vData.releaseNotes) setAndroidReleaseNotes(vData.releaseNotes);
+            if (vData.isMandatory !== undefined) setAndroidIsMandatory(vData.isMandatory);
+          }
+        } catch (_: any) {}
       } catch (err: any) {
         console.error('Erro ao carregar configurações de dispositivo:', err);
         setError('Ocorreu um erro ao carregar as configurações do sistema.');
@@ -55,6 +77,39 @@ export default function DeviceSettingsView() {
 
     loadSettingsAndTechs();
   }, []);
+
+  const handleSaveAndroidVersion = async (newCode?: number) => {
+    setSavingAndroid(true);
+    setAndroidSuccess(null);
+    try {
+      const targetCode = newCode !== undefined ? newCode : androidVersionCode;
+      const payload = {
+        versionCode: targetCode,
+        versionName: androidVersionName,
+        downloadUrl: androidDownloadUrl,
+        releaseNotes: androidReleaseNotes,
+        isMandatory: androidIsMandatory
+      };
+
+      const resp = await fetch('/api/android-version', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (resp.ok) {
+        if (newCode !== undefined) setAndroidVersionCode(newCode);
+        setAndroidSuccess(`Versão ${payload.versionName} (Build ${payload.versionCode}) liberada com sucesso! O celular já detectará a atualização.`);
+        setTimeout(() => setAndroidSuccess(null), 6000);
+      } else {
+        throw new Error('Falha ao salvar no servidor.');
+      }
+    } catch (e: any) {
+      alert('Erro ao atualizar versão: ' + e.message);
+    } finally {
+      setSavingAndroid(false);
+    }
+  };
 
   const handleToggleTech = (techName: string) => {
     setSelectedTechs(prev => 
@@ -376,6 +431,156 @@ export default function DeviceSettingsView() {
                 </p>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* PAINEL DE CONTROLE DE ATUALIZAÇÕES DO APP ANDROID (OTA) */}
+        <div className="bg-white rounded-2xl border border-gray-200/80 shadow-xs overflow-hidden transition-all hover:border-blue-200">
+          <div className="p-5 border-b border-gray-100 flex items-center justify-between bg-gradient-to-r from-blue-50/50 to-indigo-50/30">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-blue-600/10 text-blue-600 flex items-center justify-center">
+                <Smartphone className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-gray-900 tracking-tight flex items-center gap-2">
+                  Gerenciador de Atualizações do App Android
+                  <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-bold uppercase">
+                    OTA
+                  </span>
+                </h3>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  Controle a versão liberada para os celulares dos técnicos e realize testes rápidos.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleSaveAndroidVersion(androidVersionCode + 1)}
+                disabled={savingAndroid}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-xs transition"
+                title="Incrementa a versão em +1 no servidor para fazer o celular detectar atualização na hora!"
+              >
+                <Rocket className="w-3.5 h-3.5" />
+                <span>Simular Nova Versão (+1)</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="p-6 space-y-4">
+            {androidSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{androidSuccess}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Código da Versão Interna (versionCode)
+                </label>
+                <input
+                  type="number"
+                  value={androidVersionCode}
+                  onChange={(e) => setAndroidVersionCode(parseInt(e.target.value) || 1)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-semibold focus:border-blue-500 outline-none"
+                  placeholder="Ex: 2"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  O celular só atualiza se este número for <strong>maior</strong> do que o instalado no aparelho.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-700 mb-1">
+                  Nome da Versão Visível (versionName)
+                </label>
+                <input
+                  type="text"
+                  value={androidVersionName}
+                  onChange={(e) => setAndroidVersionName(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-semibold focus:border-blue-500 outline-none"
+                  placeholder="Ex: 1.0.1"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">
+                  Nome legível exibido para o técnico no aplicativo.
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-1">
+                Link Direto de Download do APK (downloadUrl)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={androidDownloadUrl}
+                  onChange={(e) => setAndroidDownloadUrl(e.target.value)}
+                  className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:border-blue-500 outline-none"
+                  placeholder="https://github.com/SEU-USER/JR/releases/latest/download/lefrio-atendimento.apk"
+                />
+                <button
+                  type="button"
+                  onClick={() => setAndroidDownloadUrl('https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk')}
+                  className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold"
+                  title="Usar link padrão do GitHub Releases"
+                >
+                  GitHub Padrão
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-1">
+                Notas da Versão (O que há de novo)
+              </label>
+              <textarea
+                value={androidReleaseNotes}
+                onChange={(e) => setAndroidReleaseNotes(e.target.value)}
+                rows={2}
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-xs focus:border-blue-500 outline-none"
+                placeholder="Ex: Adicionadas novas telas de despesas e relatórios PDF."
+              />
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="chk-mandatory"
+                  checked={androidIsMandatory}
+                  onChange={(e) => setAndroidIsMandatory(e.target.checked)}
+                  className="rounded text-blue-600 focus:ring-blue-500"
+                />
+                <label htmlFor="chk-mandatory" className="text-xs font-bold text-gray-700 cursor-pointer">
+                  Atualização Obrigatória (bloqueia uso até atualizar)
+                </label>
+              </div>
+
+              <div className="flex gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => handleSaveAndroidVersion(1)}
+                  disabled={savingAndroid}
+                  className="px-3 py-2 border border-gray-200 text-gray-600 hover:bg-gray-50 rounded-lg text-xs font-bold"
+                  title="Volta para versão 1 para testar o fluxo novamente"
+                >
+                  Resetar para v1
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSaveAndroidVersion()}
+                  disabled={savingAndroid}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-xs"
+                >
+                  {savingAndroid ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  <span>Salvar Versão</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

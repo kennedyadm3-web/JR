@@ -9,11 +9,13 @@ import com.lefrio.atendimento.data.local.dao.RouteExpenseDao
 import com.lefrio.atendimento.data.local.dao.ServiceOrderDao
 import com.lefrio.atendimento.data.local.dao.SyncQueueDao
 import com.lefrio.atendimento.data.local.dao.TechNotificationDao
+import com.lefrio.atendimento.data.local.dao.TechnicianDao
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.data.local.entity.RouteExpenseEntity
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.SyncQueueEntity
 import com.lefrio.atendimento.data.local.entity.TechNotificationEntity
+import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 
 @Database(
     entities = [
@@ -21,9 +23,10 @@ import com.lefrio.atendimento.data.local.entity.TechNotificationEntity
         EquipmentChecklistEntity::class,
         SyncQueueEntity::class,
         RouteExpenseEntity::class,
-        TechNotificationEntity::class
+        TechNotificationEntity::class,
+        TechnicianEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -33,6 +36,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun syncQueueDao(): SyncQueueDao
     abstract fun routeExpenseDao(): RouteExpenseDao
     abstract fun techNotificationDao(): TechNotificationDao
+    abstract fun technicianDao(): TechnicianDao
 
     companion object {
         @Volatile

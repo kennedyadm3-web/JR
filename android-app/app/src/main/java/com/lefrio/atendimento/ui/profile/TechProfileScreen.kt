@@ -38,6 +38,7 @@ fun TechProfileScreen(
     onBackClick: () -> Unit,
     onCheckUpdateClick: () -> Unit,
     onForceSyncClick: () -> Unit,
+    onSwitchTechClick: () -> Unit,
     onLogoutClick: () -> Unit
 ) {
     val context = LocalContext.current
@@ -320,7 +321,21 @@ fun TechProfileScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Botão Sair da Conta
+            // Botão Trocar Técnico (PIN)
+            Button(
+                onClick = onSwitchTechClick,
+                modifier = Modifier.fillMaxWidth().height(46.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = BluePrimary)
+            ) {
+                Icon(imageVector = Icons.Default.SwapHoriz, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(text = "TROCAR TÉCNICO (INFORMAR PIN)", fontWeight = FontWeight.Black, fontSize = 12.sp, color = Color.White)
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Botão Sair da Conta Base
             OutlinedButton(
                 onClick = onLogoutClick,
                 modifier = Modifier.fillMaxWidth().height(46.dp),
@@ -329,7 +344,7 @@ fun TechProfileScreen(
             ) {
                 Icon(imageVector = Icons.Default.ExitToApp, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(text = "SAIR DA CONTA (LOGOFF)", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFFDC2626))
+                Text(text = "SAIR DA CONTA (LOGOFF COMPLETO)", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color(0xFFDC2626))
             }
 
             Spacer(modifier = Modifier.height(20.dp))

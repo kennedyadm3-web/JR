@@ -372,6 +372,13 @@ async function startServer() {
       };
 
       await robustSetDoc("app_config", "android_version", updatePayload);
+
+      // Sincroniza também os arquivos estáticos de update-config.json
+      try {
+        fs.writeFileSync("update-config.json", JSON.stringify(updatePayload, null, 2));
+        fs.writeFileSync("public/update-config.json", JSON.stringify(updatePayload, null, 2));
+      } catch (_: any) {}
+
       res.json({ success: true, message: "Versão do aplicativo Android atualizada com sucesso!", config: updatePayload });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -398,6 +405,32 @@ async function startServer() {
     } catch (error: any) {
       console.error("List clients failed:", error.message);
       res.json([]); // Retorna array vazio em vez de erro para não quebrar o seletor no frontend
+    }
+  });
+
+  app.get("/api/technicians", async (req, res) => {
+    try {
+      let snapshot;
+      try {
+        snapshot = await dbAdmin.collection("technicians").get();
+      } catch (e: any) {
+        snapshot = await clientGetDocs(clientCollection(dbClient, "technicians"));
+      }
+      const list = snapshot.docs.map(d => {
+        const data = d.data();
+        return {
+          id: d.id,
+          name: data.name || "Técnico",
+          pin: (data.pin || "").toString().trim(),
+          email: data.email || null,
+          phone: data.phone || null,
+          active: data.active !== false
+        };
+      }).sort((a, b) => a.name.localeCompare(b.name));
+      res.json(list);
+    } catch (err: any) {
+      console.error("List technicians failed:", err.message);
+      res.status(500).json({ error: err.message });
     }
   });
   

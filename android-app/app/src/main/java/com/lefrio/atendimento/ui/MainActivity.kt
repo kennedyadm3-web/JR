@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 import com.lefrio.atendimento.ui.auth.AuthUiState
 import com.lefrio.atendimento.ui.auth.AuthViewModel
 import com.lefrio.atendimento.ui.auth.LoginScreen
+import com.lefrio.atendimento.ui.auth.TechnicianSelectScreen
 import com.lefrio.atendimento.ui.components.UpdateDialog
 import com.lefrio.atendimento.ui.dashboard.DashboardScreen
 import com.lefrio.atendimento.ui.dashboard.DashboardViewModel
@@ -119,8 +120,18 @@ class MainActivity : ComponentActivity() {
                                         dashboardViewModel.forceSync()
                                         Toast.makeText(this, "Sincronização iniciada com a nuvem!", Toast.LENGTH_SHORT).show()
                                     },
+                                    onSwitchTechClick = {
+                                        showProfileScreen = false
+                                        selectedOrderId = null
+                                        signatureOrderId = null
+                                        summaryOrderId = null
+                                        authViewModel.switchTechnician()
+                                    },
                                     onLogoutClick = {
                                         showProfileScreen = false
+                                        selectedOrderId = null
+                                        signatureOrderId = null
+                                        summaryOrderId = null
                                         authViewModel.logout()
                                     }
                                 )
@@ -202,10 +213,23 @@ class MainActivity : ComponentActivity() {
                                         showProfileScreen = true
                                     },
                                     onLogoutClick = {
-                                        authViewModel.logout()
+                                        authViewModel.switchTechnician()
                                     }
                                 )
                             }
+                        }
+
+                        is AuthUiState.NeedsTechnicianSelect -> {
+                            TechnicianSelectScreen(
+                                technicians = state.technicians,
+                                pinError = state.pinError,
+                                onValidatePin = { techId, pin ->
+                                    authViewModel.validatePin(techId, pin)
+                                },
+                                onLogoutClick = {
+                                    authViewModel.logout()
+                                }
+                            )
                         }
 
                         else -> {
