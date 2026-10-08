@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "926113928326",
+    "project_id": "ai-studio-applet-webapp-7d53b",
+    "storage_bucket": "ai-studio-applet-webapp-7d53b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:926113928326:android:b9f2918817a391c",
+        "android_client_info": {
+          "package_name": "com.lefrio.atendimento"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyChgoBhisOsMiF7NHrL73lgQYQy0SffZV8"
+        }
+      ],
+      "services": {}
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:926113928326:android:b9f2918817a391d",
+        "android_client_info": {
+          "package_name": "com.lefrio.atendimento.debug"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyChgoBhisOsMiF7NHrL73lgQYQy0SffZV8"
+        }
+      ],
+      "services": {}
+    }
+  ],
+  "configuration_version": "1"
+}
