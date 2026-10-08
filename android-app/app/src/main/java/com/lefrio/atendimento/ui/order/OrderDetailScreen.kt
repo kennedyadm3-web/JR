@@ -61,8 +61,9 @@ fun OrderDetailScreen(
         topBar = {
             TopAppBar(
                 title = {
+                    val isPrev = uiState.order?.type?.contains("PREVENTIVA", ignoreCase = true) == true
                     Text(
-                        text = "O.S. #${uiState.order?.osNumber ?: "..."}",
+                        text = if (isPrev) "Preventiva • ${uiState.order?.osNumber ?: "..."}" else "O.S. #${uiState.order?.osNumber ?: "..."}",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Black,
                         color = BluePrimary
@@ -136,6 +137,25 @@ fun OrderDetailScreen(
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
+                            // Badge do Tipo
+                            val isPrev = order.type.contains("PREVENTIVA", ignoreCase = true)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isPrev) Color(0xFFE0F2FE) else Color(0xFFF3E8FF))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp)
+                            ) {
+                                Text(
+                                    text = if (isPrev) "MANUTENÇÃO PREVENTIVA (PMOC)" else "ORDEM DE SERVIÇO",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = if (isPrev) Color(0xFF0369A1) else Color(0xFF6B21A8)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -156,7 +176,7 @@ fun OrderDetailScreen(
                                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                         modifier = Modifier.height(32.dp)
                                     ) {
-                                        Text(text = "INICIAR", fontSize = 10.sp, fontWeight = FontWeight.Black)
+                                        Text(text = "INICIAR ATENDIMENTO", fontSize = 10.sp, fontWeight = FontWeight.Black)
                                     }
                                 }
                             }

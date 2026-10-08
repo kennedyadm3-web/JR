@@ -24,7 +24,8 @@ import {
   FileText,
   Power,
   PowerOff,
-  Sparkles
+  Sparkles,
+  ArrowRight
 } from 'lucide-react';
 import { dataService, normalizeAddressText } from '../services/dataService';
 import { Client, Address, Technician, RouteConfiguration, TravelCard, Equipment, RouteType } from '../types';
@@ -735,7 +736,7 @@ export default function RegistrationView() {
     setConfirmModal({ id: client.id, type: 'client', name: client.name });
   };
 
-  const handleAddAddress = async () => {
+  const handleAddAddress = async (keepClientAndRoute: boolean = false) => {
     if (!newAddrStreet.trim()) {
       setMessage({ text: 'Por favor, informe a rua ou identificação do endereço.', type: 'error' });
       return;
@@ -772,32 +773,56 @@ export default function RegistrationView() {
     try {
       if (editingId) {
         await dataService.updateAddress(editingId, {
-          street: newAddrStreet.trim(),
+          street: newAddrStreet.trim().toUpperCase(),
           clientId: newAddrClientId,
-          route: newAddrRoute.trim(),
+          route: newAddrRoute.trim().toUpperCase(),
           totalMachines: newAddrMachines,
-          coordinates: newAddrCoordinates.trim(),
-          cep: newAddrCep.trim(),
+          coordinates: newAddrCoordinates.trim().toUpperCase(),
+          cep: newAddrCep.trim().toUpperCase(),
           status: newAddrStatus,
           active: newAddrStatus === 'active',
           isInactive: newAddrStatus === 'inactive'
         });
         setMessage({ text: 'Endereço atualizado com sucesso!', type: 'success' });
+        handleCancelEdit();
       } else {
         await dataService.addAddress({ 
-          street: newAddrStreet.trim(), 
+          street: newAddrStreet.trim().toUpperCase(), 
           clientId: newAddrClientId, 
-          route: newAddrRoute.trim(), 
+          route: newAddrRoute.trim().toUpperCase(), 
           totalMachines: newAddrMachines,
-          coordinates: newAddrCoordinates.trim(),
-          cep: newAddrCep.trim(),
+          coordinates: newAddrCoordinates.trim().toUpperCase(),
+          cep: newAddrCep.trim().toUpperCase(),
           status: newAddrStatus,
           active: newAddrStatus === 'active',
           isInactive: newAddrStatus === 'inactive'
         });
-        setMessage({ text: 'Endereço cadastrado com sucesso!', type: 'success' });
+
+        if (keepClientAndRoute) {
+          const preservedClient = newAddrClientId;
+          const preservedRoute = newAddrRoute;
+
+          // Limpa somente os campos específicos do endereço cadastrado
+          setEditingId(null);
+          setNewAddrStreet('');
+          setNewAddrMachines(0);
+          setNewAddrCoordinates('');
+          setNewAddrCep('');
+          setNewAddrStatus('active');
+
+          // Mantém preenchidos Cliente e Rota para o próximo endereço
+          setNewAddrClientId(preservedClient);
+          setNewAddrRoute(preservedRoute);
+
+          setMessage({ 
+            text: 'Endereço cadastrado com sucesso! Cliente e Rota permanecem preenchidos para você cadastrar o próximo com agilidade.', 
+            type: 'success' 
+          });
+        } else {
+          setMessage({ text: 'Endereço cadastrado com sucesso!', type: 'success' });
+          handleCancelEdit();
+        }
       }
-      handleCancelEdit();
       await loadData();
     } catch (error: any) {
       console.error('Error adding address:', error);
@@ -1216,9 +1241,9 @@ export default function RegistrationView() {
                 <input 
                   type="text"
                   value={newClientName}
-                  onChange={(e) => setNewClientName(e.target.value)}
-                  placeholder="Ex: Órgão Municipal A"
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
+                  onChange={(e) => setNewClientName(e.target.value.toUpperCase())}
+                  placeholder="Ex: ÓRGÃO MUNICIPAL A"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all uppercase font-medium"
                 />
               </div>
               <div>
@@ -1284,9 +1309,9 @@ export default function RegistrationView() {
                 <input 
                   type="text"
                   value={newAddrStreet}
-                  onChange={(e) => setNewAddrStreet(e.target.value)}
+                  onChange={(e) => setNewAddrStreet(e.target.value.toUpperCase())}
                   placeholder="Ex: Av. Central, 123 - Bloco B"
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 uppercase font-medium"
                 />
                 {(() => {
                   if (!newAddrStreet.trim() || !newAddrClientId) return null;
@@ -1313,7 +1338,7 @@ export default function RegistrationView() {
                 <select 
                   value={newAddrRoute}
                   onChange={(e) => setNewAddrRoute(e.target.value)}
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 uppercase"
                 >
                   <option value="">Selecione uma rota</option>
                   {availableRoutes.map(route => (
@@ -1339,9 +1364,9 @@ export default function RegistrationView() {
                 <input 
                   type="text"
                   value={newAddrCep}
-                  onChange={(e) => setNewAddrCep(e.target.value)}
+                  onChange={(e) => setNewAddrCep(e.target.value.toUpperCase())}
                   placeholder="Ex: 57035-250"
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 font-mono text-sm"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 font-mono text-sm uppercase"
                 />
               </div>
               <div>
@@ -1349,9 +1374,9 @@ export default function RegistrationView() {
                 <input 
                   type="text"
                   value={newAddrCoordinates}
-                  onChange={(e) => setNewAddrCoordinates(e.target.value)}
+                  onChange={(e) => setNewAddrCoordinates(e.target.value.toUpperCase())}
                   placeholder="Ex: -3.7319, -38.5267 ou link do Google Maps"
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 uppercase"
                 />
               </div>
               <div>
@@ -1386,16 +1411,51 @@ export default function RegistrationView() {
                 </div>
                 <p className="text-[10px] text-gray-400 mt-1">Endereços desabilitados deixam de aparecer no cronograma, mas permanecem no banco para auditorias.</p>
               </div>
-              <button 
-                onClick={handleAddAddress}
-                disabled={isSubmitting}
-                className={cn(
-                    "w-full disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all shadow-lg mt-2 flex items-center justify-center gap-2",
-                    editingId ? "bg-amber-600 hover:bg-amber-700 shadow-amber-200" : "bg-blue-600 hover:bg-blue-700 shadow-blue-200"
-                  )}
-              >
-                {isSubmitting ? (editingId ? 'Atualizando...' : 'Cadastrando...') : (editingId ? 'Salvar Alterações' : 'Cadastrar Endereço')}
-              </button>
+
+              <div className="pt-2">
+                {editingId ? (
+                  <div className="flex items-center gap-2">
+                    <button 
+                      type="button"
+                      onClick={() => handleAddAddress(false)}
+                      disabled={isSubmitting}
+                      className="flex-1 disabled:opacity-50 text-white font-bold py-3 px-4 rounded-xl transition-all shadow-lg bg-amber-600 hover:bg-amber-700 shadow-amber-200 flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      {isSubmitting ? 'Atualizando...' : 'Salvar Alterações'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelEdit}
+                      disabled={isSubmitting}
+                      className="px-4 py-3 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold rounded-xl transition-all cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2.5">
+                    <button 
+                      type="button"
+                      onClick={() => handleAddAddress(false)}
+                      disabled={isSubmitting}
+                      className="flex-1 disabled:opacity-50 text-white font-bold py-3.5 px-3 rounded-xl transition-all shadow-lg bg-blue-600 hover:bg-blue-700 shadow-blue-200 flex items-center justify-center gap-2 cursor-pointer text-sm"
+                    >
+                      <Check className="w-4 h-4 shrink-0" />
+                      <span>{isSubmitting ? 'Cadastrando...' : 'Cadastrar Endereço'}</span>
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => handleAddAddress(true)}
+                      disabled={isSubmitting}
+                      title="Salva este endereço e mantém o Cliente e Rota selecionados para o próximo cadastro"
+                      className="flex-1 disabled:opacity-50 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 px-3 rounded-xl transition-all shadow-lg shadow-emerald-200 flex items-center justify-center gap-2 cursor-pointer text-sm"
+                    >
+                      <span>Próximo</span>
+                      <ArrowRight className="w-4 h-4 shrink-0" />
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
