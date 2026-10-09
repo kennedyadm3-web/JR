@@ -283,7 +283,7 @@ export default function ServiceCallsView({ managerClientId, userRole, userProfil
       const matchesStatus = statusFilter === 'all' || c.status === statusFilter;
       
       const address = addresses.find(a => a.id === c.addressId);
-      const routeName = address ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') : 'Sem Rota';
+      const routeName = address ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.id || routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') : 'Sem Rota';
       const matchesRoute = routeFilter === 'all' || routeName === routeFilter;
       
       return matchesSearch && matchesStatus && matchesRoute;
@@ -544,7 +544,7 @@ export default function ServiceCallsView({ managerClientId, userRole, userProfil
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredCalls.map(call => {
             const address = addresses.find(a => a.id === call.addressId);
-            const routeName = address ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') : 'Sem Rota';
+            const routeName = address ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.id || routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') : 'Sem Rota';
             
             return (
               <div key={call.id} className="bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md transition-all group overflow-hidden flex flex-col">
@@ -772,7 +772,7 @@ export default function ServiceCallsView({ managerClientId, userRole, userProfil
             <tbody className="divide-y divide-gray-100">
               {filteredCalls.map(call => {
                 const address = addresses.find(a => a.id === call.addressId);
-                const routeName = address ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') : 'Sem Rota';
+                const routeName = address ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.id || routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') : 'Sem Rota';
                 
                 return (
                   <tr key={call.id} className="hover:bg-gray-50/50 transition-colors">

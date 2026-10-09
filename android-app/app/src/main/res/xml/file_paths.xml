@@ -7,4 +7,7 @@
     <external-path name="external_storage" path="." />
     <cache-path name="cache" path="." />
     <cache-path name="cache_apk" path="apk" />
+    <cache-path name="updates_cache" path="updates" />
+    <files-path name="updates_files" path="updates" />
+    <files-path name="all_internal_files" path="." />
 </paths>

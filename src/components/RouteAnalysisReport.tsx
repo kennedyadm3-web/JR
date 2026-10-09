@@ -31,7 +31,7 @@ export function RouteAnalysisReport({ managerClientId }: { managerClientId?: str
     localStorage.setItem('route_analysis_hide_capital', String(checked));
     
     if (checked && selectedRoute !== 'ALL') {
-      const config = routeConfigs.find(rc => rc.routeName === selectedRoute);
+      const config = routeConfigs.find(rc => rc.id === selectedRoute || rc.routeName === selectedRoute);
       const isCapital = config ? (config.type === RouteType.VARIABLE) : true;
       const isTemp = records.some(r => r.isTemporaryRoute && r.temporaryRouteName === selectedRoute);
       if (isCapital && !isTemp) {
@@ -160,7 +160,7 @@ export function RouteAnalysisReport({ managerClientId }: { managerClientId?: str
 
       // Fallback para os técnicos cadastrados na configuração da rota se a lista estiver vazia
       if (!g.technicians || g.technicians.length === 0) {
-        const config = routeConfigs.find(rc => rc.routeName === g.routeName);
+        const config = routeConfigs.find(rc => rc.id === g.routeName || rc.routeName === g.routeName);
         if (config) {
           g.technicians = [config.technician1, config.technician2].filter((t): t is string => !!t);
         }
@@ -172,7 +172,7 @@ export function RouteAnalysisReport({ managerClientId }: { managerClientId?: str
     // Filtro Capital
     if (hideCapital) {
       result = result.filter(g => {
-        const config = routeConfigs.find(rc => rc.routeName === g.routeName);
+        const config = routeConfigs.find(rc => rc.id === g.routeName || rc.routeName === g.routeName);
         if (config) {
           return config.type !== RouteType.VARIABLE;
         }
@@ -214,7 +214,7 @@ export function RouteAnalysisReport({ managerClientId }: { managerClientId?: str
     addresses.forEach(a => {
       if (a.route) {
         if (hideCapital) {
-          const config = routeConfigs.find(rc => rc.routeName === a.route);
+          const config = routeConfigs.find(rc => rc.id === a.route || rc.routeName === a.route);
           if (config && config.type === RouteType.VARIABLE) return;
           if (!config) return; // se não tem config e está no endereço, assume Capital padrão
         }

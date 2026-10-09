@@ -634,11 +634,25 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const routeStats = useMemo(() => {
     const groups: Record<string, RouteGroup> = {};
 
-    // 1. Initialize groups from addresses (ensures existing routes show up even without records)
+    // 0. Inicializar grupos a partir de todas as configurações de rotas cadastradas (routeConfigs)
+    // Garante que rotas recém-criadas ou rotas com 0 endereços/registros apareçam na tela!
+    routeConfigs.forEach(rc => {
+      const routeName = rc.id || rc.routeName;
+      if (routeName && !groups[routeName]) {
+        groups[routeName] = {
+          records: [],
+          status: 'pending',
+          config: rc
+        };
+      }
+    });
+
+    // 1. Inicializar ou vincular grupos a partir dos endereços
     addresses.forEach(addr => {
-      const routeName = addr.route || 'Sem Rota';
+      const rawRoute = addr.route || 'Sem Rota';
+      const config = routeConfigs.find(rc => rc.id === rawRoute || rc.routeName === rawRoute || (rc.routeNumber && rc.routeNumber.trim() === rawRoute.trim()));
+      const routeName = config ? (config.id || config.routeName) : rawRoute;
       if (!groups[routeName]) {
-        const config = routeConfigs.find(rc => rc.id === routeName);
         groups[routeName] = {
           records: [],
           status: 'pending',
@@ -652,7 +666,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       }
     });
 
-    // 2. Fill groups with records
+    // 2. Preencher grupos com registros
     records.forEach(r => {
       const isTemp = r.isTemporaryRoute;
       const isRealAddress = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
@@ -661,8 +675,9 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
       const addr = realAddr || (isTemp ? undefined : addresses.find(a => a.id === r.addressId));
       const client = realClient || (isTemp ? undefined : clients.find(c => c.id === addr?.clientId));
-      const routeName = r.assignedRoute || (isTemp ? (r.temporaryRouteName || 'Rota Temp. Indefinida') : (addr?.route || 'Sem Rota'));
-      const config = routeConfigs.find(rc => rc.id === routeName);
+      const rawRouteName = r.assignedRoute || (isTemp ? (r.temporaryRouteName || 'Rota Temp. Indefinida') : (addr?.route || 'Sem Rota'));
+      const config = routeConfigs.find(rc => rc.id === rawRouteName || rc.routeName === rawRouteName || (rc.routeNumber && rc.routeNumber.trim() === rawRouteName.trim()));
+      const routeName = config ? (config.id || config.routeName) : rawRouteName;
 
       if (!groups[routeName]) {
         groups[routeName] = { 
@@ -767,8 +782,9 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       const rawRouteName = p.routeName || '';
       if (!rawRouteName.trim()) return;
 
-      // Find matching route name (exact or case-insensitive)
-      let routeName = rawRouteName;
+      // Find matching route name (exact, by config, or case-insensitive)
+      const config = routeConfigs.find(rc => rc.id === rawRouteName || rc.routeName === rawRouteName);
+      let routeName = config ? (config.id || config.routeName) : rawRouteName;
       if (!validNames.has(routeName)) {
         const found = Array.from(validNames).find(vn => vn.trim().toLowerCase() === rawRouteName.trim().toLowerCase());
         if (found) {
@@ -780,7 +796,6 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       }
 
       if (!groups[routeName]) {
-        const config = routeConfigs.find(rc => rc.id === routeName || rc.routeName === routeName);
         groups[routeName] = {
           records: [],
           status: 'pending',
@@ -863,35 +878,47 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       .filter(([_, data]) => {
         if (hideVariableRoutes && data.config.type === RouteType.VARIABLE) return false;
         // REGRA MANDATÓRIA: Rota temporária é EXCLUSIVA do mês em que foi criada e possui registros.
-        // Ao mudar de mês ou se não houver registros, ela não se replica nem aparece em outros meses!
-        if (data.config.type === RouteType.TEMPORARY && data.records.length === 0) return false;
+        // Ao mudar de mês ou se não houver registros nem planejamento no mês atual, oculta rota temporária
+        if (data.config.type === RouteType.TEMPORARY && data.records.length === 0) {
+          const hasPlanningInMonth = Boolean(data.plannedDate || data.routeNotes || (data.routeCostItems && data.routeCostItems.length > 0));
+          if (!hasPlanningInMonth) return false;
+        }
         return true;
       })
-      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true }));
   }, [routeStats, hideVariableRoutes]);
 
   const sortedAddresses = useMemo(() => {
     if (!addressSelectionModal.isOpen) return [];
     
     const currentRouteName = addressSelectionModal.routeName;
+    const currentConfig = routeConfigs.find(c => c.id === currentRouteName || c.routeName === currentRouteName);
     
     // Obter IDs de endereços de outras rotas já vinculados a esta rota para este mês
     const assignedAddressIds = new Set(
       records
-        .filter(r => r.month === month && r.assignedRoute === currentRouteName)
+        .filter(r => r.month === month && (
+          r.assignedRoute === currentRouteName || 
+          r.temporaryRouteName === currentRouteName ||
+          (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName))
+        ))
         .map(r => r.addressId)
     );
     
     let baseAddresses = addresses;
     if (!showOtherRoutes) {
-      baseAddresses = addresses.filter(a => 
-        (a.route || 'Sem Rota') === currentRouteName || 
-        assignedAddressIds.has(a.id)
-      );
+      baseAddresses = addresses.filter(a => {
+        const belongsToCurrent = (a.route || 'Sem Rota') === currentRouteName || 
+          (currentConfig && (a.route === currentConfig.id || a.route === currentConfig.routeName)) ||
+          assignedAddressIds.has(a.id);
+        return belongsToCurrent;
+      });
     } else {
       // Quando "Incluir outras rotas" está ativo, ocultamos endereços cujas rotas originais sejam "Capital" (RouteType.VARIABLE)
       baseAddresses = addresses.filter(a => {
-        const belongsToCurrent = (a.route || 'Sem Rota') === currentRouteName || assignedAddressIds.has(a.id);
+        const belongsToCurrent = (a.route || 'Sem Rota') === currentRouteName || 
+          (currentConfig && (a.route === currentConfig.id || a.route === currentConfig.routeName)) ||
+          assignedAddressIds.has(a.id);
         if (belongsToCurrent) return true;
         
         if (a.route) {
@@ -1139,7 +1166,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const printControlRoutes = useMemo(() => {
     return (Object.entries(routeStats) as [string, RouteGroup][])
       .filter(([_, data]) => data.config.type !== RouteType.VARIABLE)
-      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR'));
+      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true }));
   }, [routeStats]);
 
   const printControlFinancialSummary = useMemo(() => {
@@ -1338,10 +1365,12 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const handleSetRouteColor = async (routeName: string, color: string) => updateRouteRecords(routeName, { routeColor: color });
 
   const handleSetRouteType = async (routeName: string, type: RouteType) => {
-    const existingConfig = routeConfigs.find(rc => rc.id === routeName);
+    const existingConfig = routeConfigs.find(rc => rc.id === routeName || rc.routeName === routeName);
     const newConfig: RouteConfiguration = {
+      ...existingConfig,
       id: routeName,
-      routeName,
+      routeNumber: existingConfig?.routeNumber || (routeName.includes('-') ? routeName.split('-')[0].trim() : undefined),
+      routeName: existingConfig?.routeName || routeName,
       type,
       technician1: existingConfig?.technician1,
       technician2: existingConfig?.technician2,
@@ -1349,16 +1378,18 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
     };
     await dataService.upsertRouteConfig(newConfig);
     setRouteConfigs(prev => {
-      const other = prev.filter(p => p.id !== routeName);
+      const other = prev.filter(p => p.id !== routeName && p.routeName !== routeName);
       return [...other, newConfig];
     });
   };
 
   const handleSetRouteTechnicians = async (routeName: string, t1?: string, t2?: string) => {
-    const existingConfig = routeConfigs.find(rc => rc.id === routeName);
+    const existingConfig = routeConfigs.find(rc => rc.id === routeName || rc.routeName === routeName);
     const newConfig: RouteConfiguration = {
+      ...existingConfig,
       id: routeName,
-      routeName,
+      routeNumber: existingConfig?.routeNumber || (routeName.includes('-') ? routeName.split('-')[0].trim() : undefined),
+      routeName: existingConfig?.routeName || routeName,
       type: existingConfig?.type || RouteType.VARIABLE,
       technician1: t1,
       technician2: t2,
@@ -1366,7 +1397,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
     };
     await dataService.upsertRouteConfig(newConfig);
     setRouteConfigs(prev => {
-      const other = prev.filter(p => p.id !== routeName);
+      const other = prev.filter(p => p.id !== routeName && p.routeName !== routeName);
       return [...other, newConfig];
     });
 
@@ -1532,6 +1563,10 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
            }
         });
         await Promise.all(promises);
+      }
+      
+      if (routeModal.type === RouteType.VARIABLE && hideVariableRoutes) {
+        setHideVariableRoutes(false);
       }
       
       await loadData();
@@ -2275,6 +2310,22 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
         </div>
       </div>
 
+      {hideVariableRoutes && (
+        <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-900 font-bold animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <EyeOff className="w-4 h-4 text-amber-600 shrink-0" />
+            <span>Filtro de Capital ativo: as rotas categorizadas como "Capital" estão ocultas nesta visualização.</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setHideVariableRoutes(false)}
+            className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition-all shrink-0 cursor-pointer shadow-xs"
+          >
+            Mostrar Todas as Rotas
+          </button>
+        </div>
+      )}
+
       {viewMode === 'list' ? (
         <div className="grid grid-cols-1 gap-4">
           {displayRoutes.map(([name, data]) => (
@@ -2294,7 +2345,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                 onSetTechnicians={handleSetRouteTechnicians}
                 onOpenCostCalculator={(name) => setCostCalculatorModal({ isOpen: true, routeName: name })}
                 onEdit={(name) => {
-                  const config = routeConfigs.find(c => c.id === name);
+                  const config = routeConfigs.find(c => c.id === name || c.routeName === name);
                   const isTemp = config?.type === RouteType.TEMPORARY;
                   const tempAddresses = isTemp ? data.records.map(r => {
                     const isReal = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
@@ -2331,7 +2382,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                 userRole={userRole}
                 addressesCount={data.records.length}
                 onOpenAddressSelection={(name) => {
-                  const config = routeConfigs.find(c => c.id === name);
+                  const config = routeConfigs.find(c => c.id === name || c.routeName === name);
                   if (config?.type === RouteType.TEMPORARY) {
                     const tempAddresses = data.records.map(r => {
                       const isReal = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));

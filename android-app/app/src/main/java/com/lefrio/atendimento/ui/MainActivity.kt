@@ -38,6 +38,17 @@ class MainActivity : ComponentActivity() {
     private val dashboardViewModel: DashboardViewModel by viewModels()
     private val notificationsViewModel: NotificationsViewModel by viewModels()
     private lateinit var updateManager: AppUpdateManager
+    private var pendingInstallAfterPermission = false
+
+    override fun onResume() {
+        super.onResume()
+        if (pendingInstallAfterPermission) {
+            pendingInstallAfterPermission = false
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+                updateManager.installDownloadedApk()
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,7 +74,10 @@ class MainActivity : ComponentActivity() {
 
                     fun triggerCheckUpdate(manual: Boolean = false) {
                         scope.launch {
-                            val info = updateManager.checkForUpdates()
+                            if (manual) {
+                                updateManager.clearDismissedUpdate()
+                            }
+                            val info = updateManager.checkForUpdates(isManualCheck = manual)
                             if (info.isAvailable) {
                                 updateInfo = info
                             } else if (manual) {
@@ -81,27 +95,29 @@ class MainActivity : ComponentActivity() {
                         triggerCheckUpdate(manual = false)
                     }
 
-                    // Diálogo de atualização in-app
+                    // Diálogo de atualização in-app aprimorado
                     updateInfo?.let { info ->
                         UpdateDialog(
                             updateInfo = info,
-                            onStartDownload = { onCompleted ->
-                                updateManager.startDownloadAndInstall(
-                                    downloadUrl = info.downloadUrl,
-                                    onDownloadStarted = {
-                                        Toast.makeText(
-                                            this@MainActivity,
-                                            "Iniciando download da versão ${info.latestVersionName}...",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    },
-                                    onDownloadCompleted = onCompleted
-                                )
+                            onStartDownload = { onProgress, onCompleted, onError ->
+                                scope.launch {
+                                    val result = updateManager.downloadApkDirectly(
+                                        downloadUrl = info.downloadUrl,
+                                        onProgress = onProgress
+                                    )
+                                    result.onSuccess {
+                                        onCompleted()
+                                        updateManager.installDownloadedApk(onNeedPermission = { pendingInstallAfterPermission = true })
+                                    }.onFailure { ex ->
+                                        onError(ex.message ?: "Falha no download da atualização.")
+                                    }
+                                }
                             },
                             onInstallNowClick = {
-                                updateManager.installDownloadedApk()
+                                updateManager.installDownloadedApk(onNeedPermission = { pendingInstallAfterPermission = true })
                             },
                             onDismissRequest = {
+                                updateManager.markUpdateDismissed(info.latestVersionCode)
                                 updateInfo = null
                             }
                         )

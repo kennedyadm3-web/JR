@@ -334,6 +334,29 @@ async function startServer() {
     }
   });
 
+  // Debug Routes endpoint
+  app.get("/api/debug-routes", async (req, res) => {
+    try {
+      const snap = await clientGetDocs(clientCollection(dbClient, "routeConfigurations"));
+      const configs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+      const addrSnap = await clientGetDocs(clientCollection(dbClient, "addresses"));
+      const addrRoutes = new Set();
+      addrSnap.docs.forEach(d => {
+        const r = d.data().route;
+        if (r) addrRoutes.add(r);
+      });
+
+      res.json({
+        totalConfigs: configs.length,
+        configs,
+        addressesRoutes: Array.from(addrRoutes)
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Endpoints para controle de atualização do Aplicativo Android
   app.get("/api/android-version", async (req, res) => {
     try {

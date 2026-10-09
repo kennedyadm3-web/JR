@@ -1076,9 +1076,9 @@ export default function RegistrationView() {
   const totalMachinesCount = addresses.reduce((acc, curr) => acc + (curr.totalMachines || 0), 0);
 
   const availableRoutes = Array.from(new Set([
-    ...routeConfigs.map(rc => rc.routeName),
+    ...routeConfigs.map(rc => rc.id || rc.routeName),
     ...addresses.map(a => a.route)
-  ])).filter(Boolean).sort();
+  ])).filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR', { numeric: true }));
 
   return (
     <div className="flex flex-col h-full gap-6">
