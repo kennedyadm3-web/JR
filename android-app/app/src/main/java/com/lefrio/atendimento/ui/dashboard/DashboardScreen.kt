@@ -436,9 +436,12 @@ fun DashboardScreen(
                     contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp)
                 ) {
                     itemsIndexed(uiState.filteredOrders, key = { _, item -> item.id }) { index, order ->
+                        val progress = uiState.progressMap[order.id]
                         ServiceOrderCard(
                             order = order,
                             stopIndex = index + 1,
+                            completedMachines = progress?.first ?: 0,
+                            totalMachines = progress?.second ?: 0,
                             onClick = { onOrderClick(order.id) }
                         )
                     }

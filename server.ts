@@ -368,10 +368,10 @@ async function startServer() {
 
       // Configuração padrão se ainda não existir
       const defaultConfig = {
-        versionCode: 1,
-        versionName: "1.0.0",
+        versionCode: 12,
+        versionName: "1.2.0",
         downloadUrl: "https://ais-dev-ar7bordx5nsnyiemayswdy-507910401461.us-west2.run.app/android-app.zip",
-        releaseNotes: "Versão inicial com checklist e fotos.",
+        releaseNotes: "Nova versão 1.2.0: Barrinha de progresso de máquinas na tela inicial, preservação garantida de checklist offline e correções de sincronização.",
         isMandatory: false,
         updatedAt: new Date().toISOString()
       };

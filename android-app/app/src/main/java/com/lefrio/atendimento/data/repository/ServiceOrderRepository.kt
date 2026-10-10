@@ -35,6 +35,9 @@ class ServiceOrderRepository(private val context: Context) {
 
     fun getAllOrders(): Flow<List<ServiceOrderEntity>> = orderDao.getAllOrdersFlow()
 
+    fun getAllOrdersProgress(): Flow<List<com.lefrio.atendimento.data.local.dao.OrderChecklistProgress>> =
+        checklistDao.getAllOrdersProgressFlow()
+
     fun getOrderById(orderId: String): Flow<ServiceOrderEntity?> = orderDao.getOrderByIdFlow(orderId)
 
     fun getChecklistForOrder(orderId: String): Flow<List<EquipmentChecklistEntity>> =

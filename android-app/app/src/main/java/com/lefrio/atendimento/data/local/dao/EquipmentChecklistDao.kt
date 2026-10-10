@@ -4,8 +4,24 @@ import androidx.room.*
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import kotlinx.coroutines.flow.Flow
 
+data class OrderChecklistProgress(
+    val orderId: String,
+    val totalCount: Int,
+    val completedCount: Int
+)
+
 @Dao
 interface EquipmentChecklistDao {
+
+    @Query("""
+        SELECT 
+            orderId, 
+            COUNT(*) as totalCount, 
+            SUM(CASE WHEN isChecked = 1 OR isSkipped = 1 THEN 1 ELSE 0 END) as completedCount 
+        FROM equipment_checklists 
+        GROUP BY orderId
+    """)
+    fun getAllOrdersProgressFlow(): Flow<List<OrderChecklistProgress>>
 
     @Query("SELECT * FROM equipment_checklists WHERE orderId = :orderId ORDER BY equipmentName ASC")
     fun getChecklistForOrderFlow(orderId: String): Flow<List<EquipmentChecklistEntity>>

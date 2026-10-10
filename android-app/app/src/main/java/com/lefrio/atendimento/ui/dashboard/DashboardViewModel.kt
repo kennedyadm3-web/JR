@@ -17,6 +17,7 @@ import java.util.Locale
 data class DashboardUiState(
     val orders: List<ServiceOrderEntity> = emptyList(),
     val filteredOrders: List<ServiceOrderEntity> = emptyList(),
+    val progressMap: Map<String, Pair<Int, Int>> = emptyMap(),
     val selectedFilter: String = "TODAS", // "TODAS", "PREVENTIVAS", "ORDENS", "aberta", "finalizada"
     val searchQuery: String = "",
     val isOnline: Boolean = true,
@@ -60,6 +61,14 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             db.syncQueueDao().getPendingTasksCountFlow().collect { count ->
                 _uiState.update { it.copy(pendingSyncCount = count) }
+            }
+        }
+
+        // Observa progresso do checklist por O.S. (máquinas atendidas)
+        viewModelScope.launch {
+            repository.getAllOrdersProgress().collect { progressList ->
+                val map = progressList.associate { it.orderId to Pair(it.completedCount, it.totalCount) }
+                _uiState.update { it.copy(progressMap = map) }
             }
         }
 

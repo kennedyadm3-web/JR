@@ -23,6 +23,8 @@ import com.lefrio.atendimento.ui.theme.*
 fun ServiceOrderCard(
     order: ServiceOrderEntity,
     stopIndex: Int? = null,
+    completedMachines: Int = 0,
+    totalMachines: Int = 0,
     onClick: () -> Unit
 ) {
     val isPreventive = order.type.contains("PREVENTIVA", ignoreCase = true)
@@ -172,6 +174,56 @@ fun ServiceOrderCard(
                             lineHeight = 15.sp
                         )
                     }
+                }
+            }
+
+            // Barrinha de Progresso do Atendimento de Máquinas no Endereço
+            if (totalMachines > 0) {
+                Spacer(modifier = Modifier.height(10.dp))
+                val progressFraction = (completedMachines.toFloat() / totalMachines.toFloat()).coerceIn(0f, 1f)
+                val percentageInt = (progressFraction * 100).toInt()
+
+                val (barColor, barBg) = when {
+                    completedMachines >= totalMachines -> Pair(Color(0xFF059669), Color(0xFFDCFCE7))
+                    completedMachines > 0 -> Pair(Color(0xFFD97706), Color(0xFFFEF3C7))
+                    else -> Pair(BluePrimary, Color(0xFFEFF6FF))
+                }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(barBg)
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Máquinas Atendidas no Local:",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF334155)
+                        )
+                        Text(
+                            text = "$completedMachines de $totalMachines ($percentageInt%)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            color = barColor
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(5.dp))
+                    LinearProgressIndicator(
+                        progress = { progressFraction },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = barColor,
+                        trackColor = Color.White.copy(alpha = 0.7f)
+                    )
                 }
             }
 
