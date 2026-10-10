@@ -10,6 +10,9 @@ interface ServiceOrderDao {
     @Query("SELECT * FROM service_orders ORDER BY plannedDate ASC, lastModifiedAt DESC")
     fun getAllOrdersFlow(): Flow<List<ServiceOrderEntity>>
 
+    @Query("SELECT * FROM service_orders ORDER BY plannedDate ASC, lastModifiedAt DESC")
+    suspend fun getAllOrders(): List<ServiceOrderEntity>
+
     @Query("SELECT * FROM service_orders WHERE id = :orderId LIMIT 1")
     suspend fun getOrderById(orderId: String): ServiceOrderEntity?
 
