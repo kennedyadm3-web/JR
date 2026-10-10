@@ -80,10 +80,16 @@ class OrderDetailViewModel(
 
     fun updateFiscalName(name: String) {
         _uiState.update { it.copy(fiscalName = name) }
+        viewModelScope.launch {
+            repository.saveFiscalDraft(orderId, name, _uiState.value.fiscalDoc)
+        }
     }
 
     fun updateFiscalDoc(doc: String) {
         _uiState.update { it.copy(fiscalDoc = doc) }
+        viewModelScope.launch {
+            repository.saveFiscalDraft(orderId, _uiState.value.fiscalName, doc)
+        }
     }
 
     fun updateHasSignature(hasSig: Boolean) {

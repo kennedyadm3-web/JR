@@ -33,6 +33,20 @@ interface ServiceOrderDao {
 
     @Query("""
         UPDATE service_orders SET 
+            clientRepresentative = :fiscalName,
+            clientSigneeDoc = :fiscalDoc,
+            lastModifiedAt = :timestamp
+        WHERE id = :orderId
+    """)
+    suspend fun updateFiscalDraft(
+        orderId: String,
+        fiscalName: String,
+        fiscalDoc: String,
+        timestamp: Long = System.currentTimeMillis()
+    )
+
+    @Query("""
+        UPDATE service_orders SET 
             clientRepresentative = :signeeName,
             clientSigneeDoc = :signeeDoc,
             clientSignatureDate = :signatureDate,

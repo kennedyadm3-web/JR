@@ -179,11 +179,12 @@ class ServiceOrderRepository(private val context: Context) {
                                 val totalMac = addrObj?.optInt("totalMachines", 4) ?: 4
                                 val count = if (totalMac > 0) totalMac else 4
                                 for (m in 1..count) {
+                                    val eqId = "EQ_${recId}_$m"
                                     checklistToSave.add(
                                         EquipmentChecklistEntity(
-                                            id = UUID.randomUUID().toString(),
+                                            id = "CHECK_${orderId}_${eqId}",
                                             orderId = orderId,
-                                            equipmentId = "EQ_${recId}_$m",
+                                            equipmentId = eqId,
                                             equipmentName = "Ar Condicionado Split #0$m",
                                             equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
                                             equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
@@ -352,11 +353,12 @@ class ServiceOrderRepository(private val context: Context) {
                         val totalMachines = addrDoc?.getLong("totalMachines")?.toInt() ?: 4
                         val count = if (totalMachines > 0) totalMachines else 4
                         for (m in 1..count) {
+                            val eqId = "EQ_${doc.id}_$m"
                             checklistToSave.add(
                                 EquipmentChecklistEntity(
-                                    id = UUID.randomUUID().toString(),
+                                    id = "CHECK_${orderId}_${eqId}",
                                     orderId = orderId,
-                                    equipmentId = "EQ_${doc.id}_$m",
+                                    equipmentId = eqId,
                                     equipmentName = "Ar Condicionado Split #0$m",
                                     equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
                                     equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
@@ -428,10 +430,12 @@ class ServiceOrderRepository(private val context: Context) {
             for (i in checklistToSave.indices) {
                 val incoming = checklistToSave[i]
                 val existing = checklistDao.getChecklistById(incoming.id)
+                    ?: checklistDao.getChecklistByOrderAndEquipment(incoming.orderId, incoming.equipmentId)
                 if (existing != null) {
                     val isLocallyModified = existing.isChecked || existing.isSkipped || existing.notes.isNotBlank() || existing.localPhotoPathsJson != "[]" || !existing.isSynced
                     if (isLocallyModified) {
                         checklistToSave[i] = incoming.copy(
+                            id = existing.id,
                             isChecked = existing.isChecked,
                             isSkipped = existing.isSkipped,
                             notes = existing.notes,
@@ -648,6 +652,14 @@ class ServiceOrderRepository(private val context: Context) {
         )
 
         SyncWorker.triggerImmediateSync(context)
+    }
+
+    /**
+     * Salva o rascunho dos dados do fiscal (Nome e Matrícula/CPF) imediatamente no Room.
+     * Garante que caso o usuário volte para a tela inicial, nada seja perdido.
+     */
+    suspend fun saveFiscalDraft(orderId: String, fiscalName: String, fiscalDoc: String) = withContext(Dispatchers.IO) {
+        orderDao.updateFiscalDraft(orderId, fiscalName, fiscalDoc)
     }
 
     /**

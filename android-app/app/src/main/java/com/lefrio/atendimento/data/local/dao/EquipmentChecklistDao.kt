@@ -16,6 +16,9 @@ interface EquipmentChecklistDao {
     @Query("SELECT * FROM equipment_checklists WHERE id = :id LIMIT 1")
     suspend fun getChecklistById(id: String): EquipmentChecklistEntity?
 
+    @Query("SELECT * FROM equipment_checklists WHERE orderId = :orderId AND equipmentId = :equipmentId LIMIT 1")
+    suspend fun getChecklistByOrderAndEquipment(orderId: String, equipmentId: String): EquipmentChecklistEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdate(item: EquipmentChecklistEntity)
 

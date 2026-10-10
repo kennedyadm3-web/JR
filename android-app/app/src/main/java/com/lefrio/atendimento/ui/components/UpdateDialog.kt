@@ -175,7 +175,7 @@ fun UpdateDialog(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             LinearProgressIndicator(
-                                progress = { downloadProgress },
+                                progress = downloadProgress,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(8.dp)

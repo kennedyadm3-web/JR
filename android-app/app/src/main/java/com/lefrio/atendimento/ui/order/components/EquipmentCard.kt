@@ -319,32 +319,50 @@ fun EquipmentCard(
                     ChecklistRowItem(
                         label = "Limpeza de filtros e bandeja de condensado",
                         checked = checkFiltros,
-                        onCheckedChange = { checkFiltros = it }
+                        onCheckedChange = {
+                            checkFiltros = it
+                            if (it && !item.isChecked) onToggleAttend()
+                        }
                     )
                     ChecklistRowItem(
                         label = "Higienização da serpentina evaporadora",
                         checked = checkSerpentina,
-                        onCheckedChange = { checkSerpentina = it }
+                        onCheckedChange = {
+                            checkSerpentina = it
+                            if (it && !item.isChecked) onToggleAttend()
+                        }
                     )
                     ChecklistRowItem(
                         label = "Inspeção do dreno e teste de escoamento",
                         checked = checkDreno,
-                        onCheckedChange = { checkDreno = it }
+                        onCheckedChange = {
+                            checkDreno = it
+                            if (it && !item.isChecked) onToggleAttend()
+                        }
                     )
                     ChecklistRowItem(
                         label = "Revisão das conexões elétricas e bornes",
                         checked = checkEletrico,
-                        onCheckedChange = { checkEletrico = it }
+                        onCheckedChange = {
+                            checkEletrico = it
+                            if (it && !item.isChecked) onToggleAttend()
+                        }
                     )
                     ChecklistRowItem(
                         label = "Verificação de ruídos e vibrações anormais",
                         checked = checkRuido,
-                        onCheckedChange = { checkRuido = it }
+                        onCheckedChange = {
+                            checkRuido = it
+                            if (it && !item.isChecked) onToggleAttend()
+                        }
                     )
                     ChecklistRowItem(
                         label = "Aferição de temperatura e fluxo de ar",
                         checked = checkTemp,
-                        onCheckedChange = { checkTemp = it }
+                        onCheckedChange = {
+                            checkTemp = it
+                            if (it && !item.isChecked) onToggleAttend()
+                        }
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
