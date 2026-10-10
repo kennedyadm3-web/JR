@@ -407,6 +407,13 @@ class ServiceOrderRepository(private val context: Context) {
         }
 
         // 3. Gravação resiliente no banco Room preservando 100% dos dados locais do técnico
+        // Lemos com antecedência TODOS os checklists locais já gravados no aparelho
+        val allLocalChecklists = checklistDao.getAllChecklists()
+        val localById = allLocalChecklists.associateBy { it.id }
+        val localByOrderAndEq = allLocalChecklists.associateBy { "${it.orderId}___${it.equipmentId}" }
+        val localByOrderAndName = allLocalChecklists.associateBy { "${it.orderId}___${it.equipmentName.trim().uppercase()}" }
+
+        // Primeiro: Atualiza/insere ordens de serviço preservando dados locais
         if (ordersToSave.isNotEmpty()) {
             for (i in ordersToSave.indices) {
                 val incoming = ordersToSave[i]
@@ -429,12 +436,18 @@ class ServiceOrderRepository(private val context: Context) {
             orderDao.insertAll(ordersToSave)
         }
 
+        // Segundo: Processa e preserva 100% dos checklists
         if (checklistToSave.isNotEmpty()) {
-            for (i in checklistToSave.indices) {
-                val incoming = checklistToSave[i]
-                val existing = checklistDao.getChecklistById(incoming.id)
-                    ?: checklistDao.getChecklistByOrderAndEquipment(incoming.orderId, incoming.equipmentId)
+            val processedOrderIds = ordersToSave.map { it.id }.toSet()
+            val finalChecklistMap = mutableMapOf<String, EquipmentChecklistEntity>()
+
+            for (incoming in checklistToSave) {
+                val existing = localById[incoming.id]
+                    ?: localByOrderAndEq["${incoming.orderId}___${incoming.equipmentId}"]
+                    ?: localByOrderAndName["${incoming.orderId}___${incoming.equipmentName.trim().uppercase()}"]
+
                 if (existing != null) {
+                    // PRESERVAÇÃO TOTAL: O status preenchido pelo técnico no celular é sagrado e tem precedência
                     val isChecked = existing.isChecked || incoming.isChecked
                     val isSkipped = existing.isSkipped || incoming.isSkipped
                     val notes = if (existing.notes.isNotBlank()) existing.notes else incoming.notes
@@ -444,8 +457,9 @@ class ServiceOrderRepository(private val context: Context) {
                     val remotePhotoUrls = if (existing.remotePhotoUrlsJson != "[]") existing.remotePhotoUrlsJson else incoming.remotePhotoUrlsJson
                     val isSynced = if (!existing.isSynced) false else incoming.isSynced
 
-                    checklistToSave[i] = incoming.copy(
+                    val merged = incoming.copy(
                         id = existing.id,
+                        equipmentId = existing.equipmentId,
                         isChecked = isChecked,
                         isSkipped = isSkipped,
                         notes = notes,
@@ -455,9 +469,20 @@ class ServiceOrderRepository(private val context: Context) {
                         remotePhotoUrlsJson = remotePhotoUrls,
                         isSynced = isSynced
                     )
+                    finalChecklistMap[merged.id] = merged
+                } else {
+                    finalChecklistMap[incoming.id] = incoming
                 }
             }
-            checklistDao.insertAll(checklistToSave)
+
+            // Não perde nenhum checklist local que já existia no celular para essas ordens
+            for (localItem in allLocalChecklists) {
+                if (localItem.orderId in processedOrderIds && !finalChecklistMap.containsKey(localItem.id)) {
+                    finalChecklistMap[localItem.id] = localItem
+                }
+            }
+
+            checklistDao.insertAll(finalChecklistMap.values.toList())
         }
 
         // Se o Room estiver completamente vazio e nenhuma busca online encontrou dados, gera roteiro base de contingência
@@ -687,18 +712,39 @@ class ServiceOrderRepository(private val context: Context) {
         justification: String?,
         checkedAt: String?,
         localPhotoPaths: List<String>
-    ) {
+    ) = withContext(Dispatchers.IO) {
         val photosJson = org.json.JSONArray(localPhotoPaths).toString()
 
-        checklistDao.updateChecklistExecution(
-            id = checklistId,
-            isChecked = isChecked,
-            isSkipped = isSkipped,
-            notes = notes,
-            justification = justification,
-            checkedAt = checkedAt,
-            localPhotoPathsJson = photosJson
-        )
+        val existing = checklistDao.getChecklistById(checklistId)
+            ?: checklistDao.getChecklistByOrderAndEquipment(orderId, equipmentId)
+
+        if (existing != null) {
+            checklistDao.updateChecklistExecution(
+                id = existing.id,
+                isChecked = isChecked,
+                isSkipped = isSkipped,
+                notes = notes,
+                justification = justification,
+                checkedAt = checkedAt,
+                localPhotoPathsJson = photosJson
+            )
+        } else {
+            checklistDao.insertOrUpdate(
+                EquipmentChecklistEntity(
+                    id = checklistId,
+                    orderId = orderId,
+                    equipmentId = equipmentId,
+                    equipmentName = "Ar Condicionado Split",
+                    isChecked = isChecked,
+                    isSkipped = isSkipped,
+                    notes = notes,
+                    justification = justification,
+                    checkedAt = checkedAt,
+                    localPhotoPathsJson = photosJson,
+                    isSynced = false
+                )
+            )
+        }
 
         // Se pelo menos 1 máquina for atendida/pulada e a O.S. estiver aberta, atualiza para 'em_andamento'
         val currentOrder = orderDao.getOrderById(orderId)
@@ -719,7 +765,7 @@ class ServiceOrderRepository(private val context: Context) {
         syncDao.enqueue(
             SyncQueueEntity(
                 entityType = "CHECKLIST_ITEM",
-                referenceId = checklistId,
+                referenceId = existing?.id ?: checklistId,
                 actionType = "UPDATE",
                 payloadJson = payload.toString()
             )

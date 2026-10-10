@@ -1,26 +1,21 @@
 package com.lefrio.atendimento.data.local.entity
 
 import androidx.room.Entity
-import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
  * Entidade Room local para itens do Checklist técnico de cada máquina.
  * Garante que cada item verificado, fotos tiradas e observações fiquem gravados
- * imediatamente na memória local do smartphone.
+ * permanentemente na memória local do smartphone, sem qualquer risco de deleção
+ * em cascata ou perda acidental durante sincronizações de rede.
  */
 @Entity(
     tableName = "equipment_checklists",
-    foreignKeys = [
-        ForeignKey(
-            entity = ServiceOrderEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["orderId"],
-            onDelete = ForeignKey.CASCADE
-        )
-    ],
-    indices = [Index(value = ["orderId", "equipmentId"], unique = true)]
+    indices = [
+        Index(value = ["orderId", "equipmentId"], unique = true),
+        Index(value = ["orderId"])
+    ]
 )
 data class EquipmentChecklistEntity(
     @PrimaryKey

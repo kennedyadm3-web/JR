@@ -26,7 +26,7 @@ import com.lefrio.atendimento.data.local.entity.TechnicianEntity
         TechNotificationEntity::class,
         TechnicianEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

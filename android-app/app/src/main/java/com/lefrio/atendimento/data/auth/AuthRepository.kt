@@ -229,6 +229,20 @@ class AuthRepository(private val context: Context) {
         // PIN validado com sucesso!
         setSelectedTechnician(tech)
 
+        try {
+            val updateManager = com.lefrio.atendimento.util.AppUpdateManager(context)
+            val currentVersion = updateManager.getCurrentVersionName()
+            FirebaseConfig.getFirestore().collection("technicians").document(tech.id).set(
+                mapOf(
+                    "appVersion" to currentVersion,
+                    "appVersionCode" to updateManager.getCurrentVersionCode(),
+                    "lastAppActive" to System.currentTimeMillis(),
+                    "deviceModel" to android.os.Build.MODEL
+                ),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
+        } catch (ignored: Exception) {}
+
         val techUser = TechnicianUser(
             uid = tech.id,
             name = tech.name,

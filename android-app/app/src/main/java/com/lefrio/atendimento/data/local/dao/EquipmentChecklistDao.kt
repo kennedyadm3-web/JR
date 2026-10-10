@@ -29,6 +29,9 @@ interface EquipmentChecklistDao {
     @Query("SELECT * FROM equipment_checklists WHERE orderId = :orderId")
     suspend fun getChecklistForOrder(orderId: String): List<EquipmentChecklistEntity>
 
+    @Query("SELECT * FROM equipment_checklists")
+    suspend fun getAllChecklists(): List<EquipmentChecklistEntity>
+
     @Query("SELECT * FROM equipment_checklists WHERE id = :id LIMIT 1")
     suspend fun getChecklistById(id: String): EquipmentChecklistEntity?
 

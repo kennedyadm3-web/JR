@@ -363,20 +363,23 @@ async function startServer() {
       const docRef = clientDoc(dbClient, "app_config", "android_version");
       const snap = await clientGetDoc(docRef);
       if (snap.exists()) {
-        return res.json(snap.data());
+        const data = snap.data() as any;
+        if (data && Number(data.versionCode) >= 14) {
+          return res.json(data);
+        }
       }
 
-      // Configuração padrão se ainda não existir
-      const defaultConfig = {
-        versionCode: 12,
-        versionName: "1.2.0",
-        downloadUrl: "https://ais-dev-ar7bordx5nsnyiemayswdy-507910401461.us-west2.run.app/android-app.zip",
-        releaseNotes: "Nova versão 1.2.0: Barrinha de progresso de máquinas na tela inicial, preservação garantida de checklist offline e correções de sincronização.",
+      // Configuração atualizada v1.3.0 (Build 14)
+      const currentConfig = {
+        versionCode: 14,
+        versionName: "1.3.0",
+        downloadUrl: "https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk",
+        releaseNotes: "Versão 1.3.0: Barrinha visual de máquinas atendidas na tela inicial, salvamento offline permanente de checklist/fotos e sincronização direta em tempo real.",
         isMandatory: false,
         updatedAt: new Date().toISOString()
       };
-      await robustSetDoc("app_config", "android_version", defaultConfig);
-      return res.json(defaultConfig);
+      await robustSetDoc("app_config", "android_version", currentConfig);
+      return res.json(currentConfig);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

@@ -1,7 +1,8 @@
 {
-  "versionCode": 2,
-  "versionName": "1.0.1",
-  "downloadUrl": "https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk",
-  "releaseNotes": "Adicionada coleta de assinatura digital do cliente, checklist de equipamentos e auditoria GPS.",
-  "releasedAt": "2026-10-07"
+  "versionCode": 14,
+  "versionName": "1.3.0",
+  "downloadUrl": "https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk",
+  "releaseNotes": "Versão 1.3.0: Barrinha visual de máquinas atendidas na tela inicial, salvamento offline permanente de checklist/fotos e sincronização direta em tempo real.",
+  "isMandatory": false,
+  "updatedAt": "2026-10-10T23:55:00.000Z"
 }

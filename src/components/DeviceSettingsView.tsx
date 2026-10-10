@@ -24,10 +24,10 @@ export default function DeviceSettingsView() {
   const [technicians, setTechnicians] = useState<Technician[]>([]);
 
   // Estados de Controle do App Android
-  const [androidVersionCode, setAndroidVersionCode] = useState<number>(2);
-  const [androidVersionName, setAndroidVersionName] = useState<string>('1.0.1');
-  const [androidDownloadUrl, setAndroidDownloadUrl] = useState<string>('https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk');
-  const [androidReleaseNotes, setAndroidReleaseNotes] = useState<string>('Nova versão com checklist e fotos.');
+  const [androidVersionCode, setAndroidVersionCode] = useState<number>(14);
+  const [androidVersionName, setAndroidVersionName] = useState<string>('1.3.0');
+  const [androidDownloadUrl, setAndroidDownloadUrl] = useState<string>('https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk');
+  const [androidReleaseNotes, setAndroidReleaseNotes] = useState<string>('Versão 1.3.0: Barrinha visual de máquinas atendidas na tela inicial, salvamento offline permanente de checklist/fotos e sincronização direta em tempo real.');
   const [androidIsMandatory, setAndroidIsMandatory] = useState<boolean>(false);
   const [savingAndroid, setSavingAndroid] = useState<boolean>(false);
   const [androidSuccess, setAndroidSuccess] = useState<string | null>(null);

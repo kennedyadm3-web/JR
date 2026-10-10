@@ -177,54 +177,116 @@ fun ServiceOrderCard(
                 }
             }
 
-            // Barrinha de Progresso do Atendimento de Máquinas no Endereço
-            if (totalMachines > 0) {
-                Spacer(modifier = Modifier.height(10.dp))
-                val progressFraction = (completedMachines.toFloat() / totalMachines.toFloat()).coerceIn(0f, 1f)
-                val percentageInt = (progressFraction * 100).toInt()
+            // Barrinha de Progresso do Atendimento de Máquinas no Endereço (Sempre visível no Card)
+            Spacer(modifier = Modifier.height(10.dp))
+            val actualTotal = if (totalMachines > 0) totalMachines else 1
+            val progressFraction = if (totalMachines > 0) {
+                (completedMachines.toFloat() / totalMachines.toFloat()).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            val percentageInt = (progressFraction * 100).toInt()
 
-                val (barColor, barBg) = when {
-                    completedMachines >= totalMachines -> Pair(Color(0xFF059669), Color(0xFFDCFCE7))
-                    completedMachines > 0 -> Pair(Color(0xFFD97706), Color(0xFFFEF3C7))
-                    else -> Pair(BluePrimary, Color(0xFFEFF6FF))
-                }
+            val (barColor, barBg, statusTag) = when {
+                totalMachines > 0 && completedMachines >= totalMachines -> Triple(
+                    Color(0xFF059669),
+                    Color(0xFFDCFCE7),
+                    "100% CONCLUÍDO ✓"
+                )
+                completedMachines > 0 -> Triple(
+                    Color(0xFFD97706),
+                    Color(0xFFFEF3C7),
+                    "EM ANDAMENTO"
+                )
+                else -> Triple(
+                    BluePrimary,
+                    Color(0xFFEFF6FF),
+                    "A INICIAR"
+                )
+            }
 
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(barBg)
-                        .padding(horizontal = 10.dp, vertical = 8.dp)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(barBg)
+                    .border(1.dp, barColor.copy(alpha = 0.25f), RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 9.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (completedMachines >= actualTotal && totalMachines > 0) Icons.Default.CheckCircle else Icons.Default.Build,
+                            contentDescription = null,
+                            tint = barColor,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Máquinas Atendidas no Local:",
+                            text = if (totalMachines > 0) "Máquinas no Endereço:" else "Parque de Máquinas:",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFF334155)
+                            color = Color(0xFF1E293B)
                         )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(barColor.copy(alpha = 0.15f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
                         Text(
-                            text = "$completedMachines de $totalMachines ($percentageInt%)",
-                            fontSize = 11.sp,
+                            text = statusTag,
+                            fontSize = 9.sp,
                             fontWeight = FontWeight.Black,
                             color = barColor
                         )
                     }
-                    Spacer(modifier = Modifier.height(5.dp))
-                    LinearProgressIndicator(
-                        progress = { progressFraction },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
-                        color = barColor,
-                        trackColor = Color.White.copy(alpha = 0.7f)
-                    )
                 }
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (totalMachines > 0) {
+                            "$completedMachines de $totalMachines atendida(s)"
+                        } else {
+                            "Toque no card para carregar as máquinas"
+                        },
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (totalMachines > 0) barColor else Color(0xFF64748B)
+                    )
+                    if (totalMachines > 0) {
+                        Text(
+                            text = "$percentageInt%",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Black,
+                            color = barColor
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                LinearProgressIndicator(
+                    progress = { progressFraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp)),
+                    color = barColor,
+                    trackColor = Color.White.copy(alpha = 0.85f)
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))

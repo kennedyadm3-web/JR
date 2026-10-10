@@ -8,6 +8,7 @@ import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.SyncQueueEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
@@ -72,23 +73,79 @@ class FirebaseSyncManager(private val context: Context) {
             "CHECKLIST_ITEM" -> {
                 val orderId = payload.getString("orderId")
                 val checklistId = task.referenceId
+                val eqId = payload.getString("equipmentId")
+                val isChecked = payload.getBoolean("isChecked")
+                val isSkipped = payload.getBoolean("isSkipped")
+                val notes = payload.optString("notes", "")
+                val justification = payload.optString("justification", "")
+                val checkedAt = payload.optString("checkedAt", "")
+
                 val itemMap = hashMapOf<String, Any>(
                     "id" to checklistId,
-                    "equipmentId" to payload.getString("equipmentId"),
-                    "isChecked" to payload.getBoolean("isChecked"),
-                    "isSkipped" to payload.getBoolean("isSkipped"),
-                    "notes" to payload.optString("notes", ""),
-                    "justification" to payload.optString("justification", ""),
-                    "checkedAt" to payload.optString("checkedAt", ""),
+                    "equipmentId" to eqId,
+                    "checked" to isChecked,
+                    "isChecked" to isChecked,
+                    "skipped" to isSkipped,
+                    "isSkipped" to isSkipped,
+                    "notes" to notes,
+                    "justification" to justification,
+                    "checkedAt" to checkedAt,
                     "updatedAt" to System.currentTimeMillis()
                 )
-                
-                // Grava o checklist associado à O.S. no Firestore
-                firestore.collection("service_orders")
-                    .document(orderId)
-                    .collection("checklist")
-                    .document(checklistId)
-                    .set(itemMap, SetOptions.merge())
+
+                // 1. Se for Manutenção Preventiva (PREV_xxx), sincroniza com a coleção maintenanceRecords
+                if (orderId.startsWith("PREV_")) {
+                    val recId = orderId.removePrefix("PREV_")
+                    try {
+                        val recRef = firestore.collection("maintenanceRecords").document(recId)
+                        val recSnap = recRef.get().await()
+                        if (recSnap.exists()) {
+                            @Suppress("UNCHECKED_CAST")
+                            val currentListRaw = recSnap.get("checklist") as? List<Map<String, Any>> ?: emptyList()
+                            val updatedList = currentListRaw.map { it.toMutableMap() }.toMutableList()
+                            val existingIndex = updatedList.indexOfFirst {
+                                (it["equipmentId"] as? String) == eqId || (it["id"] as? String) == checklistId
+                            }
+                            val newItem = hashMapOf<String, Any>(
+                                "equipmentId" to eqId,
+                                "checked" to isChecked,
+                                "skipped" to isSkipped,
+                                "notes" to notes,
+                                "justification" to justification,
+                                "checkedAt" to checkedAt
+                            )
+                            if (existingIndex >= 0) {
+                                updatedList[existingIndex] = newItem
+                            } else {
+                                updatedList.add(newItem)
+                            }
+                            val executedCount = updatedList.count {
+                                (it["checked"] as? Boolean == true) && (it["skipped"] as? Boolean != true)
+                            }
+                            recRef.set(
+                                hashMapOf(
+                                    "checklist" to updatedList,
+                                    "executedQuantity" to executedCount,
+                                    "status" to if (executedCount > 0 && recSnap.getString("status") != "completed") "in_progress" else (recSnap.getString("status") ?: "in_progress"),
+                                    "updatedAt" to System.currentTimeMillis()
+                                ),
+                                SetOptions.merge()
+                            ).await()
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Aviso ao sincronizar checklist em maintenanceRecords: ${e.message}")
+                    }
+                }
+
+                // 2. Grava também no documento da O.S. e subcoleção checklist para total redundância
+                try {
+                    firestore.collection("service_orders")
+                        .document(orderId)
+                        .collection("checklist")
+                        .document(checklistId)
+                        .set(itemMap, SetOptions.merge())
+                        .await()
+                } catch (ignored: Exception) {}
 
                 db.equipmentChecklistDao().markAsSynced(checklistId)
                 true
