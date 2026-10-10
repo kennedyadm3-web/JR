@@ -26,8 +26,29 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.ui.order.components.EquipmentCard
+import com.lefrio.atendimento.ui.signature.components.SignaturePad
+import com.lefrio.atendimento.ui.signature.components.SignaturePath
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
@@ -45,9 +66,24 @@ fun OrderDetailScreen(
     val context = LocalContext.current
     val photoCaptureManager = remember { PhotoCaptureManager(context) }
 
+    val signaturePaths = remember { mutableStateListOf<SignaturePath>() }
+
     var currentPhotoFile by remember { mutableStateOf<File?>(null) }
     var currentTargetItem by remember { mutableStateOf<EquipmentChecklistEntity?>(null) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(uiState.finalizeSuccess) {
+        if (uiState.finalizeSuccess) {
+            Toast.makeText(context, "Atendimento finalizado e assinado com sucesso!", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(uiState.errorMessage) {
+        uiState.errorMessage?.let { err ->
+            Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+            viewModel.clearErrorMessage()
+        }
+    }
 
     // Launcher da Câmera nativa protegido contra exceções e falhas de memória
     val cameraLauncher = rememberLauncherForActivityResult(
@@ -146,28 +182,94 @@ fun OrderDetailScreen(
         containerColor = Color(0xFFF8FAFC),
         bottomBar = {
             uiState.order?.let { order ->
+                val isFinalized = order.status == "finalizada"
+                val isFormValid = uiState.fiscalName.trim().isNotBlank() &&
+                                  uiState.fiscalDoc.trim().isNotBlank() &&
+                                  (signaturePaths.isNotEmpty() || !order.clientSignaturePath.isNullOrBlank()) &&
+                                  uiState.completedCount > 0
+
                 Surface(
                     color = Color.White,
                     shadowElevation = 8.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Box(modifier = Modifier.padding(16.dp)) {
-                        Button(
-                            onClick = { onProceedToSignatureClick(order.id) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = BluePrimary)
-                        ) {
-                            Icon(imageVector = Icons.Default.Draw, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "COLHER ASSINATURA DO CLIENTE",
-                                fontWeight = FontWeight.Black,
-                                fontSize = 12.sp,
-                                letterSpacing = 0.5.sp
-                            )
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        if (isFinalized) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFFD1FAE5)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = Color(0xFF059669),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "ATENDIMENTO FINALIZADO E REGISTRADO",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 12.sp,
+                                        color = Color(0xFF065F46)
+                                    )
+                                }
+                            }
+                        } else {
+                            Button(
+                                onClick = {
+                                    viewModel.finalizeOrder(context, signaturePaths)
+                                },
+                                enabled = isFormValid && !uiState.isFinalizing,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isFormValid) Color(0xFF059669) else Color(0xFFCBD5E1),
+                                    contentColor = Color.White
+                                )
+                            ) {
+                                if (uiState.isFinalizing) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        color = Color.White,
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("FINALIZANDO E GRAVANDO...", fontWeight = FontWeight.Black, fontSize = 12.sp)
+                                } else {
+                                    Icon(imageVector = Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "FINALIZAR ATENDIMENTO",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 12.sp,
+                                        letterSpacing = 0.5.sp
+                                    )
+                                }
+                            }
+
+                            if (!isFormValid) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                val pendingList = buildList {
+                                    if (uiState.fiscalName.trim().isBlank()) add("Nome")
+                                    if (uiState.fiscalDoc.trim().isBlank()) add("Matrícula/CPF")
+                                    if (signaturePaths.isEmpty() && order.clientSignaturePath.isNullOrBlank()) add("Assinatura")
+                                    if (uiState.completedCount == 0) add("Atender ≥1 máquina")
+                                }.joinToString(", ")
+
+                                Text(
+                                    text = "Pendente para liberar finalização: $pendingList",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFDC2626)
+                                )
+                            }
                         }
                     }
                 }
@@ -353,6 +455,151 @@ fun OrderDetailScreen(
                         },
                         isOrderCompleted = order.status == "finalizada"
                     )
+                }
+
+                // SEÇÃO DO RESPONSÁVEL DO CLIENTE E ASSINATURA DIGITAL (Fim da Folha de Atendimento)
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(32.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(BluePrimary.copy(alpha = 0.12f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Badge,
+                                        contentDescription = null,
+                                        tint = BluePrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "RESPONSÁVEL / FISCAL DO CLIENTE",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 13.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Dados obrigatórios no fim da folha para fechamento do serviço",
+                                        fontSize = 10.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            // Campo 1: Nome do Responsável / Fiscal
+                            OutlinedTextField(
+                                value = uiState.fiscalName,
+                                onValueChange = { viewModel.updateFiscalName(it) },
+                                label = { Text("Nome Completo do Responsável / Fiscal", fontSize = 11.sp) },
+                                placeholder = { Text("Ex: João Carlos Silva", fontSize = 11.sp) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                singleLine = true,
+                                enabled = order.status != "finalizada",
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Campo 2: Matrícula ou CPF do Responsável / Fiscal
+                            OutlinedTextField(
+                                value = uiState.fiscalDoc,
+                                onValueChange = { viewModel.updateFiscalDoc(it) },
+                                label = { Text("Matrícula ou CPF do Responsável", fontSize = 11.sp) },
+                                placeholder = { Text("Ex: 123456 ou 000.000.000-00", fontSize = 11.sp) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                singleLine = true,
+                                enabled = order.status != "finalizada",
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            // Campo 3: Área de Assinatura Digital
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Draw,
+                                        contentDescription = null,
+                                        tint = BluePrimary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Assinatura Digital do Responsável",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = TextPrimary
+                                    )
+                                }
+
+                                if (signaturePaths.isNotEmpty() || uiState.hasSignature) {
+                                    Text(
+                                        text = "✓ Assinatura Coletada",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 11.sp,
+                                        color = Color(0xFF059669)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            if (order.status == "finalizada" && !order.clientSignaturePath.isNullOrBlank()) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(140.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(Color(0xFFFAFAFA))
+                                        .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(12.dp)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    AsyncImage(
+                                        model = File(order.clientSignaturePath),
+                                        contentDescription = "Assinatura Registrada",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            } else {
+                                SignaturePad(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(160.dp),
+                                    paths = signaturePaths,
+                                    onSignatureChanged = { hasSig ->
+                                        viewModel.updateHasSignature(hasSig)
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

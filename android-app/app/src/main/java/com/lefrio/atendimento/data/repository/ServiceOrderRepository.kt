@@ -401,11 +401,49 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
-        // 3. Gravação resiliente no banco Room
+        // 3. Gravação resiliente no banco Room preservando 100% dos dados locais do técnico
         if (ordersToSave.isNotEmpty()) {
+            for (i in ordersToSave.indices) {
+                val incoming = ordersToSave[i]
+                val existing = orderDao.getOrderById(incoming.id)
+                if (existing != null) {
+                    ordersToSave[i] = incoming.copy(
+                        status = if (existing.status == "finalizada" || existing.status == "em_andamento") existing.status else incoming.status,
+                        clientRepresentative = existing.clientRepresentative.ifBlank { incoming.clientRepresentative },
+                        clientSigneeDoc = existing.clientSigneeDoc.ifBlank { incoming.clientSigneeDoc },
+                        clientSignatureDate = existing.clientSignatureDate ?: incoming.clientSignatureDate,
+                        clientSignaturePath = existing.clientSignaturePath ?: incoming.clientSignaturePath,
+                        completionDate = existing.completionDate ?: incoming.completionDate,
+                        completionLatitude = if (existing.completionLatitude != 0.0) existing.completionLatitude else incoming.completionLatitude,
+                        completionLongitude = if (existing.completionLongitude != 0.0) existing.completionLongitude else incoming.completionLongitude,
+                        completionAccuracy = if (existing.completionAccuracy != 0f) existing.completionAccuracy else incoming.completionAccuracy,
+                        isSyncedWithServer = if (!existing.isSyncedWithServer) false else incoming.isSyncedWithServer
+                    )
+                }
+            }
             orderDao.insertAll(ordersToSave)
         }
+
         if (checklistToSave.isNotEmpty()) {
+            for (i in checklistToSave.indices) {
+                val incoming = checklistToSave[i]
+                val existing = checklistDao.getChecklistById(incoming.id)
+                if (existing != null) {
+                    val isLocallyModified = existing.isChecked || existing.isSkipped || existing.notes.isNotBlank() || existing.localPhotoPathsJson != "[]" || !existing.isSynced
+                    if (isLocallyModified) {
+                        checklistToSave[i] = incoming.copy(
+                            isChecked = existing.isChecked,
+                            isSkipped = existing.isSkipped,
+                            notes = existing.notes,
+                            justification = existing.justification,
+                            checkedAt = existing.checkedAt,
+                            localPhotoPathsJson = existing.localPhotoPathsJson,
+                            remotePhotoUrlsJson = existing.remotePhotoUrlsJson,
+                            isSynced = existing.isSynced
+                        )
+                    }
+                }
+            }
             checklistDao.insertAll(checklistToSave)
         }
 

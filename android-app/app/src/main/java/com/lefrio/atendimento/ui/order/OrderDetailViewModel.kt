@@ -1,11 +1,15 @@
 package com.lefrio.atendimento.ui.order
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
+import com.lefrio.atendimento.ui.signature.components.SignaturePath
+import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
+import com.lefrio.atendimento.util.GpsAuditManager
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -18,6 +22,11 @@ data class OrderDetailUiState(
     val completedCount: Int = 0,
     val totalCount: Int = 0,
     val progressPercentage: Float = 0f,
+    val fiscalName: String = "",
+    val fiscalDoc: String = "",
+    val hasSignature: Boolean = false,
+    val isFinalizing: Boolean = false,
+    val finalizeSuccess: Boolean = false,
     val isLoading: Boolean = true,
     val errorMessage: String? = null
 )
@@ -39,7 +48,15 @@ class OrderDetailViewModel(
     private fun loadOrderDetails() {
         viewModelScope.launch {
             repository.getOrderById(orderId).collect { orderEntity ->
-                _uiState.update { it.copy(order = orderEntity, isLoading = false) }
+                _uiState.update { state ->
+                    state.copy(
+                        order = orderEntity,
+                        fiscalName = state.fiscalName.ifBlank { orderEntity?.clientRepresentative ?: "" },
+                        fiscalDoc = state.fiscalDoc.ifBlank { orderEntity?.clientSigneeDoc ?: "" },
+                        hasSignature = state.hasSignature || (orderEntity?.clientSignaturePath != null),
+                        isLoading = false
+                    )
+                }
             }
         }
 
@@ -55,6 +72,104 @@ class OrderDetailViewModel(
                         completedCount = completed,
                         totalCount = total,
                         progressPercentage = percentage
+                    )
+                }
+            }
+        }
+    }
+
+    fun updateFiscalName(name: String) {
+        _uiState.update { it.copy(fiscalName = name) }
+    }
+
+    fun updateFiscalDoc(doc: String) {
+        _uiState.update { it.copy(fiscalDoc = doc) }
+    }
+
+    fun updateHasSignature(hasSig: Boolean) {
+        _uiState.update { it.copy(hasSignature = hasSig) }
+    }
+
+    fun clearErrorMessage() {
+        _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    /**
+     * Finaliza o atendimento da folha inteira: grava assinatura digital, pega GPS e sincroniza.
+     */
+    fun finalizeOrder(
+        context: Context,
+        signaturePaths: List<SignaturePath>
+    ) {
+        val currentState = _uiState.value
+        val name = currentState.fiscalName.trim()
+        val doc = currentState.fiscalDoc.trim()
+
+        if (name.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Informe o Nome do Responsável / Fiscal do Cliente.") }
+            return
+        }
+        if (doc.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Informe a Matrícula ou CPF do Responsável / Fiscal.") }
+            return
+        }
+        if (signaturePaths.isEmpty() && currentState.order?.clientSignaturePath == null) {
+            _uiState.update { it.copy(errorMessage = "Colha a Assinatura Digital do Responsável na área de assinatura.") }
+            return
+        }
+        if (currentState.completedCount == 0) {
+            _uiState.update { it.copy(errorMessage = "Atenda ao menos 1 máquina do checklist antes de finalizar.") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isFinalizing = true) }
+            try {
+                // 1. Obtém localização GPS de auditoria
+                val gpsManager = GpsAuditManager(getApplication())
+                val loc = gpsManager.getCurrentLocation()
+                val latitude = if (loc.isCaptured) loc.latitude else 0.0
+                val longitude = if (loc.isCaptured) loc.longitude else 0.0
+                val accuracy = if (loc.isCaptured) loc.accuracy else 0f
+
+                // 2. Salva arquivo de assinatura digital local
+                val signatureFilePath = if (signaturePaths.isNotEmpty()) {
+                    saveSignatureToLocalFile(
+                        context = context,
+                        paths = signaturePaths,
+                        orderId = orderId
+                    ).absolutePath
+                } else {
+                    currentState.order?.clientSignaturePath ?: ""
+                }
+
+                val nowStr = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+
+                // 3. Grava finalização no banco local Room e enfileira para sincronização
+                repository.finalizeServiceOrder(
+                    orderId = orderId,
+                    signeeName = name,
+                    signeeDoc = doc,
+                    signatureDate = nowStr,
+                    signatureFilePath = signatureFilePath,
+                    completionDate = nowStr,
+                    latitude = latitude,
+                    longitude = longitude,
+                    accuracy = accuracy
+                )
+
+                _uiState.update {
+                    it.copy(
+                        isFinalizing = false,
+                        finalizeSuccess = true,
+                        errorMessage = null
+                    )
+                }
+            } catch (t: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        isFinalizing = false,
+                        errorMessage = "Erro ao finalizar atendimento: ${t.message}"
                     )
                 }
             }
