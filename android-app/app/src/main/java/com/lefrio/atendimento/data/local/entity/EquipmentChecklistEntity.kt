@@ -20,7 +20,7 @@ import androidx.room.PrimaryKey
             onDelete = ForeignKey.CASCADE
         )
     ],
-    indices = [Index(value = ["orderId", "equipmentId"])]
+    indices = [Index(value = ["orderId", "equipmentId"], unique = true)]
 )
 data class EquipmentChecklistEntity(
     @PrimaryKey

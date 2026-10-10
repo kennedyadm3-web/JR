@@ -432,20 +432,26 @@ class ServiceOrderRepository(private val context: Context) {
                 val existing = checklistDao.getChecklistById(incoming.id)
                     ?: checklistDao.getChecklistByOrderAndEquipment(incoming.orderId, incoming.equipmentId)
                 if (existing != null) {
-                    val isLocallyModified = existing.isChecked || existing.isSkipped || existing.notes.isNotBlank() || existing.localPhotoPathsJson != "[]" || !existing.isSynced
-                    if (isLocallyModified) {
-                        checklistToSave[i] = incoming.copy(
-                            id = existing.id,
-                            isChecked = existing.isChecked,
-                            isSkipped = existing.isSkipped,
-                            notes = existing.notes,
-                            justification = existing.justification,
-                            checkedAt = existing.checkedAt,
-                            localPhotoPathsJson = existing.localPhotoPathsJson,
-                            remotePhotoUrlsJson = existing.remotePhotoUrlsJson,
-                            isSynced = existing.isSynced
-                        )
-                    }
+                    val isChecked = existing.isChecked || incoming.isChecked
+                    val isSkipped = existing.isSkipped || incoming.isSkipped
+                    val notes = if (existing.notes.isNotBlank()) existing.notes else incoming.notes
+                    val justification = existing.justification ?: incoming.justification
+                    val checkedAt = existing.checkedAt ?: incoming.checkedAt
+                    val localPhotoPaths = if (existing.localPhotoPathsJson != "[]") existing.localPhotoPathsJson else incoming.localPhotoPathsJson
+                    val remotePhotoUrls = if (existing.remotePhotoUrlsJson != "[]") existing.remotePhotoUrlsJson else incoming.remotePhotoUrlsJson
+                    val isSynced = if (!existing.isSynced) false else incoming.isSynced
+
+                    checklistToSave[i] = incoming.copy(
+                        id = existing.id,
+                        isChecked = isChecked,
+                        isSkipped = isSkipped,
+                        notes = notes,
+                        justification = justification,
+                        checkedAt = checkedAt,
+                        localPhotoPathsJson = localPhotoPaths,
+                        remotePhotoUrlsJson = remotePhotoUrls,
+                        isSynced = isSynced
+                    )
                 }
             }
             checklistDao.insertAll(checklistToSave)
@@ -492,11 +498,12 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
         for (i in 1..4) {
+            val eqId = "EQ_CORREIOS_$i"
             checklists.add(
                 EquipmentChecklistEntity(
-                    id = UUID.randomUUID().toString(),
+                    id = "CHECK_${id1}_$eqId",
                     orderId = id1,
-                    equipmentId = "EQ_CORREIOS_$i",
+                    equipmentId = eqId,
                     equipmentName = "Split Hi-Wall #0$i",
                     equipmentBrand = if (i % 2 == 0) "Carrier" else "Gree",
                     equipmentBtus = "12000 BTUs",
@@ -524,11 +531,12 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
         for (i in 1..6) {
+            val eqId = "EQ_BB_$i"
             checklists.add(
                 EquipmentChecklistEntity(
-                    id = UUID.randomUUID().toString(),
+                    id = "CHECK_${id2}_$eqId",
                     orderId = id2,
-                    equipmentId = "EQ_BB_$i",
+                    equipmentId = eqId,
                     equipmentName = "Cassete 4 Vias #0$i",
                     equipmentBrand = "Daikin Inverter",
                     equipmentBtus = "36000 BTUs",
@@ -557,7 +565,7 @@ class ServiceOrderRepository(private val context: Context) {
         )
         checklists.add(
             EquipmentChecklistEntity(
-                id = UUID.randomUUID().toString(),
+                id = "CHECK_${id3}_EQ_TJ_01",
                 orderId = id3,
                 equipmentId = "EQ_TJ_01",
                 equipmentName = "Split Piso-Teto Gabinete 03",
@@ -586,11 +594,12 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
         for (i in 1..4) {
+            val eqId = "EQ_HOSP_$i"
             checklists.add(
                 EquipmentChecklistEntity(
-                    id = UUID.randomUUID().toString(),
+                    id = "CHECK_${id4}_$eqId",
                     orderId = id4,
-                    equipmentId = "EQ_HOSP_$i",
+                    equipmentId = eqId,
                     equipmentName = "Split Inverter Filtragem HEPA #0$i",
                     equipmentBrand = "Fujitsu",
                     equipmentBtus = "18000 BTUs",
@@ -619,7 +628,7 @@ class ServiceOrderRepository(private val context: Context) {
         )
         checklists.add(
             EquipmentChecklistEntity(
-                id = UUID.randomUUID().toString(),
+                id = "CHECK_${id5}_EQ_SEDUC_01",
                 orderId = id5,
                 equipmentId = "EQ_SEDUC_01",
                 equipmentName = "Split Hi-Wall Sala 02",
@@ -687,6 +696,12 @@ class ServiceOrderRepository(private val context: Context) {
             checkedAt = checkedAt,
             localPhotoPathsJson = photosJson
         )
+
+        // Se pelo menos 1 máquina for atendida/pulada e a O.S. estiver aberta, atualiza para 'em_andamento'
+        val currentOrder = orderDao.getOrderById(orderId)
+        if (currentOrder != null && currentOrder.status == "aberta" && (isChecked || isSkipped)) {
+            orderDao.updateStatus(orderId, "em_andamento")
+        }
 
         val payload = JSONObject().apply {
             put("orderId", orderId)

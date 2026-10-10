@@ -50,4 +50,7 @@ interface EquipmentChecklistDao {
 
     @Query("UPDATE equipment_checklists SET remotePhotoUrlsJson = :remoteUrlsJson, isSynced = 1 WHERE id = :id")
     suspend fun markPhotosUploaded(id: String, remoteUrlsJson: String)
+
+    @Query("UPDATE equipment_checklists SET isSynced = 1 WHERE id = :id")
+    suspend fun markAsSynced(id: String)
 }

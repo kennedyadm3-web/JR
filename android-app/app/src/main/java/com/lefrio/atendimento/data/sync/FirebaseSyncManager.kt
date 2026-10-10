@@ -89,6 +89,8 @@ class FirebaseSyncManager(private val context: Context) {
                     .collection("checklist")
                     .document(checklistId)
                     .set(itemMap, SetOptions.merge())
+
+                db.equipmentChecklistDao().markAsSynced(checklistId)
                 true
             }
 
