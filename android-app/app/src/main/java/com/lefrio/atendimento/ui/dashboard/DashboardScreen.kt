@@ -1,5 +1,12 @@
 package com.lefrio.atendimento.ui.dashboard
 
+import android.widget.Toast
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,7 +26,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,6 +51,27 @@ fun DashboardScreen(
     onLogoutClick: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+
+    // Animação de rotação contínua para o ícone de sincronização
+    val infiniteTransition = rememberInfiniteTransition(label = "syncRotation")
+    val rotationAngle by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "rotation"
+    )
+
+    // Exibe Toast ao concluir a varredura do servidor
+    LaunchedEffect(uiState.syncMessage) {
+        uiState.syncMessage?.let { msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+            viewModel.clearSyncMessage()
+        }
+    }
 
     // Carrega e sincroniza o itinerário do dia para o técnico logado
     LaunchedEffect(user.uid, user.name) {
@@ -94,11 +124,15 @@ fun DashboardScreen(
                             tint = Color(0xFF059669)
                         )
                     }
-                    IconButton(onClick = { viewModel.forceSync() }) {
+                    IconButton(
+                        onClick = { viewModel.forceSync() },
+                        enabled = !uiState.isSyncing
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
-                            contentDescription = "Sincronizar",
-                            tint = BluePrimary
+                            contentDescription = "Sincronizar Roteiro",
+                            tint = if (uiState.isSyncing) BluePrimary.copy(alpha = 0.6f) else BluePrimary,
+                            modifier = if (uiState.isSyncing) Modifier.rotate(rotationAngle) else Modifier
                         )
                     }
                     IconButton(onClick = onLogoutClick) {
@@ -123,6 +157,7 @@ fun DashboardScreen(
             SyncStatusBar(
                 isOnline = uiState.isOnline,
                 pendingTasksCount = uiState.pendingSyncCount,
+                isSyncing = uiState.isSyncing,
                 onForceSyncClick = { viewModel.forceSync() }
             )
 

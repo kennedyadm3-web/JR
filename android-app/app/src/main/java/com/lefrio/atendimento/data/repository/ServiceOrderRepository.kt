@@ -415,7 +415,10 @@ class ServiceOrderRepository(private val context: Context) {
             val seedOrders = createSeedItinerary(technicianName, targetDate)
             orderDao.insertAll(seedOrders.first)
             checklistDao.insertAll(seedOrders.second)
+            return@withContext seedOrders.first.size
         }
+
+        return@withContext ordersToSave.size
     }
 
     /**

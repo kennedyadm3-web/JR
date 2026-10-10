@@ -41,37 +41,45 @@ class PhotoCaptureManager(private val context: Context) {
     }
 
     /**
-     * Comprime a foto local mantendo ótima legibilidade técnica e reduzindo o consumo de 4G.
+     * Comprime a foto local mantendo ótima legibilidade técnica e prevenindo OutOfMemoryError no Android.
      */
     fun compressPhoto(photoFile: File): File {
         return try {
-            val bitmap = BitmapFactory.decodeFile(photoFile.absolutePath) ?: return photoFile
-            val maxDimension = 1600
-            val width = bitmap.width
-            val height = bitmap.height
+            if (!photoFile.exists()) return photoFile
 
-            val scale = if (width > maxDimension || height > maxDimension) {
-                val ratio = width.toFloat() / height.toFloat()
-                if (ratio > 1) {
-                    maxDimension.toFloat() / width
-                } else {
-                    maxDimension.toFloat() / height
+            // 1. Decodifica primeiro apenas as dimensões para calcular o inSampleSize
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeFile(photoFile.absolutePath, options)
+
+            val maxDimension = 1600
+            val width = options.outWidth
+            val height = options.outHeight
+
+            var inSampleSize = 1
+            if (width > maxDimension || height > maxDimension) {
+                val halfWidth = width / 2
+                val halfHeight = height / 2
+                while ((halfWidth / inSampleSize) >= maxDimension || (halfHeight / inSampleSize) >= maxDimension) {
+                    inSampleSize *= 2
                 }
-            } else {
-                1f
             }
 
-            val scaledWidth = (width * scale).toInt()
-            val scaledHeight = (height * scale).toInt()
+            // 2. Decodifica o bitmap amostrado com menor pegada de memória RAM
+            val decodeOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+            }
+            val bitmap = BitmapFactory.decodeFile(photoFile.absolutePath, decodeOptions) ?: return photoFile
 
-            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, true)
             val outputStream = FileOutputStream(photoFile)
-            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 80, outputStream)
             outputStream.flush()
             outputStream.close()
+            bitmap.recycle()
 
             photoFile
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             photoFile
         }
     }
@@ -97,7 +105,7 @@ class PhotoCaptureManager(private val context: Context) {
                 }
             }
             compressPhoto(destFile)
-        } catch (e: Exception) {
+        } catch (t: Throwable) {
             null
         }
     }

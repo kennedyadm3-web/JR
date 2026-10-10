@@ -1169,14 +1169,37 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       .filter(([_, data]) => {
         // Oculta rotas da capital (variable)
         if (data.config.type === RouteType.VARIABLE) return false;
-        // REGRA MANDATÓRIA: Rota temporária só aparece na folha A4 se tiver registros no mês atual!
-        if (data.config.type === RouteType.TEMPORARY && data.records.length === 0) {
+
+        const isTemp = data.config.type === RouteType.TEMPORARY || 
+                       data.records.some(r => r.isTemporaryRoute) ||
+                       data.config.routeName?.toLowerCase().includes('temp') ||
+                       data.config.id?.toLowerCase().includes('temp');
+
+        // REGRA MANDATÓRIA: Rota temporária de meses anteriores ou sem registros no mês atual NÃO aparece na impressão!
+        if (isTemp && data.records.length === 0) {
           return false;
         }
+
+        // Se a rota não tiver registros associados no mês atual:
+        if (data.records.length === 0) {
+          // Se tiver data planejada de outro mês, oculta do relatório deste mês
+          if (data.plannedDate && !data.plannedDate.startsWith(month)) {
+            return false;
+          }
+          // Se for uma rota que não é fixa e não tem registros no mês, oculta
+          if (data.config.type !== RouteType.FIXED) {
+            return false;
+          }
+          // Se for rota fixa sem atendimentos/O.S. nem estimativas de custo no mês, oculta para não listar rotas zeradas de meses passados
+          if ((!data.routeServiceOrdersCount || data.routeServiceOrdersCount === 0) && (!data.routeEstimatedCost || data.routeEstimatedCost === 0)) {
+            return false;
+          }
+        }
+
         return true;
       })
       .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true }));
-  }, [routeStats]);
+  }, [routeStats, month]);
 
   const printControlFinancialSummary = useMemo(() => {
     let totalEstimated = 0;

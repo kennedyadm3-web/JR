@@ -49,7 +49,7 @@ fun OrderDetailScreen(
     var currentTargetItem by remember { mutableStateOf<EquipmentChecklistEntity?>(null) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
 
-    // Launcher da Câmera nativa protegido contra exceções
+    // Launcher da Câmera nativa protegido contra exceções e falhas de memória
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
@@ -59,8 +59,8 @@ fun OrderDetailScreen(
                 viewModel.attachPhotoToEquipment(currentTargetItem!!, compressed.absolutePath)
                 Toast.makeText(context, "Foto salva com sucesso!", Toast.LENGTH_SHORT).show()
             }
-        } catch (e: Exception) {
-            Toast.makeText(context, "Erro ao processar foto: ${e.message}", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Toast.makeText(context, "Erro ao processar foto: ${t.message ?: "Falha na imagem"}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -82,8 +82,8 @@ fun OrderDetailScreen(
                     Toast.makeText(context, "Não foi possível carregar o arquivo da imagem", Toast.LENGTH_SHORT).show()
                 }
             }
-        } catch (e: Exception) {
-            Toast.makeText(context, "Erro ao anexar imagem: ${e.message}", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Toast.makeText(context, "Erro ao anexar imagem: ${t.message ?: "Falha na galeria"}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -98,8 +98,8 @@ fun OrderDetailScreen(
                     currentPhotoFile = file
                     cameraLauncher.launch(uri)
                 }
-            } catch (e: Exception) {
-                Toast.makeText(context, "Não foi possível iniciar a câmera: ${e.message}", Toast.LENGTH_LONG).show()
+            } catch (t: Throwable) {
+                Toast.makeText(context, "Não foi possível iniciar a câmera: ${t.message ?: "Erro no app"}", Toast.LENGTH_LONG).show()
             }
         } else {
             Toast.makeText(context, "Permissão de câmera não concedida. Você pode escolher uma foto da galeria.", Toast.LENGTH_LONG).show()
@@ -118,8 +118,8 @@ fun OrderDetailScreen(
             } else {
                 cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
             }
-        } catch (e: Exception) {
-            Toast.makeText(context, "Erro ao abrir câmera: ${e.message}", Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Toast.makeText(context, "Erro ao abrir câmera: ${t.message ?: "Câmera indisponível"}", Toast.LENGTH_SHORT).show()
         }
     }
 

@@ -28,6 +28,8 @@ data class DashboardUiState(
     val inProgressCount: Int = 0,
     val completedCount: Int = 0,
     val isLoading: Boolean = false,
+    val isSyncing: Boolean = false,
+    val syncMessage: String? = null,
     val selectedDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 )
 
@@ -121,13 +123,23 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun forceSync() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
+            _uiState.update { it.copy(isLoading = true, isSyncing = true, syncMessage = null) }
+            var foundCount = 0
             if (currentTechName.isNotBlank()) {
-                repository.syncDailyItinerary(currentTechName, currentTechId, _uiState.value.selectedDate)
+                foundCount = repository.syncDailyItinerary(currentTechName, currentTechId, _uiState.value.selectedDate)
             }
             SyncWorker.triggerImmediateSync(getApplication())
-            _uiState.update { it.copy(isLoading = false) }
+            val msg = if (foundCount > 0) {
+                "Varredura do servidor concluída! $foundCount endereço(s)/ordem(ns) no seu roteiro."
+            } else {
+                "Varredura concluída: Servidor verificado, nenhum novo endereço pendente."
+            }
+            _uiState.update { it.copy(isLoading = false, isSyncing = false, syncMessage = msg) }
         }
+    }
+
+    fun clearSyncMessage() {
+        _uiState.update { it.copy(syncMessage = null) }
     }
 
     private fun applyFilterAndSearch(
