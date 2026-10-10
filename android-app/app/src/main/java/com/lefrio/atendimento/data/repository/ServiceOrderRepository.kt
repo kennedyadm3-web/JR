@@ -411,14 +411,14 @@ class ServiceOrderRepository(private val context: Context) {
                 if (existing != null) {
                     ordersToSave[i] = incoming.copy(
                         status = if (existing.status == "finalizada" || existing.status == "em_andamento") existing.status else incoming.status,
-                        clientRepresentative = existing.clientRepresentative.ifBlank { incoming.clientRepresentative },
-                        clientSigneeDoc = existing.clientSigneeDoc.ifBlank { incoming.clientSigneeDoc },
+                        clientRepresentative = if (!existing.clientRepresentative.isNullOrBlank()) existing.clientRepresentative else incoming.clientRepresentative,
+                        clientSigneeDoc = if (!existing.clientSigneeDoc.isNullOrBlank()) existing.clientSigneeDoc else incoming.clientSigneeDoc,
                         clientSignatureDate = existing.clientSignatureDate ?: incoming.clientSignatureDate,
                         clientSignaturePath = existing.clientSignaturePath ?: incoming.clientSignaturePath,
                         completionDate = existing.completionDate ?: incoming.completionDate,
-                        completionLatitude = if (existing.completionLatitude != 0.0) existing.completionLatitude else incoming.completionLatitude,
-                        completionLongitude = if (existing.completionLongitude != 0.0) existing.completionLongitude else incoming.completionLongitude,
-                        completionAccuracy = if (existing.completionAccuracy != 0f) existing.completionAccuracy else incoming.completionAccuracy,
+                        completionLatitude = if (existing.completionLatitude != null && existing.completionLatitude != 0.0) existing.completionLatitude else incoming.completionLatitude,
+                        completionLongitude = if (existing.completionLongitude != null && existing.completionLongitude != 0.0) existing.completionLongitude else incoming.completionLongitude,
+                        completionAccuracy = if (existing.completionAccuracy != null && existing.completionAccuracy != 0f) existing.completionAccuracy else incoming.completionAccuracy,
                         isSyncedWithServer = if (!existing.isSyncedWithServer) false else incoming.isSyncedWithServer
                     )
                 }

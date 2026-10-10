@@ -54,8 +54,12 @@ jobs:
           echo -e "\n851471e4e1fc9f3486c00343e42b297e501459e4" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license" || true
           echo -e "\n601085b94cd77f6b54b86eab642d017a2699f7d0" > "$ANDROID_HOME/licenses/android-googletv-license" || true
           echo -e "\n33b6a2b64f07944f23e45e305e4f4fed0f77b438\nd975f751698a77b662f1254ddbeed3901e976f5a" > "$ANDROID_HOME/licenses/google-gdk-license" || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses 2>/dev/null || true
 
           # 3. Garante arquivos raiz de configuração ao lado da pasta 'app'
+          mkdir -p app/schemas
+          touch app/proguard-rules.pro
+
           if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
             echo 'pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }' > settings.gradle.kts
             echo 'dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }' >> settings.gradle.kts
@@ -64,7 +68,7 @@ jobs:
           fi
 
           if [ ! -f "build.gradle.kts" ] && [ ! -f "build.gradle" ]; then
-            echo 'plugins { id("com.android.application") version "8.2.2" apply false; id("org.jetbrains.kotlin.android") version "1.9.22" apply false; id("org.jetbrains.kotlin.kapt") version "1.9.22" apply false; id("com.google.gms.google-services") version "4.4.1" apply false }' > build.gradle.kts
+            echo 'plugins { id("com.android.application") version "8.2.2" apply false; id("org.jetbrains.kotlin.android") version "1.9.22" apply false; id("org.jetbrains.kotlin.kapt") version "1.9.22" apply false; id("kotlin-kapt") version "1.9.22" apply false; id("com.google.gms.google-services") version "4.4.1" apply false }' > build.gradle.kts
           fi
 
           if [ ! -f "gradle.properties" ]; then
