@@ -158,7 +158,7 @@ class PdfReportGenerator(private val context: Context) {
                         canvas.drawBitmap(sigBitmap, null, destRect, null)
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (ignored: Exception) {}
         }
 
         // Linha para assinatura

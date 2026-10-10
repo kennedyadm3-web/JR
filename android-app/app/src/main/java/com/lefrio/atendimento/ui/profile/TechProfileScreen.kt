@@ -60,7 +60,7 @@ fun TechProfileScreen(
             val stat = StatFs(Environment.getDataDirectory().path)
             val bytesAvailable = stat.availableBlocksLong * stat.blockSizeLong
             bytesAvailable.toDouble() / (1024 * 1024 * 1024)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             0.0
         }
     }

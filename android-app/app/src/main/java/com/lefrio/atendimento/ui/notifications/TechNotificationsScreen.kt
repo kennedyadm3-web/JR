@@ -99,7 +99,7 @@ fun TechNotificationsScreen(
                             }
                             try {
                                 context.startActivity(intent)
-                            } catch (_: Exception) {}
+                            } catch (ignored: Exception) {}
                         }
                     )
                     Spacer(modifier = Modifier.height(8.dp))

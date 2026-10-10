@@ -265,7 +265,7 @@ class ServiceOrderRepository(private val context: Context) {
                             addressMap[aid] = addrDoc
                             addrDoc.getString("clientId")?.let { if (it.isNotBlank()) clientIdsToFetch.add(it) }
                         }
-                    } catch (_: Exception) {}
+                    } catch (ignored: Exception) {}
                 }
 
                 // Busca dados reais dos clientes
@@ -276,7 +276,7 @@ class ServiceOrderRepository(private val context: Context) {
                         if (clientDoc.exists()) {
                             clientDoc.getString("name")?.let { clientMap[cid] = it }
                         }
-                    } catch (_: Exception) {}
+                    } catch (ignored: Exception) {}
                 }
 
                 // Busca equipamentos reais para os endereços encontrados
@@ -290,7 +290,7 @@ class ServiceOrderRepository(private val context: Context) {
                                 equipmentsMap.getOrPut(aid) { mutableListOf() }.add(eqDoc)
                             }
                         }
-                    } catch (_: Exception) {}
+                    } catch (ignored: Exception) {}
                 }
 
                 for (doc in matchedDocs) {

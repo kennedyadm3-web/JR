@@ -69,6 +69,10 @@ android {
     }
 }
 
+kapt {
+    correctErrorTypes = true
+}
+
 dependencies {
     // AndroidX Core & Lifecycle
     implementation("androidx.core:core-ktx:1.12.0")

@@ -492,7 +492,7 @@ class AppUpdateManager(private val context: Context) {
             for (pkg in knownInstallers) {
                 try {
                     context.grantUriPermission(pkg, apkUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                } catch (_: Exception) {}
+                } catch (ignored: Exception) {}
             }
 
             val resolvedActivities = context.packageManager.queryIntentActivities(
@@ -507,7 +507,7 @@ class AppUpdateManager(private val context: Context) {
                         apkUri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION
                     )
-                } catch (_: Exception) {}
+                } catch (ignored: Exception) {}
             }
 
             context.startActivity(installIntent)
