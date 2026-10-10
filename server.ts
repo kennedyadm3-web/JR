@@ -1486,7 +1486,13 @@ async function startServer() {
         clients: relevantClients,
         techs: allTechs,
         equipments: relevantEquipments,
-        totalEquipmentsCount: allEquipments.length
+        totalEquipmentsCount: allEquipments.length,
+        erinaldoRecordsAllDates: allRecords.filter((r: any) => 
+          (r.technician1 && r.technician1.toUpperCase().includes("ERINALDO")) ||
+          (r.technician2 && r.technician2.toUpperCase().includes("ERINALDO")) ||
+          (r.technicianId && r.technicianId.toUpperCase().includes("ERINALDO")) ||
+          JSON.stringify(r).toUpperCase().includes("ERINALDO")
+        ).map((r: any) => ({ id: r.id, month: r.month, plannedDate: r.plannedDate, t1: r.technician1, t2: r.technician2, assignedRoute: r.assignedRoute, addressId: r.addressId }))
       });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });

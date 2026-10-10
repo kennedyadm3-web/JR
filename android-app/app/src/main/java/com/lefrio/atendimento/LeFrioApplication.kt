@@ -21,5 +21,9 @@ class LeFrioApplication : Application() {
 
         // 3. Agenda a rotina de sincronização em segundo plano via WorkManager
         SyncWorker.schedulePeriodicSync(this)
+
+        // 4. Inicia monitoramento de rede para sincronização automática quando houver internet
+        val connectivityMonitor = com.lefrio.atendimento.data.sync.NetworkConnectivityMonitor(this)
+        connectivityMonitor.startMonitoring()
     }
 }

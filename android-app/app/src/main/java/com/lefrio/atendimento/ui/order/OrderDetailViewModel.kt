@@ -71,6 +71,72 @@ class OrderDetailViewModel(
     }
 
     /**
+     * Alterna o atendimento rápido da máquina inteira (como no botão 'Atender' do PWA).
+     */
+    fun toggleAttendEquipment(item: EquipmentChecklistEntity) {
+        val newChecked = !item.isChecked
+        val currentPhotos = parsePhotoPaths(item.localPhotoPathsJson)
+        val nowStr = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+        
+        viewModelScope.launch {
+            repository.saveEquipmentChecklist(
+                checklistId = item.id,
+                orderId = item.orderId,
+                equipmentId = item.equipmentId,
+                isChecked = newChecked,
+                isSkipped = false,
+                notes = item.notes,
+                justification = null,
+                checkedAt = if (newChecked) nowStr else null,
+                localPhotoPaths = currentPhotos
+            )
+        }
+    }
+
+    /**
+     * Alterna o status de 'Pular' da máquina.
+     */
+    fun toggleSkipEquipment(item: EquipmentChecklistEntity, justification: String? = "Pular máquina") {
+        val newSkipped = !item.isSkipped
+        val currentPhotos = parsePhotoPaths(item.localPhotoPathsJson)
+        val nowStr = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+
+        viewModelScope.launch {
+            repository.saveEquipmentChecklist(
+                checklistId = item.id,
+                orderId = item.orderId,
+                equipmentId = item.equipmentId,
+                isChecked = false,
+                isSkipped = newSkipped,
+                notes = item.notes,
+                justification = if (newSkipped) (justification ?: "Pular máquina") else null,
+                checkedAt = if (newSkipped) nowStr else null,
+                localPhotoPaths = currentPhotos
+            )
+        }
+    }
+
+    /**
+     * Atualiza as observações da máquina mantendo o status.
+     */
+    fun updateEquipmentNotes(item: EquipmentChecklistEntity, notes: String) {
+        val currentPhotos = parsePhotoPaths(item.localPhotoPathsJson)
+        viewModelScope.launch {
+            repository.saveEquipmentChecklist(
+                checklistId = item.id,
+                orderId = item.orderId,
+                equipmentId = item.equipmentId,
+                isChecked = item.isChecked,
+                isSkipped = item.isSkipped,
+                notes = notes,
+                justification = item.justification,
+                checkedAt = item.checkedAt,
+                localPhotoPaths = currentPhotos
+            )
+        }
+    }
+
+    /**
      * Salva a inspeção de uma máquina no banco local e enfileira para sincronização.
      */
     fun saveInspection(

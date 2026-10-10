@@ -1,14 +1,17 @@
 package com.lefrio.atendimento.ui.order
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -22,9 +25,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.ui.order.components.EquipmentCard
-import com.lefrio.atendimento.ui.order.components.EquipmentInspectionDialog
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
@@ -42,18 +45,81 @@ fun OrderDetailScreen(
     val context = LocalContext.current
     val photoCaptureManager = remember { PhotoCaptureManager(context) }
 
-    var selectedItemForInspection by remember { mutableStateOf<EquipmentChecklistEntity?>(null) }
     var currentPhotoFile by remember { mutableStateOf<File?>(null) }
     var currentTargetItem by remember { mutableStateOf<EquipmentChecklistEntity?>(null) }
+    var showPhotoSourceDialog by remember { mutableStateOf(false) }
 
-    // Launcher nativo da Câmera do Android
+    // Launcher da Câmera nativa protegido contra exceções
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
-        if (success && currentPhotoFile != null && currentTargetItem != null) {
-            val compressed = photoCaptureManager.compressPhoto(currentPhotoFile!!)
-            viewModel.attachPhotoToEquipment(currentTargetItem!!, compressed.absolutePath)
-            Toast.makeText(context, "Foto salva com sucesso no aparelho!", Toast.LENGTH_SHORT).show()
+        try {
+            if (success && currentPhotoFile != null && currentTargetItem != null) {
+                val compressed = photoCaptureManager.compressPhoto(currentPhotoFile!!)
+                viewModel.attachPhotoToEquipment(currentTargetItem!!, compressed.absolutePath)
+                Toast.makeText(context, "Foto salva com sucesso!", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "Erro ao processar foto: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Launcher de Seleção de Foto da Galeria
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        try {
+            if (uri != null && currentTargetItem != null && uiState.order != null) {
+                val savedFile = photoCaptureManager.saveGalleryImageUri(
+                    sourceUri = uri,
+                    orderId = uiState.order!!.id,
+                    equipmentId = currentTargetItem!!.equipmentId
+                )
+                if (savedFile != null) {
+                    viewModel.attachPhotoToEquipment(currentTargetItem!!, savedFile.absolutePath)
+                    Toast.makeText(context, "Imagem anexada com sucesso!", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Não foi possível carregar o arquivo da imagem", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "Erro ao anexar imagem: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Launcher para solicitar permissão de câmera antes de disparar
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            try {
+                if (currentTargetItem != null && uiState.order != null) {
+                    val (uri, file) = photoCaptureManager.createPhotoUri(uiState.order!!.id, currentTargetItem!!.equipmentId)
+                    currentPhotoFile = file
+                    cameraLauncher.launch(uri)
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Não foi possível iniciar a câmera: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            Toast.makeText(context, "Permissão de câmera não concedida. Você pode escolher uma foto da galeria.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun launchCameraSafely() {
+        try {
+            val permissionCheck = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+            if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
+                if (currentTargetItem != null && uiState.order != null) {
+                    val (uri, file) = photoCaptureManager.createPhotoUri(uiState.order!!.id, currentTargetItem!!.equipmentId)
+                    currentPhotoFile = file
+                    cameraLauncher.launch(uri)
+                }
+            } else {
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "Erro ao abrir câmera: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -131,13 +197,12 @@ fun OrderDetailScreen(
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
+                            .padding(14.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.White),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
-                            // Badge do Tipo
                             val isPrev = order.type.contains("PREVENTIVA", ignoreCase = true)
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -181,7 +246,7 @@ fun OrderDetailScreen(
                                 }
                             }
 
-                            Spacer(modifier = Modifier.height(8.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
 
                             // Endereço completo
                             val fullAddress = "${order.addressStreet}${order.addressNumber?.let { ", $it" } ?: ""}${order.addressCity?.let { " - $it" } ?: ""}"
@@ -192,9 +257,9 @@ fun OrderDetailScreen(
                                 fontWeight = FontWeight.Medium
                             )
 
-                            Spacer(modifier = Modifier.height(12.dp))
+                            Spacer(modifier = Modifier.height(10.dp))
 
-                            // Botão de Navegação GPS (Maps / Waze)
+                            // Botão de Navegação GPS
                             OutlinedButton(
                                 onClick = {
                                     val gmmIntentUri = Uri.parse("geo:0,0?q=" + Uri.encode(fullAddress))
@@ -228,20 +293,20 @@ fun OrderDetailScreen(
 
                 // Barra de Progresso dos Equipamentos
                 item {
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "Equipamentos (${uiState.completedCount}/${uiState.totalCount})",
+                                text = "Máquinas da Planilha (${uiState.completedCount}/${uiState.totalCount})",
                                 fontWeight = FontWeight.Black,
                                 fontSize = 13.sp,
                                 color = TextPrimary
                             )
                             Text(
-                                text = "${(uiState.progressPercentage * 100).toInt()}% concluído",
+                                text = "${(uiState.progressPercentage * 100).toInt()}% atendido",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 11.sp,
                                 color = BluePrimary
@@ -260,42 +325,129 @@ fun OrderDetailScreen(
                             trackColor = Color(0xFFE2E8F0)
                         )
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                 }
 
-                // Lista de Equipamentos
-                items(uiState.checklistItems, key = { it.id }) { item ->
+                // Lista de Equipamentos (Cards expansíveis inline como no PWA)
+                itemsIndexed(uiState.checklistItems, key = { _, item -> item.id }) { index, item ->
                     val photos = viewModel.parsePhotoPaths(item.localPhotoPathsJson)
                     EquipmentCard(
+                        orderIndex = index + 1,
                         item = item,
                         photos = photos,
-                        onInspectClick = { selectedItemForInspection = item },
+                        onToggleAttend = {
+                            viewModel.toggleAttendEquipment(item)
+                        },
+                        onToggleSkip = {
+                            viewModel.toggleSkipEquipment(item)
+                        },
                         onTakePhotoClick = {
                             currentTargetItem = item
-                            val (uri, file) = photoCaptureManager.createPhotoUri(order.id, item.equipmentId)
-                            currentPhotoFile = file
-                            cameraLauncher.launch(uri)
+                            showPhotoSourceDialog = true
                         },
                         onDeletePhotoClick = { photoPath ->
                             viewModel.removePhotoFromEquipment(item, photoPath)
-                        }
+                        },
+                        onSaveNotes = { notes ->
+                            viewModel.updateEquipmentNotes(item, notes)
+                        },
+                        isOrderCompleted = order.status == "finalizada"
                     )
                 }
             }
         }
     }
 
-    // Modal de Inspeção do Equipamento
-    selectedItemForInspection?.let { item ->
-        EquipmentInspectionDialog(
-            item = item,
-            onDismissRequest = { selectedItemForInspection = null },
-            onSaveInspection = { isChecked, isSkipped, notes, justification ->
-                val photos = viewModel.parsePhotoPaths(item.localPhotoPathsJson)
-                viewModel.saveInspection(item, isChecked, isSkipped, notes, justification, photos)
-                selectedItemForInspection = null
-                Toast.makeText(context, "Checklist salvo no aparelho!", Toast.LENGTH_SHORT).show()
-            }
+    // Diálogo Seguro de Escolha da Imagem (Tirar Foto ou Galeria)
+    if (showPhotoSourceDialog) {
+        AlertDialog(
+            onDismissRequest = { showPhotoSourceDialog = false },
+            title = {
+                Text(
+                    text = "Anexar Evidência da Máquina",
+                    fontWeight = FontWeight.Black,
+                    fontSize = 15.sp,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Escolha como deseja anexar a foto:",
+                        fontSize = 12.sp,
+                        color = TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Opção 1: Câmera
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                showPhotoSourceDialog = false
+                                launchCameraSafely()
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CameraAlt,
+                            contentDescription = "Câmera",
+                            tint = BluePrimary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Tirar Foto com a Câmera",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = TextPrimary
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Opção 2: Galeria
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable {
+                                showPhotoSourceDialog = false
+                                try {
+                                    galleryLauncher.launch("image/*")
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Erro ao abrir galeria: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoLibrary,
+                            contentDescription = "Galeria",
+                            tint = Color(0xFF059669),
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Escolher Imagem da Galeria",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = TextPrimary
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showPhotoSourceDialog = false }) {
+                    Text(text = "Cancelar", fontWeight = FontWeight.Bold, color = TextSecondary)
+                }
+            },
+            shape = RoundedCornerShape(18.dp),
+            containerColor = Color.White
         )
     }
 }

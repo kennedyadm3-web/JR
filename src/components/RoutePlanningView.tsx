@@ -567,7 +567,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const [newPostContent, setNewPostContent] = useState('');
   const [muralLoading, setMuralLoading] = useState(false);
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
-  const [isMuralCollapsed, setIsMuralCollapsed] = useState(false);
+  const [isMuralCollapsed, setIsMuralCollapsed] = useState(true);
 
   const loadMuralPosts = async () => {
     setMuralLoading(true);
@@ -634,9 +634,11 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const routeStats = useMemo(() => {
     const groups: Record<string, RouteGroup> = {};
 
-    // 0. Inicializar grupos a partir de todas as configurações de rotas cadastradas (routeConfigs)
-    // Garante que rotas recém-criadas ou rotas com 0 endereços/registros apareçam na tela!
+    // 0. Inicializar grupos a partir de configurações de rotas fixas/variáveis cadastradas (routeConfigs)
+    // Rotas temporárias são exclusivas de cada mês e NÃO devem ser inicializadas vazias em meses anteriores/posteriores!
     routeConfigs.forEach(rc => {
+      if (rc.type === RouteType.TEMPORARY) return;
+
       const routeName = rc.id || rc.routeName;
       if (routeName && !groups[routeName]) {
         groups[routeName] = {
@@ -878,10 +880,9 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       .filter(([_, data]) => {
         if (hideVariableRoutes && data.config.type === RouteType.VARIABLE) return false;
         // REGRA MANDATÓRIA: Rota temporária é EXCLUSIVA do mês em que foi criada e possui registros.
-        // Ao mudar de mês ou se não houver registros nem planejamento no mês atual, oculta rota temporária
+        // Ao mudar de mês ou se não houver registros no mês atual, oculta rota temporária
         if (data.config.type === RouteType.TEMPORARY && data.records.length === 0) {
-          const hasPlanningInMonth = Boolean(data.plannedDate || data.routeNotes || (data.routeCostItems && data.routeCostItems.length > 0));
-          if (!hasPlanningInMonth) return false;
+          return false;
         }
         return true;
       })
@@ -1165,7 +1166,15 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
   const printControlRoutes = useMemo(() => {
     return (Object.entries(routeStats) as [string, RouteGroup][])
-      .filter(([_, data]) => data.config.type !== RouteType.VARIABLE)
+      .filter(([_, data]) => {
+        // Oculta rotas da capital (variable)
+        if (data.config.type === RouteType.VARIABLE) return false;
+        // REGRA MANDATÓRIA: Rota temporária só aparece na folha A4 se tiver registros no mês atual!
+        if (data.config.type === RouteType.TEMPORARY && data.records.length === 0) {
+          return false;
+        }
+        return true;
+      })
       .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true }));
   }, [routeStats]);
 
@@ -2098,8 +2107,8 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
               <Megaphone className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-black text-gray-900 uppercase tracking-widest group-hover:text-amber-700 transition-colors">Mural de Comunicação de Rotas</h3>
-              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Informações importantes e avisos gerais sobre as viagens do mês</p>
+              <h3 className="text-sm font-black text-gray-900 uppercase tracking-widest group-hover:text-amber-700 transition-colors">Avisos e Mural de Comunicação</h3>
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Avisos e informações gerais sobre as viagens do mês (Recolhido por padrão)</p>
             </div>
           </div>
           <div className="flex items-center gap-2.5 self-start sm:self-auto">
@@ -2241,73 +2250,6 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
             )}
           </div>
         )}
-      </div>
-
-      {/* Ordem de Preenchimento Recomendada */}
-      <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 mb-4 shadow-3xs">
-        <div className="flex items-center gap-2.5 border-b border-slate-100 pb-3 mb-4">
-          <div className="bg-blue-600/10 p-2 rounded-xl text-blue-600">
-            <ListChecks className="w-5 h-5" />
-          </div>
-          <div>
-            <h3 className="text-sm font-black text-slate-800 uppercase tracking-widest">Lógica de Preenchimento Recomendada (Viagens)</h3>
-            <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider mt-0.5">Siga estes passos para otimizar a programação do mês</p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-          <div className="bg-white p-3.5 border border-slate-200/80 rounded-xl relative overflow-hidden flex flex-col justify-between">
-            <div>
-              <span className="absolute right-2.5 top-1 text-4xl font-black text-slate-100 select-none">1</span>
-              <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block mb-1">Passo 1</span>
-              <span className="text-xs font-black text-slate-700 block">Técnicos da Rota</span>
-              <p className="text-[10px] text-slate-400 mt-1.5 font-semibold leading-relaxed">Selecione os profissionais responsáveis pela execução desta rota.</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-3.5 border border-slate-200/80 rounded-xl relative overflow-hidden flex flex-col justify-between">
-            <div>
-              <span className="absolute right-2.5 top-1 text-4xl font-black text-slate-100 select-none">2</span>
-              <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block mb-1">Passo 2</span>
-              <span className="text-xs font-black text-slate-700 block">Período de Viagem</span>
-              <p className="text-[10px] text-slate-400 mt-1.5 font-semibold leading-relaxed">Insira as datas de Saída e Retorno Previsto do veículo.</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-3.5 border border-slate-200/80 rounded-xl relative overflow-hidden flex flex-col justify-between">
-            <div>
-              <span className="absolute right-2.5 top-1 text-4xl font-black text-slate-100 select-none">3</span>
-              <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block mb-1">Passo 3</span>
-              <span className="text-xs font-black text-slate-700 block">Atendimentos</span>
-              <p className="text-[10px] text-slate-400 mt-1.5 font-semibold leading-relaxed">Clique no ícone de "Lista de Checagem" para escolher os endereços do mês.</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-3.5 border border-slate-200/80 rounded-xl relative overflow-hidden flex flex-col justify-between">
-            <div>
-              <span className="absolute right-2.5 top-1 text-4xl font-black text-slate-100 select-none">4</span>
-              <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block mb-1">Passo 4</span>
-              <span className="text-xs font-black text-slate-700 block">Análise Financeira</span>
-              <p className="text-[10px] text-slate-400 mt-1.5 font-semibold leading-relaxed">Acesse o ícone de "Cifrão" para detalhar os custos e as despesas previstas.</p>
-            </div>
-          </div>
-
-          <div className="bg-white p-3.5 border border-slate-200/80 rounded-xl relative overflow-hidden flex flex-col justify-between">
-            <div>
-              <span className="absolute right-2.5 top-1 text-4xl font-black text-slate-100 select-none">5</span>
-              <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block mb-1">Passo 5</span>
-              <span className="text-xs font-black text-slate-700 block">O.S. e Faturamento</span>
-              <p className="text-[10px] text-slate-400 mt-1.5 font-semibold leading-relaxed">Preencha as O.S., preventivas e valores de faturamento do período.</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-4 p-3 bg-emerald-50 border border-emerald-100 rounded-xl flex items-center gap-2">
-          <span className="text-emerald-500 animate-pulse text-xs">💾</span>
-          <p className="text-[10px] font-black uppercase text-emerald-800 tracking-wider">
-            Persistência Independente Ativada: Os dados de planejamento agora são salvos de forma independente para que você nunca perca o trabalho ao alterar os endereços.
-          </p>
-        </div>
       </div>
 
       {hideVariableRoutes && (

@@ -42,8 +42,8 @@ class ServiceOrderRepository(private val context: Context) {
 
     /**
      * Sincroniza o Roteiro do Dia do Técnico (Manutenções Preventivas e Ordens de Serviço).
-     * 1. Consulta o Firestore buscando preventivas e corretivas atribuídas ao técnico.
-     * 2. Se não houver dados ou offline, semeia um roteiro completo de campo com preventivas e corretivas.
+     * 1. Consulta a API inteligente do sistema (/api/tech-demand/itinerary) com fallback direto no Firestore.
+     * 2. Associa endereços reais, clientes reais e o parque de máquinas reais cadastradas para o técnico.
      */
     suspend fun syncDailyItinerary(
         technicianName: String,
@@ -57,25 +57,254 @@ class ServiceOrderRepository(private val context: Context) {
         val normTechName = technicianName.trim().uppercase()
         val normTechId = technicianId.trim().uppercase()
 
-        // 1. Tenta carregar do Firestore
-        try {
-            val firestore = FirebaseConfig.getFirestore()
+        var fetchSuccess = false
 
-            // A) Busca Manutenções Preventivas (coleção maintenanceRecords)
-            val recordsSnap = firestore.collection("maintenanceRecords").get().await()
-            for (doc in recordsSnap.documents) {
-                val pDate = doc.getString("plannedDate") ?: ""
-                val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
-                val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+        // 1. TENTATIVA 1: API HTTP Rápida do Sistema (/api/tech-demand/itinerary)
+        val apiEndpoints = listOf(
+            "${FirebaseConfig.SHARED_API_BASE}/api/tech-demand/itinerary?tech=${java.net.URLEncoder.encode(normTechName, "UTF-8")}&month=$currentMonth&date=$targetDate",
+            "http://10.0.2.2:3000/api/tech-demand/itinerary?tech=${java.net.URLEncoder.encode(normTechName, "UTF-8")}&month=$currentMonth&date=$targetDate"
+        )
 
-                val isSameDate = pDate.startsWith(targetDate) || doc.getString("month") == currentMonth
-                val isMyTech = (t1.isNotBlank() && (t1 == normTechName || t1 == normTechId)) ||
-                               (t2.isNotBlank() && (t2 == normTechName || t2 == normTechId))
+        for (endpoint in apiEndpoints) {
+            if (fetchSuccess) break
+            try {
+                val url = java.net.URL(endpoint)
+                val conn = url.openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 4000
+                conn.readTimeout = 5000
+                conn.requestMethod = "GET"
+                conn.setRequestProperty("Accept", "application/json")
 
-                if (isSameDate && isMyTech) {
+                if (conn.responseCode == 200) {
+                    val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
+                    val json = JSONObject(responseStr)
+
+                    if (json.optBoolean("success", false)) {
+                        val recordsArr = json.optJSONArray("records") ?: org.json.JSONArray()
+                        val addrsArr = json.optJSONArray("addresses") ?: org.json.JSONArray()
+                        val clientsArr = json.optJSONArray("clients") ?: org.json.JSONArray()
+                        val equipsArr = json.optJSONArray("equipments") ?: org.json.JSONArray()
+                        val osArr = json.optJSONArray("serviceOrders") ?: org.json.JSONArray()
+
+                        // Mapeia endereços por ID
+                        val addrsMap = mutableMapOf<String, JSONObject>()
+                        for (i in 0 until addrsArr.length()) {
+                            val a = addrsArr.getJSONObject(i)
+                            val aid = a.optString("id", "")
+                            if (aid.isNotBlank()) addrsMap[aid] = a
+                        }
+
+                        // Mapeia clientes por ID
+                        val clientsMap = mutableMapOf<String, JSONObject>()
+                        for (i in 0 until clientsArr.length()) {
+                            val c = clientsArr.getJSONObject(i)
+                            val cid = c.optString("id", "")
+                            if (cid.isNotBlank()) clientsMap[cid] = c
+                        }
+
+                        // Mapeia equipamentos por addressId
+                        val equipsByAddr = mutableMapOf<String, MutableList<JSONObject>>()
+                        for (i in 0 until equipsArr.length()) {
+                            val eq = equipsArr.getJSONObject(i)
+                            val eqAid = eq.optString("addressId", "")
+                            if (eqAid.isNotBlank()) {
+                                equipsByAddr.getOrPut(eqAid) { mutableListOf() }.add(eq)
+                            }
+                        }
+
+                        // Processa manutenções preventivas (PMOC)
+                        for (i in 0 until recordsArr.length()) {
+                            val rec = recordsArr.getJSONObject(i)
+                            val recId = rec.optString("id", UUID.randomUUID().toString())
+                            val addrId = rec.optString("addressId", "")
+                            val addrObj = addrsMap[addrId]
+                            val clientId = addrObj?.optString("clientId", "") ?: rec.optString("clientId", "")
+                            val clientObj = clientsMap[clientId]
+
+                            val clientName = clientObj?.optString("name")
+                                ?: rec.optString("clientName", "Cliente LeFrio PMOC")
+                            val street = addrObj?.optString("street") ?: "Endereço Operacional"
+                            val num = addrObj?.optString("number")?.let { ", $it" } ?: ""
+                            val neigh = addrObj?.optString("neighborhood")?.let { " - $it" } ?: ""
+                            val city = addrObj?.optString("city", "Maceió") ?: "Maceió"
+                            val fullStreet = "$street$num$neigh"
+
+                            val orderId = "PREV_${recId}"
+                            val statusRaw = rec.optString("status", "aberta")
+                            val status = when (statusRaw) {
+                                "completed" -> "finalizada"
+                                "in_progress" -> "em_andamento"
+                                else -> "aberta"
+                            }
+
+                            ordersToSave.add(
+                                ServiceOrderEntity(
+                                    id = orderId,
+                                    osNumber = "PMOC-${recId.takeLast(4).uppercase()}",
+                                    originalId = recId,
+                                    clientId = clientId,
+                                    clientName = clientName,
+                                    addressId = addrId,
+                                    addressStreet = fullStreet,
+                                    addressCity = city,
+                                    plannedDate = rec.optString("plannedDate", targetDate),
+                                    status = status,
+                                    type = "MANUTENÇÃO PREVENTIVA",
+                                    technician1 = technicianName,
+                                    technician2 = rec.optString("technician2", null),
+                                    generalNotes = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão",
+                                    isSyncedWithServer = true
+                                )
+                            )
+
+                            // Equipamentos Reais deste Endereço
+                            val addrEquips = equipsByAddr[addrId] ?: emptyList()
+                            if (addrEquips.isNotEmpty()) {
+                                for (eq in addrEquips) {
+                                    val eqId = eq.optString("id", UUID.randomUUID().toString())
+                                    checklistToSave.add(
+                                        EquipmentChecklistEntity(
+                                            id = "CHECK_${orderId}_${eqId}",
+                                            orderId = orderId,
+                                            equipmentId = eqId,
+                                            equipmentName = eq.optString("name", "Ar Condicionado Split"),
+                                            equipmentBrand = eq.optString("brand", null),
+                                            equipmentBtus = eq.optString("btus", null),
+                                            equipmentSector = eq.optString("sector", "Geral"),
+                                            equipmentPatrimony = eq.optString("patrimony", null)
+                                        )
+                                    )
+                                }
+                            } else {
+                                val totalMac = addrObj?.optInt("totalMachines", 4) ?: 4
+                                val count = if (totalMac > 0) totalMac else 4
+                                for (m in 1..count) {
+                                    checklistToSave.add(
+                                        EquipmentChecklistEntity(
+                                            id = UUID.randomUUID().toString(),
+                                            orderId = orderId,
+                                            equipmentId = "EQ_${recId}_$m",
+                                            equipmentName = "Ar Condicionado Split #0$m",
+                                            equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
+                                            equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
+                                            equipmentSector = "Setor Operacional / Sala $m"
+                                        )
+                                    )
+                                }
+                            }
+                        }
+
+                        // Processa Ordens de Serviço Corretivas
+                        for (i in 0 until osArr.length()) {
+                            val os = osArr.getJSONObject(i)
+                            val osId = os.optString("id", UUID.randomUUID().toString())
+                            ordersToSave.add(
+                                ServiceOrderEntity(
+                                    id = osId,
+                                    osNumber = os.optString("orderNumber", "OS-${osId.takeLast(4)}"),
+                                    originalId = osId,
+                                    clientId = os.optString("clientId", ""),
+                                    clientName = os.optString("clientName", "Cliente LeFrio"),
+                                    addressId = os.optString("addressId", ""),
+                                    addressStreet = os.optString("addressStreet", "Endereço do Chamado"),
+                                    plannedDate = os.optString("plannedDate", targetDate),
+                                    status = os.optString("status", "aberta"),
+                                    type = "ORDEM DE SERVIÇO",
+                                    technician1 = technicianName,
+                                    generalNotes = os.optString("description", "Atendimento Corretivo Solicitado"),
+                                    isSyncedWithServer = true
+                                )
+                            )
+                        }
+
+                        if (ordersToSave.isNotEmpty()) {
+                            fetchSuccess = true
+                            Log.d(TAG, "Sincronização via API concluída com sucesso: ${ordersToSave.size} ordens carregadas.")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Tentativa de sincronização via API falhou para $endpoint: ${e.message}")
+            }
+        }
+
+        // 2. TENTATIVA 2: Leitura Direta no Firestore com Enriquecimento
+        if (!fetchSuccess) {
+            try {
+                val firestore = FirebaseConfig.getFirestore()
+
+                // A) Busca Manutenções Preventivas (maintenanceRecords)
+                val recordsSnap = firestore.collection("maintenanceRecords").get().await()
+                val matchedDocs = mutableListOf<com.google.firebase.firestore.DocumentSnapshot>()
+                val matchedAddressIds = mutableSetOf<String>()
+
+                for (doc in recordsSnap.documents) {
+                    val pDate = doc.getString("plannedDate") ?: ""
+                    val month = doc.getString("month") ?: ""
+                    val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
+                    val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+
+                    val isSameMonthOrDate = pDate.startsWith(targetDate) || month == currentMonth || pDate.startsWith(currentMonth)
+                    val isMyTech = (t1.isNotBlank() && (t1.contains(normTechName) || t1 == normTechId)) ||
+                                   (t2.isNotBlank() && (t2.contains(normTechName) || t2 == normTechId))
+
+                    if (isSameMonthOrDate && isMyTech) {
+                        matchedDocs.add(doc)
+                        doc.getString("addressId")?.let { if (it.isNotBlank()) matchedAddressIds.add(it) }
+                    }
+                }
+
+                // Busca dados reais dos endereços
+                val addressMap = mutableMapOf<String, com.google.firebase.firestore.DocumentSnapshot>()
+                val clientIdsToFetch = mutableSetOf<String>()
+                for (aid in matchedAddressIds) {
+                    try {
+                        val addrDoc = firestore.collection("addresses").document(aid).get().await()
+                        if (addrDoc.exists()) {
+                            addressMap[aid] = addrDoc
+                            addrDoc.getString("clientId")?.let { if (it.isNotBlank()) clientIdsToFetch.add(it) }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Busca dados reais dos clientes
+                val clientMap = mutableMapOf<String, String>()
+                for (cid in clientIdsToFetch) {
+                    try {
+                        val clientDoc = firestore.collection("clients").document(cid).get().await()
+                        if (clientDoc.exists()) {
+                            clientDoc.getString("name")?.let { clientMap[cid] = it }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // Busca equipamentos reais para os endereços encontrados
+                val equipmentsMap = mutableMapOf<String, MutableList<com.google.firebase.firestore.DocumentSnapshot>>()
+                for (aid in matchedAddressIds) {
+                    try {
+                        val eqSnap = firestore.collection("equipments").whereEqualTo("addressId", aid).get().await()
+                        for (eqDoc in eqSnap.documents) {
+                            val isActive = eqDoc.getBoolean("active") ?: true
+                            if (isActive && eqDoc.getString("status") != "deactivated") {
+                                equipmentsMap.getOrPut(aid) { mutableListOf() }.add(eqDoc)
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                for (doc in matchedDocs) {
                     val orderId = "PREV_${doc.id}"
-                    val clientName = doc.getString("clientName") ?: "Cliente PMOC"
-                    val addressStreet = doc.getString("addressStreet") ?: "Endereço Operacional"
+                    val addrId = doc.getString("addressId") ?: ""
+                    val addrDoc = addressMap[addrId]
+                    val clientId = addrDoc?.getString("clientId") ?: doc.getString("clientId") ?: ""
+                    val clientName = clientMap[clientId] ?: doc.getString("clientName") ?: "Cliente PMOC"
+
+                    val street = addrDoc?.getString("street") ?: doc.getString("addressStreet") ?: "Endereço Operacional"
+                    val num = addrDoc?.getString("number")?.let { ", $it" } ?: ""
+                    val neigh = addrDoc?.getString("neighborhood")?.let { " - $it" } ?: ""
+                    val city = addrDoc?.getString("city") ?: "Maceió"
+                    val fullStreet = "$street$num$neigh"
+
                     val statusRaw = doc.getString("status") ?: "aberta"
                     val status = when (statusRaw) {
                         "completed" -> "finalizada"
@@ -88,11 +317,12 @@ class ServiceOrderRepository(private val context: Context) {
                             id = orderId,
                             osNumber = "PMOC-${doc.id.takeLast(4).uppercase()}",
                             originalId = doc.id,
-                            clientId = doc.getString("clientId") ?: "CLIENT_01",
+                            clientId = clientId,
                             clientName = clientName,
-                            addressId = doc.getString("addressId") ?: "ADDR_01",
-                            addressStreet = addressStreet,
-                            plannedDate = targetDate,
+                            addressId = addrId,
+                            addressStreet = fullStreet,
+                            addressCity = city,
+                            plannedDate = doc.getString("plannedDate") ?: targetDate,
                             status = status,
                             type = "MANUTENÇÃO PREVENTIVA",
                             technician1 = technicianName,
@@ -102,82 +332,89 @@ class ServiceOrderRepository(private val context: Context) {
                         )
                     )
 
-                    // Cria itens de checklist básicos caso não existam
-                    for (m in 1..4) {
-                        checklistToSave.add(
-                            EquipmentChecklistEntity(
-                                id = UUID.randomUUID().toString(),
-                                orderId = orderId,
-                                equipmentId = "EQ_${doc.id}_$m",
-                                equipmentName = "Ar Condicionado Split #0$m",
-                                equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
-                                equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
-                                equipmentSector = "Ambiente Administrativo / Sala $m"
+                    val realEquips = equipmentsMap[addrId] ?: emptyList()
+                    if (realEquips.isNotEmpty()) {
+                        for (eqDoc in realEquips) {
+                            checklistToSave.add(
+                                EquipmentChecklistEntity(
+                                    id = "CHECK_${orderId}_${eqDoc.id}",
+                                    orderId = orderId,
+                                    equipmentId = eqDoc.id,
+                                    equipmentName = eqDoc.getString("name") ?: "Ar Condicionado Split",
+                                    equipmentBrand = eqDoc.getString("brand"),
+                                    equipmentBtus = eqDoc.getString("btus"),
+                                    equipmentSector = eqDoc.getString("sector") ?: "Geral",
+                                    equipmentPatrimony = eqDoc.getString("patrimony")
+                                )
+                            )
+                        }
+                    } else {
+                        val totalMachines = addrDoc?.getLong("totalMachines")?.toInt() ?: 4
+                        val count = if (totalMachines > 0) totalMachines else 4
+                        for (m in 1..count) {
+                            checklistToSave.add(
+                                EquipmentChecklistEntity(
+                                    id = UUID.randomUUID().toString(),
+                                    orderId = orderId,
+                                    equipmentId = "EQ_${doc.id}_$m",
+                                    equipmentName = "Ar Condicionado Split #0$m",
+                                    equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
+                                    equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
+                                    equipmentSector = "Ambiente Administrativo / Sala $m"
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // B) Busca Ordens de Serviço Corretivas (service_orders)
+                val ordersSnap = firestore.collection("service_orders").get().await()
+                for (doc in ordersSnap.documents) {
+                    val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
+                    val tName = (doc.getString("technicianName") ?: "").trim().uppercase()
+                    if (tId == normTechId || tName.contains(normTechName)) {
+                        ordersToSave.add(
+                            ServiceOrderEntity(
+                                id = doc.id,
+                                osNumber = doc.getString("orderNumber") ?: "OS-${doc.id.takeLast(4)}",
+                                originalId = doc.id,
+                                clientId = doc.getString("clientId") ?: "",
+                                clientName = doc.getString("clientName") ?: "Cliente LeFrio",
+                                addressId = doc.getString("addressId") ?: "",
+                                addressStreet = doc.getString("addressStreet") ?: "Endereço do Chamado",
+                                plannedDate = doc.getString("plannedDate") ?: targetDate,
+                                status = doc.getString("status") ?: "aberta",
+                                type = "ORDEM DE SERVIÇO",
+                                technician1 = technicianName,
+                                generalNotes = doc.getString("description") ?: "Atendimento Corretivo Solicitado",
+                                isSyncedWithServer = true
                             )
                         )
                     }
                 }
-            }
 
-            // B) Busca Ordens de Serviço Corretivas (coleção service_orders)
-            val ordersSnap = firestore.collection("service_orders").get().await()
-            for (doc in ordersSnap.documents) {
-                val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
-                val tName = (doc.getString("technicianName") ?: "").trim().uppercase()
-
-                val isMyTech = (tId == normTechId || tName == normTechName)
-                if (isMyTech) {
-                    val orderId = doc.id
-                    val status = doc.getString("status") ?: "aberta"
-
-                    ordersToSave.add(
-                        ServiceOrderEntity(
-                            id = orderId,
-                            osNumber = doc.getString("orderNumber") ?: "OS-${doc.id.takeLast(4)}",
-                            originalId = doc.id,
-                            clientId = doc.getString("clientId") ?: "",
-                            clientName = doc.getString("clientName") ?: "Cliente LeFrio",
-                            addressId = doc.getString("addressId") ?: "",
-                            addressStreet = doc.getString("addressStreet") ?: "Endereço do Chamado",
-                            plannedDate = targetDate,
-                            status = status,
-                            type = "ORDEM DE SERVIÇO",
-                            technician1 = technicianName,
-                            generalNotes = doc.getString("description") ?: "Atendimento Corretivo Solicitado",
-                            isSyncedWithServer = true
-                        )
-                    )
-
-                    checklistToSave.add(
-                        EquipmentChecklistEntity(
-                            id = UUID.randomUUID().toString(),
-                            orderId = orderId,
-                            equipmentId = "EQ_OS_${doc.id}_1",
-                            equipmentName = "Aparelho Condicionador Principal",
-                            equipmentBrand = "Springer Midea",
-                            equipmentBtus = "24000 BTUs",
-                            equipmentSector = "Setor Operacional"
-                        )
-                    )
+                if (ordersToSave.isNotEmpty()) {
+                    fetchSuccess = true
                 }
+            } catch (e: Exception) {
+                Log.w(TAG, "Tentativa direta Firestore falhou: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.d(TAG, "Tentativa Firestore para roteiro ignorada: ${e.message}")
         }
 
-        // 2. Se a busca não encontrou dados para hoje (ou offline), gera o Roteiro Base Oficial do Técnico
-        if (ordersToSave.isEmpty()) {
-            val seedOrders = createSeedItinerary(technicianName, targetDate)
-            ordersToSave.addAll(seedOrders.first)
-            checklistToSave.addAll(seedOrders.second)
-        }
-
-        // 3. Salva com segurança no Room
+        // 3. Gravação resiliente no banco Room
         if (ordersToSave.isNotEmpty()) {
             orderDao.insertAll(ordersToSave)
         }
         if (checklistToSave.isNotEmpty()) {
             checklistDao.insertAll(checklistToSave)
+        }
+
+        // Se o Room estiver completamente vazio e nenhuma busca online encontrou dados, gera roteiro base de contingência
+        val currentLocalOrders = orderDao.getAllOrders()
+        if (currentLocalOrders.isEmpty() && ordersToSave.isEmpty()) {
+            val seedOrders = createSeedItinerary(technicianName, targetDate)
+            orderDao.insertAll(seedOrders.first)
+            checklistDao.insertAll(seedOrders.second)
         }
     }
 

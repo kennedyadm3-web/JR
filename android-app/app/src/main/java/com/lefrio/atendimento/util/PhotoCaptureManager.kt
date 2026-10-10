@@ -75,4 +75,30 @@ class PhotoCaptureManager(private val context: Context) {
             photoFile
         }
     }
+
+    /**
+     * Copia e comprime uma foto selecionada da Galeria para o armazenamento local do app.
+     */
+    fun saveGalleryImageUri(sourceUri: Uri, orderId: String, equipmentId: String): File? {
+        return try {
+            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val storageDir = File(
+                context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+                "ServicePhotos"
+            )
+            if (!storageDir.exists()) {
+                storageDir.mkdirs()
+            }
+            val destFile = File(storageDir, "OS_${orderId}_EQ_${equipmentId}_${timeStamp}.jpg")
+
+            context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                FileOutputStream(destFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            compressPhoto(destFile)
+        } catch (e: Exception) {
+            null
+        }
+    }
 }

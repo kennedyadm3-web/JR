@@ -1009,9 +1009,6 @@ export default function TechExpensesView({ userRole, userProfile }: TechExpenses
                 Itens Programados nesta Viagem ({currentRouteData.routeCostItems.length})
               </h3>
             </div>
-            <span className="text-[11px] text-gray-400 font-medium">
-              Clique em um item programado para preencher rapidamente
-            </span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
