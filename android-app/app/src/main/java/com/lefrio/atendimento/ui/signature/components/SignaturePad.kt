@@ -8,7 +8,8 @@ import android.os.Environment
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,7 +28,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
 import java.io.File
 import java.io.FileOutputStream
@@ -45,7 +45,6 @@ fun SignaturePad(
     paths: MutableList<SignaturePath>,
     onSignatureChanged: (hasSignature: Boolean) -> Unit
 ) {
-    var currentPath by remember { mutableStateOf<SignaturePath?>(null) }
     var drawCounter by remember { mutableIntStateOf(0) }
 
     Box(
@@ -58,46 +57,70 @@ fun SignaturePad(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            val newPath = SignaturePath()
-                            newPath.path.moveTo(offset.x, offset.y)
-                            newPath.points.add(offset)
-                            currentPath = newPath
-                            paths.add(newPath)
-                            drawCounter++
-                            onSignatureChanged(true)
-                        },
-                        onDrag = { change, _ ->
-                            currentPath?.let {
-                                it.path.lineTo(change.position.x, change.position.y)
-                                it.points.add(change.position)
-                                drawCounter++
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+
+                        val newPath = SignaturePath()
+                        newPath.path.moveTo(down.position.x, down.position.y)
+                        newPath.points.add(down.position)
+                        paths.add(newPath)
+                        drawCounter++
+                        onSignatureChanged(true)
+
+                        var lastPoint = down.position
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pointer = event.changes.firstOrNull { it.id == down.id } ?: break
+
+                            if (!pointer.pressed) {
+                                pointer.consume()
+                                break
                             }
-                        },
-                        onDragEnd = {
-                            currentPath = null
+
+                            // Consome imediatamente para que a tela pai NÃO roube o scroll vertical
+                            pointer.consume()
+
+                            val currentPos = pointer.position
+                            val midX = (lastPoint.x + currentPos.x) / 2f
+                            val midY = (lastPoint.y + currentPos.y) / 2f
+
+                            // Curva Bézier quadrática contínua para máxima fluidez do dedo na tela
+                            newPath.path.quadraticBezierTo(lastPoint.x, lastPoint.y, midX, midY)
+                            newPath.points.add(currentPos)
+                            lastPoint = currentPos
                             drawCounter++
                         }
-                    )
+
+                        // Se foi um toque curto (ponto / acento / pingo no 'i'), garante registro visível
+                        if (newPath.points.size == 1) {
+                            newPath.path.lineTo(lastPoint.x + 0.5f, lastPoint.y + 0.5f)
+                            drawCounter++
+                        }
+                    }
                 }
         ) {
             // Linha guia de assinatura
             val lineY = size.height * 0.78f
             drawLine(
-                color = Color(0xFFCBD5E1),
+                color = Color(0xFFE2E8F0),
                 start = Offset(24f, lineY),
                 end = Offset(size.width - 24f, lineY),
                 strokeWidth = 2f
             )
 
-            // Desenha todos os traços feitos
+            // Força recomposição do canvas ao atualizar drawCounter
+            @Suppress("UNUSED_EXPRESSION")
+            drawCounter
+
+            // Desenha todos os traços com traço esferográfico encorpado e suave
             for (p in paths) {
                 drawPath(
                     path = p.path,
                     color = Color(0xFF0F172A),
                     style = Stroke(
-                        width = 4.5f,
+                        width = 6f,
                         cap = StrokeCap.Round,
                         join = StrokeJoin.Round
                     )
@@ -171,7 +194,7 @@ fun saveSignatureToLocalFile(
 
     val paint = Paint().apply {
         color = android.graphics.Color.BLACK
-        strokeWidth = 5f
+        strokeWidth = 6f
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
@@ -181,11 +204,24 @@ fun saveSignatureToLocalFile(
     for (p in paths) {
         val androidPath = android.graphics.Path()
         if (p.points.isNotEmpty()) {
-            androidPath.moveTo(p.points[0].x, p.points[0].y)
-            for (i in 1 until p.points.size) {
-                androidPath.lineTo(p.points[i].x, p.points[i].y)
+            if (p.points.size == 1) {
+                canvas.drawCircle(p.points[0].x, p.points[0].y, 3f, Paint().apply {
+                    color = android.graphics.Color.BLACK
+                    style = Paint.Style.FILL
+                    isAntiAlias = true
+                })
+            } else {
+                androidPath.moveTo(p.points[0].x, p.points[0].y)
+                for (i in 1 until p.points.size) {
+                    val prev = p.points[i - 1]
+                    val curr = p.points[i]
+                    val midX = (prev.x + curr.x) / 2f
+                    val midY = (prev.y + curr.y) / 2f
+                    androidPath.quadTo(prev.x, prev.y, midX, midY)
+                }
+                androidPath.lineTo(p.points.last().x, p.points.last().y)
+                canvas.drawPath(androidPath, paint)
             }
-            canvas.drawPath(androidPath, paint)
         }
     }
 

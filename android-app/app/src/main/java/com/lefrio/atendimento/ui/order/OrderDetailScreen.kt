@@ -575,7 +575,7 @@ fun OrderDetailScreen(
                                 SignaturePad(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(160.dp),
+                                        .height(190.dp),
                                     paths = signaturePaths,
                                     onSignatureChanged = { hasSig ->
                                         viewModel.updateHasSignature(hasSig)
