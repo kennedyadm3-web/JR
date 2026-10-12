@@ -99,6 +99,28 @@ interface ServiceOrderDao {
     ): Flow<List<ServiceOrderEntity>>
 
     @Query("""
+        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        FROM service_orders 
+        WHERE plannedDate = :date
+          AND (
+            UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
+            OR UPPER(technician1) = UPPER(:technicianId)
+            OR UPPER(technician2) LIKE '%' || UPPER(:technicianName) || '%'
+            OR UPPER(technician2) = UPPER(:technicianId)
+          )
+          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
+          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
+          AND clientId != ''
+          AND addressId != ''
+        ORDER BY clientName ASC, addressStreet ASC
+    """)
+    suspend fun getScheduledLocationsForTechnicianAndDate(
+        technicianName: String,
+        technicianId: String,
+        date: String
+    ): List<ScheduledLocationTuple>
+
+    @Query("""
         DELETE FROM service_orders 
         WHERE clientName IN ('Cliente LeFrio', 'Cliente PMOC', 'Endereço do Chamado', 'Cliente Teste', '')
            OR addressStreet IN ('Endereço do Chamado', 'Endereço Teste', '')
@@ -116,3 +138,12 @@ interface ServiceOrderDao {
     """)
     suspend fun deleteFakeSeedOrders()
 }
+
+data class ScheduledLocationTuple(
+    val clientId: String,
+    val clientName: String,
+    val clientDocument: String? = null,
+    val addressId: String,
+    val addressStreet: String,
+    val addressCity: String? = null
+)

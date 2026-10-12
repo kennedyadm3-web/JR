@@ -64,7 +64,7 @@ fun ServiceOrdersScreen(
                             color = BluePrimary
                         )
                         Text(
-                            text = "Gestão de O.S. e Chamados • ${user.name}",
+                            text = "Ordens de Serviço do Dia • ${user.name}",
                             fontSize = 11.sp,
                             color = TextSecondary,
                             fontWeight = FontWeight.Medium
@@ -245,14 +245,14 @@ fun ServiceOrdersScreen(
                         }
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Nenhuma O.S. encontrada",
+                            text = "Nenhuma O.S. aberta para hoje",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Clique em '+ NOVA O.S.' abaixo para criar uma ordem de serviço diretamente no seu roteiro.",
+                            text = "Clique em '+ NOVA O.S.' abaixo para abrir um atendimento nos endereços previstos no seu roteiro de hoje.",
                             fontSize = 12.sp,
                             color = TextSecondary,
                             textAlign = androidx.compose.ui.text.style.TextAlign.Center

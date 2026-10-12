@@ -854,21 +854,58 @@ class ServiceOrderRepository(private val context: Context) {
         return entity
     }
 
+    suspend fun getScheduledClientsAndAddressesForTechnician(
+        technicianName: String,
+        technicianId: String,
+        date: String
+    ): Pair<List<ClientOption>, List<AddressOption>> {
+        val scheduledList = orderDao.getScheduledLocationsForTechnicianAndDate(
+            technicianName = technicianName,
+            technicianId = technicianId,
+            date = date
+        )
+
+        val clientMap = mutableMapOf<String, ClientOption>()
+        val addressMap = mutableMapOf<String, AddressOption>()
+
+        for (item in scheduledList) {
+            if (item.clientId.isNotBlank() && item.clientName.isNotBlank() && item.clientName != "Cliente LeFrio" && item.clientName != "Cliente PMOC") {
+                clientMap[item.clientId] = ClientOption(
+                    id = item.clientId,
+                    name = item.clientName,
+                    document = item.clientDocument
+                )
+            }
+            if (item.addressId.isNotBlank() && item.addressStreet.isNotBlank() && item.addressStreet != "Endereço do Chamado") {
+                addressMap[item.addressId] = AddressOption(
+                    id = item.addressId,
+                    clientId = item.clientId,
+                    street = item.addressStreet,
+                    city = item.addressCity
+                )
+            }
+        }
+
+        return Pair(
+            clientMap.values.sortedBy { it.name },
+            addressMap.values.sortedBy { it.street }
+        )
+    }
+
     suspend fun getAvailableClientsAndAddresses(): Pair<List<ClientOption>, List<AddressOption>> {
         val clientMap = mutableMapOf<String, ClientOption>()
         val addressMap = mutableMapOf<String, AddressOption>()
 
-        // 1. Coleta a partir das ordens já salvas localmente no Room
         val localOrders = orderDao.getAllOrders()
         for (o in localOrders) {
-            if (o.clientId.isNotBlank() && o.clientName.isNotBlank()) {
+            if (o.clientId.isNotBlank() && o.clientName.isNotBlank() && o.clientName != "Cliente LeFrio" && o.clientName != "Cliente PMOC") {
                 clientMap[o.clientId] = ClientOption(
                     id = o.clientId,
                     name = o.clientName,
                     document = o.clientDocument
                 )
             }
-            if (o.addressId.isNotBlank() && o.addressStreet.isNotBlank()) {
+            if (o.addressId.isNotBlank() && o.addressStreet.isNotBlank() && o.addressStreet != "Endereço do Chamado") {
                 addressMap[o.addressId] = AddressOption(
                     id = o.addressId,
                     clientId = o.clientId,
@@ -876,40 +913,6 @@ class ServiceOrderRepository(private val context: Context) {
                     city = o.addressCity
                 )
             }
-        }
-
-        // 2. Tenta enriquecer com Firestore online se possível
-        try {
-            val firestore = FirebaseConfig.getFirestore()
-            val clientsSnap = firestore.collection("clients").limit(50).get().await()
-            for (doc in clientsSnap.documents) {
-                val name = doc.getString("name") ?: doc.getString("fullName") ?: ""
-                if (name.isNotBlank()) {
-                    clientMap[doc.id] = ClientOption(
-                        id = doc.id,
-                        name = name,
-                        document = doc.getString("cnpj") ?: doc.getString("document")
-                    )
-                }
-            }
-
-            val addrsSnap = firestore.collection("addresses").limit(100).get().await()
-            for (doc in addrsSnap.documents) {
-                val street = doc.getString("street") ?: ""
-                val cId = doc.getString("clientId") ?: ""
-                if (street.isNotBlank() && cId.isNotBlank()) {
-                    val num = doc.getString("number")?.let { ", $it" } ?: ""
-                    val neigh = doc.getString("neighborhood")?.let { " - $it" } ?: ""
-                    addressMap[doc.id] = AddressOption(
-                        id = doc.id,
-                        clientId = cId,
-                        street = "$street$num$neigh",
-                        city = doc.getString("city")
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            Log.d(TAG, "Uso offline dos clientes locais: ${e.message}")
         }
 
         return Pair(

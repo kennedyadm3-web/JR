@@ -77,6 +77,23 @@ fun CreateServiceOrderScreen(
         }
     }
 
+    // Auto-seleciona cliente quando houver apenas 1 programado no roteiro de hoje
+    LaunchedEffect(uiState.clients) {
+        if (uiState.clients.size == 1 && selectedClientId.isBlank()) {
+            selectedClientId = uiState.clients[0].id
+            selectedClientName = uiState.clients[0].name
+        }
+    }
+
+    // Auto-seleciona endereço quando houver apenas 1 para o cliente selecionado
+    LaunchedEffect(filteredAddresses) {
+        if (filteredAddresses.size == 1 && selectedAddressId.isBlank()) {
+            selectedAddressId = filteredAddresses[0].id
+            selectedAddressStreet = filteredAddresses[0].street
+            viewModel.loadEquipmentsForAddress(filteredAddresses[0].id)
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -89,7 +106,7 @@ fun CreateServiceOrderScreen(
                             color = BluePrimary
                         )
                         Text(
-                            text = "Agendar Chamado no Roteiro • ${user.name}",
+                            text = "Abertura no Local de Atendimento • ${user.name}",
                             fontSize = 11.sp,
                             color = TextSecondary,
                             fontWeight = FontWeight.Medium
@@ -144,11 +161,11 @@ fun CreateServiceOrderScreen(
                     Button(
                         onClick = {
                             if (selectedClientName.isBlank()) {
-                                validationError = "Por favor, selecione ou informe o Cliente."
+                                validationError = "Por favor, selecione o Cliente com atendimento previsto hoje."
                                 return@Button
                             }
                             if (selectedAddressStreet.isBlank()) {
-                                validationError = "Por favor, selecione ou informe o Endereço."
+                                validationError = "Por favor, selecione o Endereço com atendimento previsto hoje."
                                 return@Button
                             }
                             isSubmitting = true
@@ -166,7 +183,7 @@ fun CreateServiceOrderScreen(
                                 description = description,
                                 onSuccess = { createdId ->
                                     isSubmitting = false
-                                    Toast.makeText(context, "Ordem de Serviço criada e agendada com sucesso!", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(context, "Ordem de Serviço criada com sucesso para este atendimento!", Toast.LENGTH_LONG).show()
                                     onOrderCreated(createdId)
                                 },
                                 onError = { err ->
@@ -181,7 +198,7 @@ fun CreateServiceOrderScreen(
                             .height(48.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF581C87)),
-                        enabled = !isSubmitting
+                        enabled = !isSubmitting && uiState.clients.isNotEmpty()
                     ) {
                         if (isSubmitting) {
                             CircularProgressIndicator(
@@ -192,7 +209,7 @@ fun CreateServiceOrderScreen(
                         } else {
                             Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("CRIAR E AGENDAR O.S.", fontSize = 12.sp, fontWeight = FontWeight.Black)
+                            Text("CRIAR ORDEM DE SERVIÇO", fontSize = 12.sp, fontWeight = FontWeight.Black)
                         }
                     }
                 }
@@ -208,7 +225,7 @@ fun CreateServiceOrderScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Banner informativo estilo PWA
+            // Banner informativo
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -237,13 +254,13 @@ fun CreateServiceOrderScreen(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "Agendar O.S. no Roteiro Diário",
+                            text = "Nova O.S. no Endereço do Roteiro",
                             fontWeight = FontWeight.Black,
                             fontSize = 14.sp,
                             color = Color.White
                         )
                         Text(
-                            text = "Organize a ordem de serviço para a equipe técnica sem afetar o cronograma de preventivas",
+                            text = "Abra uma ordem de serviço em um dos locais com atendimento previsto para hoje.",
                             fontSize = 11.sp,
                             color = Color(0xFFD8B4FE)
                         )
@@ -251,7 +268,7 @@ fun CreateServiceOrderScreen(
                 }
             }
 
-            // 1. Data e Tipo
+            // 1. Tipo do Atendimento e Data Fixa do Dia
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -265,7 +282,7 @@ fun CreateServiceOrderScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "1. Programação e Tipo de Chamado",
+                        text = "1. Tipo do Atendimento",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Black,
                         color = TextPrimary
@@ -275,26 +292,52 @@ fun CreateServiceOrderScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        // Data Programada
+                        // Data do Atendimento (Fixa no roteiro de hoje)
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "DATA PROGRAMADA *",
+                                text = "DATA DO ATENDIMENTO",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextSecondary
                             )
                             Spacer(modifier = Modifier.height(4.dp))
-                            OutlinedTextField(
-                                value = plannedDate,
-                                onValueChange = { plannedDate = it },
-                                modifier = Modifier.fillMaxWidth(),
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp),
                                 shape = RoundedCornerShape(12.dp),
-                                placeholder = { Text("AAAA-MM-DD", fontSize = 12.sp) },
-                                leadingIcon = {
-                                    Icon(Icons.Default.DateRange, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
-                                },
-                                singleLine = true
-                            )
+                                color = Color(0xFFF1F5F9),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0))
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Default.DateRange,
+                                        contentDescription = null,
+                                        tint = BluePrimary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = "Hoje",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = BluePrimary
+                                        )
+                                        Text(
+                                            text = todayStr,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = TextPrimary
+                                        )
+                                    }
+                                }
+                            }
                         }
 
                         // Tipo de Atendimento
@@ -438,7 +481,7 @@ fun CreateServiceOrderScreen(
                 }
             }
 
-            // 3. Cliente e Endereço
+            // 3. Cliente e Endereço Programado no Roteiro
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -451,49 +494,99 @@ fun CreateServiceOrderScreen(
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(
-                        text = "3. Cliente e Local do Atendimento",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Black,
-                        color = TextPrimary
-                    )
-
-                    // Cliente
-                    Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Text(
-                            text = "CLIENTE *",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
+                            text = "3. Local Programado no Roteiro de Hoje",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Black,
+                            color = TextPrimary
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box {
-                            OutlinedTextField(
-                                value = selectedClientName.ifBlank { "Selecione o Cliente..." },
-                                onValueChange = { selectedClientName = it },
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xFFEFF6FF)
+                        ) {
+                            Text(
+                                text = "${uiState.clients.size} local(is) previsto(s)",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = BluePrimary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    if (uiState.clients.isEmpty()) {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            color = Color(0xFFFEF3C7),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFDE68A))
+                        ) {
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { clientExpanded = true },
-                                shape = RoundedCornerShape(12.dp),
-                                leadingIcon = {
-                                    Icon(Icons.Default.Business, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
-                                },
-                                trailingIcon = {
-                                    IconButton(onClick = { clientExpanded = !clientExpanded }) {
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                                    }
-                                }
-                            )
-                            DropdownMenu(
-                                expanded = clientExpanded,
-                                onDismissRequest = { clientExpanded = false }
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (uiState.clients.isEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("Nenhum cliente cadastrado no momento", fontSize = 12.sp) },
-                                        onClick = { clientExpanded = false }
-                                    )
-                                } else {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = null,
+                                    tint = Color(0xFFB45309),
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Nenhum endereço programado no seu roteiro de hoje. Você só pode abrir novas O.S. nos locais onde já possua atendimento previsto pelo sistema administrativo.",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFF92400E),
+                                    lineHeight = 15.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "Apenas clientes e endereços com atendimento programado para você hoje aparecem para seleção.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF059669),
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        // Cliente
+                        Column {
+                            Text(
+                                text = "CLIENTE COM ATENDIMENTO HOJE *",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Box {
+                                OutlinedTextField(
+                                    value = selectedClientName.ifBlank { "Selecione o Cliente do Roteiro..." },
+                                    onValueChange = {},
+                                    readOnly = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { clientExpanded = true },
+                                    shape = RoundedCornerShape(12.dp),
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Business, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
+                                    },
+                                    trailingIcon = {
+                                        IconButton(onClick = { clientExpanded = !clientExpanded }) {
+                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                        }
+                                    }
+                                )
+                                DropdownMenu(
+                                    expanded = clientExpanded,
+                                    onDismissRequest = { clientExpanded = false }
+                                ) {
                                     uiState.clients.forEach { c ->
                                         DropdownMenuItem(
                                             text = {
@@ -516,57 +609,58 @@ fun CreateServiceOrderScreen(
                                 }
                             }
                         }
-                    }
 
-                    // Endereço
-                    Column {
-                        Text(
-                            text = "ENDEREÇO DE ATENDIMENTO *",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box {
-                            OutlinedTextField(
-                                value = selectedAddressStreet.ifBlank { "Selecione o Endereço..." },
-                                onValueChange = { selectedAddressStreet = it },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { addressExpanded = true },
-                                shape = RoundedCornerShape(12.dp),
-                                leadingIcon = {
-                                    Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
-                                },
-                                trailingIcon = {
-                                    IconButton(onClick = { addressExpanded = !addressExpanded }) {
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                                    }
-                                }
+                        // Endereço
+                        Column {
+                            Text(
+                                text = "ENDEREÇO DO ATENDIMENTO *",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
                             )
-                            DropdownMenu(
-                                expanded = addressExpanded,
-                                onDismissRequest = { addressExpanded = false }
-                            ) {
-                                if (filteredAddresses.isEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("Nenhum endereço encontrado para este cliente", fontSize = 12.sp) },
-                                        onClick = { addressExpanded = false }
-                                    )
-                                } else {
-                                    filteredAddresses.forEach { a ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Box {
+                                OutlinedTextField(
+                                    value = selectedAddressStreet.ifBlank { "Selecione o Endereço do Roteiro..." },
+                                    onValueChange = {},
+                                    readOnly = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { if (selectedClientId.isNotBlank()) addressExpanded = true },
+                                    shape = RoundedCornerShape(12.dp),
+                                    leadingIcon = {
+                                        Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
+                                    },
+                                    trailingIcon = {
+                                        IconButton(onClick = { if (selectedClientId.isNotBlank()) addressExpanded = !addressExpanded }) {
+                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                        }
+                                    }
+                                )
+                                DropdownMenu(
+                                    expanded = addressExpanded,
+                                    onDismissRequest = { addressExpanded = false }
+                                ) {
+                                    if (filteredAddresses.isEmpty()) {
                                         DropdownMenuItem(
-                                            text = { Text(a.street, fontSize = 12.sp) },
-                                            onClick = {
-                                                selectedAddressId = a.id
-                                                selectedAddressStreet = a.street
-                                                if (selectedClientId.isBlank()) {
-                                                    selectedClientId = a.clientId
-                                                }
-                                                viewModel.loadEquipmentsForAddress(a.id)
-                                                addressExpanded = false
-                                            }
+                                            text = { Text("Nenhum endereço previsto para este cliente hoje", fontSize = 12.sp) },
+                                            onClick = { addressExpanded = false }
                                         )
+                                    } else {
+                                        filteredAddresses.forEach { a ->
+                                            DropdownMenuItem(
+                                                text = { Text(a.street, fontSize = 12.sp) },
+                                                onClick = {
+                                                    selectedAddressId = a.id
+                                                    selectedAddressStreet = a.street
+                                                    if (selectedClientId.isBlank()) {
+                                                        selectedClientId = a.clientId
+                                                    }
+                                                    viewModel.loadEquipmentsForAddress(a.id)
+                                                    addressExpanded = false
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }

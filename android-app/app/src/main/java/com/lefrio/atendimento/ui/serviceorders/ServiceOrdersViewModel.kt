@@ -72,12 +72,17 @@ class ServiceOrdersViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                val (clients, addresses) = repository.getAvailableClientsAndAddresses()
+                val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                val (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
+                    technicianName = currentUser.name,
+                    technicianId = currentUser.uid,
+                    date = todayStr
+                )
                 val techs = repository.getAllTechnicians()
                 _uiState.update {
                     it.copy(
-                        clients = clients,
-                        addresses = addresses,
+                        clients = scheduledClients,
+                        addresses = scheduledAddresses,
                         technicians = techs,
                         isLoading = false
                     )
@@ -207,13 +212,17 @@ class ServiceOrdersViewModel(
                 technicianId = currentUser.uid,
                 targetDate = todayStr
             )
-            val (clients, addresses) = repository.getAvailableClientsAndAddresses()
+            val (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
+                technicianName = currentUser.name,
+                technicianId = currentUser.uid,
+                date = todayStr
+            )
             val techs = repository.getAllTechnicians()
             SyncWorker.triggerImmediateSync(getApplication())
             _uiState.update {
                 it.copy(
-                    clients = clients,
-                    addresses = addresses,
+                    clients = scheduledClients,
+                    addresses = scheduledAddresses,
                     technicians = techs,
                     isSyncing = false
                 )
