@@ -22,8 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
-import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.ui.serviceorders.components.CreateServiceOrderDialog
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
@@ -32,7 +32,7 @@ import com.lefrio.atendimento.ui.theme.TextSecondary
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServiceOrdersScreen(
-    user: TechnicianEntity,
+    user: TechnicianUser,
     viewModel: ServiceOrdersViewModel,
     onMenuClick: () -> Unit,
     onOrderClick: (orderId: String) -> Unit,
@@ -262,7 +262,7 @@ fun ServiceOrdersScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 14.dp, top = 6.dp, bottom = 80.dp),
+                    contentPadding = PaddingValues(start = 14.dp, top = 6.dp, end = 14.dp, bottom = 80.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(uiState.filteredOrders, key = { it.id }) { order ->

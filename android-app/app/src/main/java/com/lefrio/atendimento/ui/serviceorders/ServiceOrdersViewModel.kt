@@ -3,6 +3,7 @@ package com.lefrio.atendimento.ui.serviceorders
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.data.repository.*
@@ -40,7 +41,7 @@ data class ServiceOrdersUiState(
 
 class ServiceOrdersViewModel(
     application: Application,
-    private val currentUser: TechnicianEntity
+    private val currentUser: TechnicianUser
 ) : AndroidViewModel(application) {
 
     private val repository = ServiceOrderRepository(application)
@@ -194,7 +195,11 @@ class ServiceOrdersViewModel(
     fun triggerSync() {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }
-            repository.loadItineraryForTechnician(currentUser.name, currentUser.uid)
+            repository.syncDailyItinerary(
+                technicianName = currentUser.name,
+                technicianId = currentUser.uid,
+                targetDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+            )
             SyncWorker.triggerImmediateSync(getApplication())
             kotlinx.coroutines.delay(1000)
             _uiState.update { it.copy(isSyncing = false) }

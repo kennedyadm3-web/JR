@@ -930,8 +930,8 @@ class ServiceOrderRepository(private val context: Context) {
                 equipmentSector = "Geral",
                 isChecked = false,
                 isSkipped = false,
-                isSyncedWithServer = false,
-                lastModifiedAt = timestamp
+                isSynced = false,
+                updatedAt = timestamp
             )
             checklistDao.insertOrUpdate(checkItem)
         }
@@ -1061,6 +1061,10 @@ class ServiceOrderRepository(private val context: Context) {
             Log.d(TAG, "Busca de equipamentos remota indisponível: ${e.message}")
         }
         return list
+    }
+
+    suspend fun getAllTechnicians(): List<com.lefrio.atendimento.data.local.entity.TechnicianEntity> {
+        return db.technicianDao().getActiveTechniciansSync()
     }
 }
 

@@ -17,7 +17,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.lefrio.atendimento.data.local.entity.TechnicianEntity
+import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
@@ -34,7 +34,7 @@ enum class DrawerDestination {
 @Composable
 fun AppDrawerContent(
     currentDestination: DrawerDestination,
-    user: TechnicianEntity,
+    user: TechnicianUser,
     appVersion: String,
     unreadNotificationsCount: Int = 0,
     pendingSyncCount: Int = 0,

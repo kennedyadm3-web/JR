@@ -138,13 +138,7 @@ class MainActivity : ComponentActivity() {
                             val serviceOrdersViewModel = remember(state.user.uid) {
                                 ServiceOrdersViewModel(
                                     application,
-                                    TechnicianEntity(
-                                        uid = state.user.uid,
-                                        name = state.user.name,
-                                        email = state.user.email,
-                                        pin = state.user.pin,
-                                        isActive = true
-                                    )
+                                    state.user
                                 )
                             }
 
@@ -153,13 +147,7 @@ class MainActivity : ComponentActivity() {
                                 drawerContent = {
                                     AppDrawerContent(
                                         currentDestination = currentDestination,
-                                        user = TechnicianEntity(
-                                            uid = state.user.uid,
-                                            name = state.user.name,
-                                            email = state.user.email,
-                                            pin = state.user.pin,
-                                            isActive = true
-                                        ),
+                                        user = state.user,
                                         appVersion = updateManager.getCurrentVersionName(),
                                         pendingSyncCount = dashboardUiState.pendingSyncCount,
                                         onNavigate = { dest ->
@@ -311,13 +299,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                 } else if (currentDestination == DrawerDestination.SERVICE_ORDERS) {
                                     ServiceOrdersScreen(
-                                        user = TechnicianEntity(
-                                            uid = state.user.uid,
-                                            name = state.user.name,
-                                            email = state.user.email,
-                                            pin = state.user.pin,
-                                            isActive = true
-                                        ),
+                                        user = state.user,
                                         viewModel = serviceOrdersViewModel,
                                         onMenuClick = {
                                             scope.launch { drawerState.open() }

@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.data.repository.AddressOption
 import com.lefrio.atendimento.data.repository.ClientOption
@@ -33,7 +34,7 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CreateServiceOrderDialog(
-    currentUser: TechnicianEntity,
+    currentUser: TechnicianUser,
     clients: List<ClientOption>,
     addresses: List<AddressOption>,
     equipments: List<EquipmentOption>,
@@ -302,7 +303,7 @@ fun CreateServiceOrderDialog(
                                             tech2Expanded = false
                                         }
                                     )
-                                    technicians.filter { it.uid != currentUser.uid }.forEach { tech ->
+                                    technicians.filter { it.id != currentUser.uid }.forEach { tech ->
                                         DropdownMenuItem(
                                             text = { Text(tech.name, fontSize = 12.sp) },
                                             onClick = {
