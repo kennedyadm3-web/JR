@@ -32,6 +32,7 @@ data class ServiceOrdersUiState(
     val isLoading: Boolean = false,
     val isSyncing: Boolean = false,
     val isCreateModalOpen: Boolean = false,
+    val selectedDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
     val clients: List<ClientOption> = emptyList(),
     val addresses: List<AddressOption> = emptyList(),
     val equipments: List<EquipmentOption> = emptyList(),
@@ -50,14 +51,19 @@ class ServiceOrdersViewModel(
 
     init {
         loadData()
+        triggerSync()
         observeOrders()
     }
 
     private fun observeOrders() {
         viewModelScope.launch {
-            repository.getAllOrders().collect { allOrders ->
-                // Filtra para exibir todas as ordens de serviço (incluindo tipo 'ORDEM DE SERVIÇO', 'MANUTENÇÃO CORRETIVA', etc.)
-                updateFilteredList(allOrders, _uiState.value.selectedTab, _uiState.value.searchQuery)
+            val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+            repository.getServiceOrdersForTechnicianAndDate(
+                technicianName = currentUser.name,
+                technicianId = currentUser.uid,
+                date = todayStr
+            ).collect { myOrdersForToday ->
+                updateFilteredList(myOrdersForToday, _uiState.value.selectedTab, _uiState.value.searchQuery)
             }
         }
     }
@@ -195,14 +201,23 @@ class ServiceOrdersViewModel(
     fun triggerSync() {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }
+            val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
             repository.syncDailyItinerary(
                 technicianName = currentUser.name,
                 technicianId = currentUser.uid,
-                targetDate = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                targetDate = todayStr
             )
+            val (clients, addresses) = repository.getAvailableClientsAndAddresses()
+            val techs = repository.getAllTechnicians()
             SyncWorker.triggerImmediateSync(getApplication())
-            kotlinx.coroutines.delay(1000)
-            _uiState.update { it.copy(isSyncing = false) }
+            _uiState.update {
+                it.copy(
+                    clients = clients,
+                    addresses = addresses,
+                    technicians = techs,
+                    isSyncing = false
+                )
+            }
         }
     }
 }

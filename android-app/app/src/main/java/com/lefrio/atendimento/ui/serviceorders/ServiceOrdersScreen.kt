@@ -24,7 +24,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
-import com.lefrio.atendimento.ui.serviceorders.components.CreateServiceOrderDialog
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
@@ -36,6 +35,7 @@ fun ServiceOrdersScreen(
     viewModel: ServiceOrdersViewModel,
     onMenuClick: () -> Unit,
     onOrderClick: (orderId: String) -> Unit,
+    onNewOrderClick: () -> Unit,
     onProfileClick: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -105,7 +105,7 @@ fun ServiceOrdersScreen(
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { viewModel.openCreateModal() },
+                onClick = onNewOrderClick,
                 icon = { Icon(Icons.Default.Add, contentDescription = null, tint = Color.White) },
                 text = { Text("NOVA O.S.", fontWeight = FontWeight.Black, fontSize = 13.sp, color = Color.White) },
                 containerColor = Color(0xFF581C87), // Roxo do botão de Nova O.S. PWA
@@ -274,42 +274,6 @@ fun ServiceOrdersScreen(
                 }
             }
         }
-    }
-
-    // MODAL DE CRIAÇÃO DE NOVA ORDEM DE SERVIÇO
-    if (uiState.isCreateModalOpen) {
-        CreateServiceOrderDialog(
-            currentUser = user,
-            clients = uiState.clients,
-            addresses = uiState.addresses,
-            equipments = uiState.equipments,
-            technicians = uiState.technicians,
-            onAddressSelected = { addrId ->
-                viewModel.loadEquipmentsForAddress(addrId)
-            },
-            onDismissRequest = { viewModel.closeCreateModal() },
-            onConfirmCreate = { date, type, clientId, clientName, addressId, addressStreet, equipmentId, equipmentName, tech2Name, desc ->
-                viewModel.createServiceOrder(
-                    date = date,
-                    type = type,
-                    clientId = clientId,
-                    clientName = clientName,
-                    addressId = addressId,
-                    addressStreet = addressStreet,
-                    equipmentId = equipmentId,
-                    equipmentName = equipmentName,
-                    tech2Name = tech2Name,
-                    description = desc,
-                    onSuccess = { createdId ->
-                        Toast.makeText(context, "Ordem de Serviço criada e agendada com sucesso!", Toast.LENGTH_LONG).show()
-                        onOrderClick(createdId)
-                    },
-                    onError = { err ->
-                        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-                    }
-                )
-            }
-        )
     }
 }
 

@@ -33,6 +33,7 @@ import androidx.compose.material3.rememberDrawerState
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.ui.components.AppDrawerContent
 import com.lefrio.atendimento.ui.components.DrawerDestination
+import com.lefrio.atendimento.ui.serviceorders.CreateServiceOrderScreen
 import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersScreen
 import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersViewModel
 import com.lefrio.atendimento.ui.theme.LeFrioTheme
@@ -135,6 +136,7 @@ class MainActivity : ComponentActivity() {
                         is AuthUiState.Success -> {
                             val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
                             var currentDestination by remember { mutableStateOf(DrawerDestination.ROTEIRO) }
+                            var showCreateOrderScreen by remember { mutableStateOf(false) }
                             val serviceOrdersViewModel = remember(state.user.uid) {
                                 ServiceOrdersViewModel(
                                     application,
@@ -155,6 +157,7 @@ class MainActivity : ComponentActivity() {
                                             when (dest) {
                                                 DrawerDestination.ROTEIRO -> {
                                                     currentDestination = DrawerDestination.ROTEIRO
+                                                    showCreateOrderScreen = false
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
                                                     showExpensesScreen = false
@@ -164,6 +167,7 @@ class MainActivity : ComponentActivity() {
                                                 }
                                                 DrawerDestination.SERVICE_ORDERS -> {
                                                     currentDestination = DrawerDestination.SERVICE_ORDERS
+                                                    showCreateOrderScreen = false
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
                                                     showExpensesScreen = false
@@ -179,7 +183,7 @@ class MainActivity : ComponentActivity() {
                                                     selectedOrderId = null
                                                     signatureOrderId = null
                                                     summaryOrderId = null
-                                                    serviceOrdersViewModel.openCreateModal()
+                                                    showCreateOrderScreen = true
                                                 }
                                                 DrawerDestination.EXPENSES -> {
                                                     showExpensesScreen = true
@@ -201,6 +205,7 @@ class MainActivity : ComponentActivity() {
                                         onLogoutClick = {
                                             scope.launch { drawerState.close() }
                                             showProfileScreen = false
+                                            showCreateOrderScreen = false
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -223,6 +228,7 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onSwitchTechClick = {
                                             showProfileScreen = false
+                                            showCreateOrderScreen = false
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -230,6 +236,7 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onLogoutClick = {
                                             showProfileScreen = false
+                                            showCreateOrderScreen = false
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -297,6 +304,17 @@ class MainActivity : ComponentActivity() {
                                             }
                                         )
                                     }
+                                } else if (showCreateOrderScreen) {
+                                    CreateServiceOrderScreen(
+                                        user = state.user,
+                                        viewModel = serviceOrdersViewModel,
+                                        onBackClick = { showCreateOrderScreen = false },
+                                        onOrderCreated = { createdId ->
+                                            showCreateOrderScreen = false
+                                            serviceOrdersViewModel.triggerSync()
+                                            selectedOrderId = createdId
+                                        }
+                                    )
                                 } else if (currentDestination == DrawerDestination.SERVICE_ORDERS) {
                                     ServiceOrdersScreen(
                                         user = state.user,
@@ -306,6 +324,9 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onOrderClick = { orderId ->
                                             selectedOrderId = orderId
+                                        },
+                                        onNewOrderClick = {
+                                            showCreateOrderScreen = true
                                         },
                                         onProfileClick = {
                                             showProfileScreen = true

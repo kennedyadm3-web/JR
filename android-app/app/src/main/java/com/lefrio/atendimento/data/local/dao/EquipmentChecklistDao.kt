@@ -72,4 +72,10 @@ interface EquipmentChecklistDao {
 
     @Query("UPDATE equipment_checklists SET isSynced = 1 WHERE id = :id")
     suspend fun markAsSynced(id: String)
+
+    @Query("""
+        DELETE FROM equipment_checklists 
+        WHERE orderId IN ('PREV_CORREIOS_ANADIA', 'PREV_BB_CENTRO', 'OS_CORRETIVA_1042', 'PREV_HOSPITAL_METRO', 'OS_CORRETIVA_1055')
+    """)
+    suspend fun deleteFakeSeedChecklists()
 }

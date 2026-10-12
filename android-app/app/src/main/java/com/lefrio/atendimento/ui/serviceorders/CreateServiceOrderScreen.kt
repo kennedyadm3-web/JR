@@ -1,7 +1,7 @@
-package com.lefrio.atendimento.ui.serviceorders.components
+package com.lefrio.atendimento.ui.serviceorders
 
+import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -15,16 +15,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.lefrio.atendimento.data.auth.TechnicianUser
-import com.lefrio.atendimento.data.local.entity.TechnicianEntity
-import com.lefrio.atendimento.data.repository.AddressOption
-import com.lefrio.atendimento.data.repository.ClientOption
-import com.lefrio.atendimento.data.repository.EquipmentOption
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
@@ -33,27 +28,15 @@ import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CreateServiceOrderDialog(
-    currentUser: TechnicianUser,
-    clients: List<ClientOption>,
-    addresses: List<AddressOption>,
-    equipments: List<EquipmentOption>,
-    technicians: List<TechnicianEntity>,
-    onAddressSelected: (addressId: String) -> Unit,
-    onDismissRequest: () -> Unit,
-    onConfirmCreate: (
-        date: String,
-        type: String,
-        clientId: String,
-        clientName: String,
-        addressId: String,
-        addressStreet: String,
-        equipmentId: String?,
-        equipmentName: String?,
-        tech2Name: String?,
-        description: String
-    ) -> Unit
+fun CreateServiceOrderScreen(
+    user: TechnicianUser,
+    viewModel: ServiceOrdersViewModel,
+    onBackClick: () -> Unit,
+    onOrderCreated: (orderId: String) -> Unit
 ) {
+    val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+
     val todayStr = remember {
         SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
     }
@@ -86,93 +69,208 @@ fun CreateServiceOrderDialog(
         "OUTROS"
     )
 
-    // Filtra endereços pertencentes ao cliente selecionado
-    val filteredAddresses = remember(selectedClientId, addresses) {
+    val filteredAddresses = remember(selectedClientId, uiState.addresses) {
         if (selectedClientId.isBlank()) {
-            addresses
+            uiState.addresses
         } else {
-            addresses.filter { it.clientId == selectedClientId }
+            uiState.addresses.filter { it.clientId == selectedClientId }
         }
     }
 
-    Dialog(
-        onDismissRequest = { if (!isSubmitting) onDismissRequest() },
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth(0.95f)
-                .fillMaxHeight(0.92f)
-                .clip(RoundedCornerShape(24.dp)),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-        ) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                // CABEÇALHO ROXO/AZUL INSPIRADO NO PWA
-                Box(
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = "Nova Ordem de Serviço",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Black,
+                            color = BluePrimary
+                        )
+                        Text(
+                            text = "Agendar Chamado no Roteiro • ${user.name}",
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBackClick) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Voltar",
+                            tint = BluePrimary
+                        )
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onBackClick) {
+                        Text(
+                            text = "Cancelar",
+                            color = Color(0xFFDC2626),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
+            )
+        },
+        bottomBar = {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shadowElevation = 8.dp,
+                color = Color.White
+            ) {
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFF3B1578)) // Roxo escuro PWA LeFrio
-                        .padding(16.dp)
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                    OutlinedButton(
+                        onClick = onBackClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        enabled = !isSubmitting
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFF581C87)),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Build,
-                                    contentDescription = null,
-                                    tint = Color(0xFFD8B4FE),
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column {
-                                Text(
-                                    text = "Agendar O.S. no Roteiro",
-                                    fontWeight = FontWeight.Black,
-                                    fontSize = 16.sp,
-                                    color = Color.White
-                                )
-                                Text(
-                                    text = "Organize a ordem de serviço para a equipe",
-                                    fontSize = 11.sp,
-                                    color = Color(0xFFD8B4FE)
-                                )
-                            }
-                        }
+                        Text("VOLTAR", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextSecondary)
+                    }
 
-                        IconButton(
-                            onClick = onDismissRequest,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = "Fechar",
-                                tint = Color.White
+                    Button(
+                        onClick = {
+                            if (selectedClientName.isBlank()) {
+                                validationError = "Por favor, selecione ou informe o Cliente."
+                                return@Button
+                            }
+                            if (selectedAddressStreet.isBlank()) {
+                                validationError = "Por favor, selecione ou informe o Endereço."
+                                return@Button
+                            }
+                            isSubmitting = true
+                            validationError = null
+                            viewModel.createServiceOrder(
+                                date = plannedDate,
+                                type = selectedType,
+                                clientId = selectedClientId.ifBlank { "CLI_MANUAL_${System.currentTimeMillis()}" },
+                                clientName = selectedClientName,
+                                addressId = selectedAddressId.ifBlank { "ADDR_MANUAL_${System.currentTimeMillis()}" },
+                                addressStreet = selectedAddressStreet,
+                                equipmentId = selectedEquipmentId,
+                                equipmentName = selectedEquipmentName,
+                                tech2Name = selectedTech2Name.ifBlank { null },
+                                description = description,
+                                onSuccess = { createdId ->
+                                    isSubmitting = false
+                                    Toast.makeText(context, "Ordem de Serviço criada e agendada com sucesso!", Toast.LENGTH_LONG).show()
+                                    onOrderCreated(createdId)
+                                },
+                                onError = { err ->
+                                    isSubmitting = false
+                                    validationError = err
+                                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                                }
                             )
+                        },
+                        modifier = Modifier
+                            .weight(1.6f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF581C87)),
+                        enabled = !isSubmitting
+                    ) {
+                        if (isSubmitting) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("CRIAR E AGENDAR O.S.", fontSize = 12.sp, fontWeight = FontWeight.Black)
                         }
                     }
                 }
+            }
+        },
+        containerColor = Color(0xFFF8FAFC)
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            // Banner informativo estilo PWA
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF3B1578))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF581C87)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Build,
+                            contentDescription = null,
+                            tint = Color(0xFFD8B4FE),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Agendar O.S. no Roteiro Diário",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 14.sp,
+                            color = Color.White
+                        )
+                        Text(
+                            text = "Organize a ordem de serviço para a equipe técnica sem afetar o cronograma de preventivas",
+                            fontSize = 11.sp,
+                            color = Color(0xFFD8B4FE)
+                        )
+                    }
+                }
+            }
 
-                // FORMULÁRIO ROLÁVEL
+            // 1. Data e Tipo
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
                 Column(
                     modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // 1. Data e Tipo
+                    Text(
+                        text = "1. Programação e Tipo de Chamado",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary
+                    )
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -241,8 +339,29 @@ fun CreateServiceOrderDialog(
                             }
                         }
                     }
+                }
+            }
 
-                    // 2. Técnico Responsável e Auxiliar
+            // 2. Equipe Técnica
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "2. Equipe Técnica Escalada",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary
+                    )
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -256,7 +375,7 @@ fun CreateServiceOrderDialog(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             OutlinedTextField(
-                                value = currentUser.name,
+                                value = user.name,
                                 onValueChange = {},
                                 readOnly = true,
                                 modifier = Modifier.fillMaxWidth(),
@@ -303,7 +422,7 @@ fun CreateServiceOrderDialog(
                                             tech2Expanded = false
                                         }
                                     )
-                                    technicians.filter { it.id != currentUser.uid }.forEach { tech ->
+                                    uiState.technicians.filter { it.id != user.uid }.forEach { tech ->
                                         DropdownMenuItem(
                                             text = { Text(tech.name, fontSize = 12.sp) },
                                             onClick = {
@@ -316,8 +435,30 @@ fun CreateServiceOrderDialog(
                             }
                         }
                     }
+                }
+            }
 
-                    // 3. Cliente
+            // 3. Cliente e Endereço
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "3. Cliente e Local do Atendimento",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary
+                    )
+
+                    // Cliente
                     Column {
                         Text(
                             text = "CLIENTE *",
@@ -347,13 +488,13 @@ fun CreateServiceOrderDialog(
                                 expanded = clientExpanded,
                                 onDismissRequest = { clientExpanded = false }
                             ) {
-                                if (clients.isEmpty()) {
+                                if (uiState.clients.isEmpty()) {
                                     DropdownMenuItem(
-                                        text = { Text("Nenhum cliente em cache. Você pode digitar acima.", fontSize = 12.sp) },
+                                        text = { Text("Nenhum cliente cadastrado no momento", fontSize = 12.sp) },
                                         onClick = { clientExpanded = false }
                                     )
                                 } else {
-                                    clients.forEach { c ->
+                                    uiState.clients.forEach { c ->
                                         DropdownMenuItem(
                                             text = {
                                                 Column {
@@ -377,7 +518,7 @@ fun CreateServiceOrderDialog(
                         }
                     }
 
-                    // 4. Endereço
+                    // Endereço
                     Column {
                         Text(
                             text = "ENDEREÇO DE ATENDIMENTO *",
@@ -409,7 +550,7 @@ fun CreateServiceOrderDialog(
                             ) {
                                 if (filteredAddresses.isEmpty()) {
                                     DropdownMenuItem(
-                                        text = { Text("Nenhum endereço encontrado. Você pode digitar.", fontSize = 12.sp) },
+                                        text = { Text("Nenhum endereço encontrado para este cliente", fontSize = 12.sp) },
                                         onClick = { addressExpanded = false }
                                     )
                                 } else {
@@ -422,7 +563,7 @@ fun CreateServiceOrderDialog(
                                                 if (selectedClientId.isBlank()) {
                                                     selectedClientId = a.clientId
                                                 }
-                                                onAddressSelected(a.id)
+                                                viewModel.loadEquipmentsForAddress(a.id)
                                                 addressExpanded = false
                                             }
                                         )
@@ -431,11 +572,33 @@ fun CreateServiceOrderDialog(
                             }
                         }
                     }
+                }
+            }
 
-                    // 5. Equipamento
+            // 4. Máquina e Observações
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "4. Equipamento e Detalhes",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary
+                    )
+
+                    // Equipamento
                     Column {
                         Text(
-                            text = "MÁQUINA / EQUIPAMENTO (OPCIONAL)",
+                            text = "MÁQUINA / EQUIPAMENTO ATENDIDO (OPCIONAL)",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextSecondary
@@ -471,7 +634,7 @@ fun CreateServiceOrderDialog(
                                         equipmentExpanded = false
                                     }
                                 )
-                                equipments.forEach { eq ->
+                                uiState.equipments.forEach { eq ->
                                     DropdownMenuItem(
                                         text = {
                                             Column {
@@ -490,10 +653,10 @@ fun CreateServiceOrderDialog(
                         }
                     }
 
-                    // 6. Descrição do Chamado
+                    // Descrição
                     Column {
                         Text(
-                            text = "DESCRIÇÃO DO CHAMADO / OBSERVAÇÕES *",
+                            text = "MOTIVO DO CHAMADO / OBSERVAÇÕES *",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextSecondary
@@ -504,18 +667,18 @@ fun CreateServiceOrderDialog(
                             onValueChange = { description = it },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(100.dp),
+                                .height(110.dp),
                             shape = RoundedCornerShape(12.dp),
                             placeholder = {
                                 Text(
-                                    "Descreva o motivo do chamado, problemas relatados pelo cliente ou instruções técnicas...",
+                                    "Descreva o motivo do chamado, problemas relatados pelo cliente ou instruções da equipe técnica...",
                                     fontSize = 11.sp
                                 )
                             }
                         )
                     }
 
-                    // Mensagem de Erro de Validação
+                    // Erro
                     validationError?.let { err ->
                         Text(
                             text = err,
@@ -525,72 +688,9 @@ fun CreateServiceOrderDialog(
                         )
                     }
                 }
-
-                // RODAPÉ COM BOTÕES
-                Divider(color = Color(0xFFE2E8F0))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onDismissRequest,
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        enabled = !isSubmitting
-                    ) {
-                        Text("CANCELAR", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextSecondary)
-                    }
-
-                    Button(
-                        onClick = {
-                            if (selectedClientName.isBlank()) {
-                                validationError = "Por favor, selecione ou informe o Cliente."
-                                return@Button
-                            }
-                            if (selectedAddressStreet.isBlank()) {
-                                validationError = "Por favor, selecione ou informe o Endereço."
-                                return@Button
-                            }
-                            isSubmitting = true
-                            validationError = null
-                            onConfirmCreate(
-                                plannedDate,
-                                selectedType,
-                                selectedClientId.ifBlank { "CLI_MANUAL_${System.currentTimeMillis()}" },
-                                selectedClientName,
-                                selectedAddressId.ifBlank { "ADDR_MANUAL_${System.currentTimeMillis()}" },
-                                selectedAddressStreet,
-                                selectedEquipmentId,
-                                selectedEquipmentName,
-                                selectedTech2Name.ifBlank { null },
-                                description
-                            )
-                        },
-                        modifier = Modifier
-                            .weight(1.5f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF581C87)),
-                        enabled = !isSubmitting
-                    ) {
-                        if (isSubmitting) {
-                            CircularProgressIndicator(
-                                color = Color.White,
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("CRIAR E AGENDAR O.S.", fontSize = 12.sp, fontWeight = FontWeight.Black)
-                        }
-                    }
-                }
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }

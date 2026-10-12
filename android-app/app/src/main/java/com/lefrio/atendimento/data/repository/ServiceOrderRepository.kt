@@ -53,9 +53,14 @@ class ServiceOrderRepository(private val context: Context) {
         technicianId: String,
         targetDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
     ) = withContext(Dispatchers.IO) {
+        // 0. Remove limpa e definitivamente qualquer registro de teste/seed antigo ou inválido do aparelho
+        orderDao.deleteInvalidAndFakeOrders()
+        orderDao.deleteFakeSeedOrders()
+        checklistDao.deleteFakeSeedChecklists()
+
         val ordersToSave = mutableListOf<ServiceOrderEntity>()
         val checklistToSave = mutableListOf<EquipmentChecklistEntity>()
-        val currentMonth = if (targetDate.length >= 7) targetDate.substring(0, 7) else "2026-10"
+        val currentMonth = if (targetDate.length >= 7) targetDate.substring(0, targetDate.lastIndexOf('-').let { if (it > 0) it else 7 }) else "2026-10"
 
         val normTechName = technicianName.trim().uppercase()
         val normTechId = technicianId.trim().uppercase()
@@ -198,23 +203,44 @@ class ServiceOrderRepository(private val context: Context) {
                             }
                         }
 
-                        // Processa Ordens de Serviço Corretivas
+                        // Processa Ordens de Serviço Corretivas reais
                         for (i in 0 until osArr.length()) {
                             val os = osArr.getJSONObject(i)
                             val osId = os.optString("id", UUID.randomUUID().toString())
+                            val clientId = os.optString("clientId", "")
+                            val addrId = os.optString("addressId", "")
+                            val addrObj = addrsMap[addrId]
+                            val clientObj = clientsMap[clientId] ?: (if (addrObj != null) clientsMap[addrObj.optString("clientId", "")] else null)
+
+                            val resolvedClientName = clientObj?.optString("name")
+                                ?: os.optString("clientName", "").takeIf { it.isNotBlank() && it != "Cliente LeFrio" && it != "Cliente PMOC" }
+
+                            val resolvedStreet = addrObj?.let { a ->
+                                val street = a.optString("street", "")
+                                val num = a.optString("number")?.let { ", $it" } ?: ""
+                                val neigh = a.optString("neighborhood")?.let { " - $it" } ?: ""
+                                "$street$num$neigh".trim()
+                            }?.takeIf { it.isNotBlank() } ?: os.optString("addressStreet", "").takeIf { it.isNotBlank() && it != "Endereço do Chamado" }
+
+                            // CRÍTICO: Se a O.S. não pertencer a nenhum cliente real cadastrado no sistema, descarta!
+                            if (resolvedClientName.isNullOrBlank() || resolvedStreet.isNullOrBlank()) {
+                                continue
+                            }
+
                             ordersToSave.add(
                                 ServiceOrderEntity(
                                     id = osId,
-                                    osNumber = os.optString("orderNumber", "OS-${osId.takeLast(4)}"),
+                                    osNumber = os.optString("orderNumber", os.optString("osNumber", "OS-${osId.takeLast(4)}")),
                                     originalId = osId,
-                                    clientId = os.optString("clientId", ""),
-                                    clientName = os.optString("clientName", "Cliente LeFrio"),
-                                    addressId = os.optString("addressId", ""),
-                                    addressStreet = os.optString("addressStreet", "Endereço do Chamado"),
+                                    clientId = clientId,
+                                    clientName = resolvedClientName,
+                                    addressId = addrId,
+                                    addressStreet = resolvedStreet,
                                     plannedDate = os.optString("plannedDate", targetDate),
                                     status = os.optString("status", "aberta"),
-                                    type = "ORDEM DE SERVIÇO",
+                                    type = os.optString("type", "ORDEM DE SERVIÇO"),
                                     technician1 = technicianName,
+                                    technician2 = os.optString("technician2", null),
                                     generalNotes = os.optString("description", "Atendimento Corretivo Solicitado"),
                                     isSyncedWithServer = true
                                 )
@@ -372,30 +398,68 @@ class ServiceOrderRepository(private val context: Context) {
                     }
                 }
 
-                // B) Busca Ordens de Serviço Corretivas (service_orders)
-                val ordersSnap = firestore.collection("service_orders").get().await()
-                for (doc in ordersSnap.documents) {
-                    val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
-                    val tName = (doc.getString("technicianName") ?: "").trim().uppercase()
-                    if (tId == normTechId || tName.contains(normTechName)) {
-                        ordersToSave.add(
-                            ServiceOrderEntity(
-                                id = doc.id,
-                                osNumber = doc.getString("orderNumber") ?: "OS-${doc.id.takeLast(4)}",
-                                originalId = doc.id,
-                                clientId = doc.getString("clientId") ?: "",
-                                clientName = doc.getString("clientName") ?: "Cliente LeFrio",
-                                addressId = doc.getString("addressId") ?: "",
-                                addressStreet = doc.getString("addressStreet") ?: "Endereço do Chamado",
-                                plannedDate = doc.getString("plannedDate") ?: targetDate,
-                                status = doc.getString("status") ?: "aberta",
-                                type = "ORDEM DE SERVIÇO",
-                                technician1 = technicianName,
-                                generalNotes = doc.getString("description") ?: "Atendimento Corretivo Solicitado",
-                                isSyncedWithServer = true
-                            )
-                        )
+                // B) Busca Ordens de Serviço Reais na coleção oficial 'serviceOrders' no Firestore
+                try {
+                    val ordersSnap = firestore.collection("serviceOrders").get().await()
+                    for (doc in ordersSnap.documents) {
+                        val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
+                        val tName = (doc.getString("technicianName") ?: doc.getString("technician1") ?: "").trim().uppercase()
+                        val t2Id = (doc.getString("technician2Id") ?: "").trim().uppercase()
+                        val t2Name = (doc.getString("technician2") ?: "").trim().uppercase()
+                        val pDate = (doc.getString("plannedDate") ?: (doc.getString("openedAt")?.take(10) ?: "")).trim()
+                        val status = doc.getString("status") ?: "aberta"
+
+                        val matchesTech = (tId.isNotBlank() && (tId == normTechId || tId.contains(normTechName))) ||
+                                          (tName.isNotBlank() && (tName == normTechId || tName.contains(normTechName))) ||
+                                          (t2Id.isNotBlank() && (t2Id == normTechId || t2Id.contains(normTechName))) ||
+                                          (t2Name.isNotBlank() && (t2Name == normTechId || t2Name.contains(normTechName)))
+
+                        val matchesDate = pDate.startsWith(targetDate)
+
+                        if (matchesTech && matchesDate && status != "cancelada") {
+                            val cId = doc.getString("clientId") ?: ""
+                            val aId = doc.getString("addressId") ?: ""
+                            val addrDoc = addressMap[aId]
+
+                            val realClientName = clientMap[cId]
+                                ?: doc.getString("clientName")?.takeIf { it.isNotBlank() && it != "Cliente LeFrio" && it != "Cliente PMOC" }
+
+                            val realStreet = addrDoc?.let {
+                                val s = it.getString("street") ?: ""
+                                val num = it.getString("number")?.let { n -> ", $n" } ?: ""
+                                val neigh = it.getString("neighborhood")?.let { nb -> " - $nb" } ?: ""
+                                "$s$num$neigh".trim()
+                            }?.takeIf { it.isNotBlank() } ?: doc.getString("addressStreet")?.takeIf { it.isNotBlank() && it != "Endereço do Chamado" }
+
+                            // Não adiciona se a O.S. não pertencer a nenhum cliente real cadastrado no sistema
+                            if (realClientName.isNullOrBlank() || realStreet.isNullOrBlank()) {
+                                continue
+                            }
+
+                            if (ordersToSave.none { it.id == doc.id }) {
+                                ordersToSave.add(
+                                    ServiceOrderEntity(
+                                        id = doc.id,
+                                        osNumber = doc.getString("osNumber") ?: doc.getString("orderNumber") ?: "OS-${doc.id.takeLast(4)}",
+                                        originalId = doc.id,
+                                        clientId = cId,
+                                        clientName = realClientName,
+                                        addressId = aId,
+                                        addressStreet = realStreet,
+                                        plannedDate = doc.getString("plannedDate") ?: targetDate,
+                                        status = status,
+                                        type = doc.getString("type") ?: "MANUTENÇÃO CORRETIVA CONTRATO",
+                                        technician1 = technicianName,
+                                        technician2 = doc.getString("technician2"),
+                                        generalNotes = doc.getString("description") ?: "Atendimento Corretivo Solicitado",
+                                        isSyncedWithServer = true
+                                    )
+                                )
+                            }
+                        }
                     }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Tentativa de leitura em serviceOrders: ${e.message}")
                 }
 
                 if (ordersToSave.isNotEmpty()) {
@@ -485,188 +549,7 @@ class ServiceOrderRepository(private val context: Context) {
             checklistDao.insertAll(finalChecklistMap.values.toList())
         }
 
-        // Se o Room estiver completamente vazio e nenhuma busca online encontrou dados, gera roteiro base de contingência
-        val currentLocalOrders = orderDao.getAllOrders()
-        if (currentLocalOrders.isEmpty() && ordersToSave.isEmpty()) {
-            val seedOrders = createSeedItinerary(technicianName, targetDate)
-            orderDao.insertAll(seedOrders.first)
-            checklistDao.insertAll(seedOrders.second)
-            return@withContext seedOrders.first.size
-        }
-
         return@withContext ordersToSave.size
-    }
-
-    /**
-     * Semeia um roteiro completo realista para o técnico caso ainda não haja registros no servidor.
-     */
-    private fun createSeedItinerary(
-        technicianName: String,
-        targetDate: String
-    ): Pair<List<ServiceOrderEntity>, List<EquipmentChecklistEntity>> {
-        val orders = mutableListOf<ServiceOrderEntity>()
-        val checklists = mutableListOf<EquipmentChecklistEntity>()
-
-        // 1ª Parada: MANUTENÇÃO PREVENTIVA (PMOC) - Correios
-        val id1 = "PREV_CORREIOS_ANADIA"
-        orders.add(
-            ServiceOrderEntity(
-                id = id1,
-                osNumber = "PMOC-101",
-                originalId = id1,
-                clientId = "CLI_CORREIOS",
-                clientName = "CORREIOS - AGÊNCIA ANADIA",
-                addressId = "ADDR_01",
-                addressStreet = "RUA DO COMÉRCIO, 150 - CENTRO",
-                plannedDate = targetDate,
-                status = "aberta",
-                type = "MANUTENÇÃO PREVENTIVA",
-                technician1 = technicianName,
-                generalNotes = "Plano PMOC Mensal • Limpeza de filtros, serpentinas e aferição de temperatura e pressão."
-            )
-        )
-        for (i in 1..4) {
-            val eqId = "EQ_CORREIOS_$i"
-            checklists.add(
-                EquipmentChecklistEntity(
-                    id = "CHECK_${id1}_$eqId",
-                    orderId = id1,
-                    equipmentId = eqId,
-                    equipmentName = "Split Hi-Wall #0$i",
-                    equipmentBrand = if (i % 2 == 0) "Carrier" else "Gree",
-                    equipmentBtus = "12000 BTUs",
-                    equipmentSector = "Atendimento ao Público - Caixa $i"
-                )
-            )
-        }
-
-        // 2ª Parada: MANUTENÇÃO PREVENTIVA (PMOC) - Banco do Brasil
-        val id2 = "PREV_BB_CENTRO"
-        orders.add(
-            ServiceOrderEntity(
-                id = id2,
-                osNumber = "PMOC-102",
-                originalId = id2,
-                clientId = "CLI_BB",
-                clientName = "BANCO DO BRASIL - AGÊNCIA 0058",
-                addressId = "ADDR_02",
-                addressStreet = "AV. FERNANDES LIMA, 1420 - FAROL",
-                plannedDate = targetDate,
-                status = "aberta",
-                type = "MANUTENÇÃO PREVENTIVA",
-                technician1 = technicianName,
-                generalNotes = "Revisão Preventiva PMOC • 6 Máquinas Cassete e Piso-Teto nos andares 1 e 2."
-            )
-        )
-        for (i in 1..6) {
-            val eqId = "EQ_BB_$i"
-            checklists.add(
-                EquipmentChecklistEntity(
-                    id = "CHECK_${id2}_$eqId",
-                    orderId = id2,
-                    equipmentId = eqId,
-                    equipmentName = "Cassete 4 Vias #0$i",
-                    equipmentBrand = "Daikin Inverter",
-                    equipmentBtus = "36000 BTUs",
-                    equipmentSector = "Salão de Atendimento Bancário"
-                )
-            )
-        }
-
-        // 3ª Parada: ORDEM DE SERVIÇO (Corretiva / Chamado)
-        val id3 = "OS_CORRETIVA_1042"
-        orders.add(
-            ServiceOrderEntity(
-                id = id3,
-                osNumber = "1042",
-                originalId = id3,
-                clientId = "CLI_TJAL",
-                clientName = "TRIBUNAL DE JUSTIÇA - ANEXO II",
-                addressId = "ADDR_03",
-                addressStreet = "PRAÇA MARECHAL DEODORO, 88 - CENTRO",
-                plannedDate = targetDate,
-                status = "aberta",
-                type = "ORDEM DE SERVIÇO",
-                technician1 = technicianName,
-                generalNotes = "Chamado Corretivo: Máquina do gabinete 03 parou de refrigerar e está apresentando código de erro E4 no painel."
-            )
-        )
-        checklists.add(
-            EquipmentChecklistEntity(
-                id = "CHECK_${id3}_EQ_TJ_01",
-                orderId = id3,
-                equipmentId = "EQ_TJ_01",
-                equipmentName = "Split Piso-Teto Gabinete 03",
-                equipmentBrand = "Springer Midea",
-                equipmentBtus = "60000 BTUs",
-                equipmentSector = "Gabinete dos Magistrados"
-            )
-        )
-
-        // 4ª Parada: MANUTENÇÃO PREVENTIVA (PMOC) - Hospital
-        val id4 = "PREV_HOSPITAL_METRO"
-        orders.add(
-            ServiceOrderEntity(
-                id = id4,
-                osNumber = "PMOC-103",
-                originalId = id4,
-                clientId = "CLI_HOSP",
-                clientName = "HOSPITAL METROPOLITANO - ALA SUL",
-                addressId = "ADDR_04",
-                addressStreet = "RODOVIA AL-101 NORTE, KM 12 - LITORAL",
-                plannedDate = targetDate,
-                status = "aberta",
-                type = "MANUTENÇÃO PREVENTIVA",
-                technician1 = technicianName,
-                generalNotes = "Inspeção de rotina e assepsia dos filtros com biocida bactericida conforme norma Anvisa."
-            )
-        )
-        for (i in 1..4) {
-            val eqId = "EQ_HOSP_$i"
-            checklists.add(
-                EquipmentChecklistEntity(
-                    id = "CHECK_${id4}_$eqId",
-                    orderId = id4,
-                    equipmentId = eqId,
-                    equipmentName = "Split Inverter Filtragem HEPA #0$i",
-                    equipmentBrand = "Fujitsu",
-                    equipmentBtus = "18000 BTUs",
-                    equipmentSector = "Ala de Internação - Leito 10$i"
-                )
-            )
-        }
-
-        // 5ª Parada: ORDEM DE SERVIÇO (Corretiva)
-        val id5 = "OS_CORRETIVA_1055"
-        orders.add(
-            ServiceOrderEntity(
-                id = id5,
-                osNumber = "1055",
-                originalId = id5,
-                clientId = "CLI_SEDUC",
-                clientName = "SEDUC - CENTRO DE FORMAÇÃO",
-                addressId = "ADDR_05",
-                addressStreet = "RUA DOUTOR PEDRO JORGE, 35 - POÇO",
-                plannedDate = targetDate,
-                status = "aberta",
-                type = "ORDEM DE SERVIÇO",
-                technician1 = technicianName,
-                generalNotes = "Chamado Corretivo: Gotejamento excessivo de água pela carenagem interna, vazando em cima das mesas de reunião."
-            )
-        )
-        checklists.add(
-            EquipmentChecklistEntity(
-                id = "CHECK_${id5}_EQ_SEDUC_01",
-                orderId = id5,
-                equipmentId = "EQ_SEDUC_01",
-                equipmentName = "Split Hi-Wall Sala 02",
-                equipmentBrand = "Elgin",
-                equipmentBtus = "24000 BTUs",
-                equipmentSector = "Sala de Reuniões e Treinamento"
-            )
-        )
-
-        return Pair(orders, checklists)
     }
 
     /**
@@ -1065,6 +948,14 @@ class ServiceOrderRepository(private val context: Context) {
 
     suspend fun getAllTechnicians(): List<com.lefrio.atendimento.data.local.entity.TechnicianEntity> {
         return db.technicianDao().getActiveTechniciansSync()
+    }
+
+    fun getServiceOrdersForTechnicianAndDate(
+        technicianName: String,
+        technicianId: String,
+        date: String
+    ): Flow<List<ServiceOrderEntity>> {
+        return orderDao.getServiceOrdersForTechnicianAndDateFlow(technicianName, technicianId, date)
     }
 }
 

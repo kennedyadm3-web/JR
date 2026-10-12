@@ -76,4 +76,43 @@ interface ServiceOrderDao {
 
     @Query("UPDATE service_orders SET isSyncedWithServer = 1 WHERE id = :orderId")
     suspend fun markAsSynced(orderId: String)
+
+    @Query("""
+        SELECT * FROM service_orders 
+        WHERE type != 'MANUTENÇÃO PREVENTIVA' 
+          AND id NOT LIKE 'PREV_%'
+          AND plannedDate = :date
+          AND (
+            UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
+            OR UPPER(technician1) = UPPER(:technicianId)
+            OR UPPER(technician2) LIKE '%' || UPPER(:technicianName) || '%'
+            OR UPPER(technician2) = UPPER(:technicianId)
+          )
+          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
+          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
+        ORDER BY lastModifiedAt DESC, osNumber ASC
+    """)
+    fun getServiceOrdersForTechnicianAndDateFlow(
+        technicianName: String,
+        technicianId: String,
+        date: String
+    ): Flow<List<ServiceOrderEntity>>
+
+    @Query("""
+        DELETE FROM service_orders 
+        WHERE clientName IN ('Cliente LeFrio', 'Cliente PMOC', 'Endereço do Chamado', 'Cliente Teste', '')
+           OR addressStreet IN ('Endereço do Chamado', 'Endereço Teste', '')
+           OR id IN ('PREV_CORREIOS_ANADIA', 'PREV_BB_CENTRO', 'OS_CORRETIVA_1042', 'PREV_HOSPITAL_METRO', 'OS_CORRETIVA_1055')
+           OR osNumber IN ('PMOC-101', 'PMOC-102', '1042', 'PMOC-103', '1055')
+           OR clientName IN ('BANCO DO BRASIL - AGÊNCIA 0058', 'TRIBUNAL DE JUSTIÇA - ANEXO II', 'CORREIOS - AGÊNCIA ANADIA', 'HOSPITAL METROPOLITANO - ALA SUL', 'SEDUC - CENTRO DE FORMAÇÃO')
+    """)
+    suspend fun deleteInvalidAndFakeOrders()
+
+    @Query("""
+        DELETE FROM service_orders 
+        WHERE id IN ('PREV_CORREIOS_ANADIA', 'PREV_BB_CENTRO', 'OS_CORRETIVA_1042', 'PREV_HOSPITAL_METRO', 'OS_CORRETIVA_1055')
+           OR osNumber IN ('PMOC-101', 'PMOC-102', '1042', 'PMOC-103', '1055')
+           OR clientName IN ('BANCO DO BRASIL - AGÊNCIA 0058', 'TRIBUNAL DE JUSTIÇA - ANEXO II', 'CORREIOS - AGÊNCIA ANADIA', 'HOSPITAL METROPOLITANO - ALA SUL', 'SEDUC - CENTRO DE FORMAÇÃO')
+    """)
+    suspend fun deleteFakeSeedOrders()
 }
