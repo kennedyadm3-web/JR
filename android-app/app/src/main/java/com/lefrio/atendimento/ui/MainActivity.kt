@@ -27,6 +27,14 @@ import com.lefrio.atendimento.ui.order.OrderSummaryScreen
 import com.lefrio.atendimento.ui.profile.TechProfileScreen
 import com.lefrio.atendimento.ui.signature.SignatureScreen
 import com.lefrio.atendimento.ui.signature.SignatureViewModel
+import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.rememberDrawerState
+import com.lefrio.atendimento.data.local.entity.TechnicianEntity
+import com.lefrio.atendimento.ui.components.AppDrawerContent
+import com.lefrio.atendimento.ui.components.DrawerDestination
+import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersScreen
+import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersViewModel
 import com.lefrio.atendimento.ui.theme.LeFrioTheme
 import com.lefrio.atendimento.util.AppUpdateInfo
 import com.lefrio.atendimento.util.AppUpdateManager
@@ -125,113 +133,226 @@ class MainActivity : ComponentActivity() {
 
                     when (val state = authState) {
                         is AuthUiState.Success -> {
-                            if (showProfileScreen) {
-                                TechProfileScreen(
-                                    user = state.user,
-                                    appVersion = updateManager.getCurrentVersionName(),
-                                    pendingSyncCount = dashboardUiState.pendingSyncCount,
-                                    onBackClick = { showProfileScreen = false },
-                                    onCheckUpdateClick = { triggerCheckUpdate(manual = true) },
-                                    onForceSyncClick = {
-                                        dashboardViewModel.forceSync()
-                                        Toast.makeText(this, "Sincronização iniciada com a nuvem!", Toast.LENGTH_SHORT).show()
-                                    },
-                                    onSwitchTechClick = {
-                                        showProfileScreen = false
-                                        selectedOrderId = null
-                                        signatureOrderId = null
-                                        summaryOrderId = null
-                                        authViewModel.switchTechnician()
-                                    },
-                                    onLogoutClick = {
-                                        showProfileScreen = false
-                                        selectedOrderId = null
-                                        signatureOrderId = null
-                                        summaryOrderId = null
-                                        authViewModel.logout()
-                                    }
+                            val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+                            var currentDestination by remember { mutableStateOf(DrawerDestination.ROTEIRO) }
+                            val serviceOrdersViewModel = remember(state.user.uid) {
+                                ServiceOrdersViewModel(
+                                    application,
+                                    TechnicianEntity(
+                                        uid = state.user.uid,
+                                        name = state.user.name,
+                                        email = state.user.email,
+                                        pin = state.user.pin,
+                                        isActive = true
+                                    )
                                 )
-                            } else if (showNotificationsScreen) {
-                                TechNotificationsScreen(
-                                    viewModel = notificationsViewModel,
-                                    onBackClick = { showNotificationsScreen = false }
-                                )
-                            } else if (showExpensesScreen) {
-                                val expensesViewModel = remember(state.user.uid) {
-                                    RouteExpensesViewModel(application, state.user)
-                                }
-                                RouteExpensesScreen(
-                                    viewModel = expensesViewModel,
-                                    onBackClick = { showExpensesScreen = false }
-                                )
-                            } else if (summaryOrderId != null) {
-                                val orderDetailViewModel = remember(summaryOrderId) {
-                                    OrderDetailViewModel(application, summaryOrderId!!)
-                                }
-                                val detailState by orderDetailViewModel.uiState.collectAsState()
-                                detailState.order?.let { finishedOrder ->
-                                    OrderSummaryScreen(
-                                        order = finishedOrder,
-                                        equipments = detailState.checklistItems,
-                                        onBackClick = { summaryOrderId = null }
+                            }
+
+                            ModalNavigationDrawer(
+                                drawerState = drawerState,
+                                drawerContent = {
+                                    AppDrawerContent(
+                                        currentDestination = currentDestination,
+                                        user = TechnicianEntity(
+                                            uid = state.user.uid,
+                                            name = state.user.name,
+                                            email = state.user.email,
+                                            pin = state.user.pin,
+                                            isActive = true
+                                        ),
+                                        appVersion = updateManager.getCurrentVersionName(),
+                                        pendingSyncCount = dashboardUiState.pendingSyncCount,
+                                        onNavigate = { dest ->
+                                            scope.launch { drawerState.close() }
+                                            when (dest) {
+                                                DrawerDestination.ROTEIRO -> {
+                                                    currentDestination = DrawerDestination.ROTEIRO
+                                                    showProfileScreen = false
+                                                    showNotificationsScreen = false
+                                                    showExpensesScreen = false
+                                                    selectedOrderId = null
+                                                    signatureOrderId = null
+                                                    summaryOrderId = null
+                                                }
+                                                DrawerDestination.SERVICE_ORDERS -> {
+                                                    currentDestination = DrawerDestination.SERVICE_ORDERS
+                                                    showProfileScreen = false
+                                                    showNotificationsScreen = false
+                                                    showExpensesScreen = false
+                                                    selectedOrderId = null
+                                                    signatureOrderId = null
+                                                    summaryOrderId = null
+                                                }
+                                                DrawerDestination.NEW_OS -> {
+                                                    currentDestination = DrawerDestination.SERVICE_ORDERS
+                                                    showProfileScreen = false
+                                                    showNotificationsScreen = false
+                                                    showExpensesScreen = false
+                                                    selectedOrderId = null
+                                                    signatureOrderId = null
+                                                    summaryOrderId = null
+                                                    serviceOrdersViewModel.openCreateModal()
+                                                }
+                                                DrawerDestination.EXPENSES -> {
+                                                    showExpensesScreen = true
+                                                }
+                                                DrawerDestination.NOTIFICATIONS -> {
+                                                    showNotificationsScreen = true
+                                                }
+                                                DrawerDestination.PROFILE -> {
+                                                    showProfileScreen = true
+                                                }
+                                            }
+                                        },
+                                        onForceSyncClick = {
+                                            scope.launch { drawerState.close() }
+                                            dashboardViewModel.forceSync()
+                                            serviceOrdersViewModel.triggerSync()
+                                            Toast.makeText(this@MainActivity, "Sincronização iniciada com a nuvem!", Toast.LENGTH_SHORT).show()
+                                        },
+                                        onLogoutClick = {
+                                            scope.launch { drawerState.close() }
+                                            showProfileScreen = false
+                                            selectedOrderId = null
+                                            signatureOrderId = null
+                                            summaryOrderId = null
+                                            authViewModel.switchTechnician()
+                                        }
                                     )
                                 }
-                            } else if (signatureOrderId != null) {
-                                val sigViewModel = remember(signatureOrderId) {
-                                    SignatureViewModel(application, signatureOrderId!!)
-                                }
-                                SignatureScreen(
-                                    viewModel = sigViewModel,
-                                    onBackClick = { signatureOrderId = null },
-                                    onSuccessFinish = {
-                                        summaryOrderId = signatureOrderId
-                                        signatureOrderId = null
-                                        selectedOrderId = null
+                            ) {
+                                if (showProfileScreen) {
+                                    TechProfileScreen(
+                                        user = state.user,
+                                        appVersion = updateManager.getCurrentVersionName(),
+                                        pendingSyncCount = dashboardUiState.pendingSyncCount,
+                                        onBackClick = { showProfileScreen = false },
+                                        onCheckUpdateClick = { triggerCheckUpdate(manual = true) },
+                                        onForceSyncClick = {
+                                            dashboardViewModel.forceSync()
+                                            serviceOrdersViewModel.triggerSync()
+                                            Toast.makeText(this, "Sincronização iniciada com a nuvem!", Toast.LENGTH_SHORT).show()
+                                        },
+                                        onSwitchTechClick = {
+                                            showProfileScreen = false
+                                            selectedOrderId = null
+                                            signatureOrderId = null
+                                            summaryOrderId = null
+                                            authViewModel.switchTechnician()
+                                        },
+                                        onLogoutClick = {
+                                            showProfileScreen = false
+                                            selectedOrderId = null
+                                            signatureOrderId = null
+                                            summaryOrderId = null
+                                            authViewModel.logout()
+                                        }
+                                    )
+                                } else if (showNotificationsScreen) {
+                                    TechNotificationsScreen(
+                                        viewModel = notificationsViewModel,
+                                        onBackClick = { showNotificationsScreen = false }
+                                    )
+                                } else if (showExpensesScreen) {
+                                    val expensesViewModel = remember(state.user.uid) {
+                                        RouteExpensesViewModel(application, state.user)
                                     }
-                                )
-                            } else if (selectedOrderId != null) {
-                                val orderDetailViewModel = remember(selectedOrderId) {
-                                    OrderDetailViewModel(application, selectedOrderId!!)
-                                }
-                                val detailState by orderDetailViewModel.uiState.collectAsState()
-                                
-                                if (detailState.order?.status == "finalizada") {
+                                    RouteExpensesScreen(
+                                        viewModel = expensesViewModel,
+                                        onBackClick = { showExpensesScreen = false }
+                                    )
+                                } else if (summaryOrderId != null) {
+                                    val orderDetailViewModel = remember(summaryOrderId) {
+                                        OrderDetailViewModel(application, summaryOrderId!!)
+                                    }
+                                    val detailState by orderDetailViewModel.uiState.collectAsState()
                                     detailState.order?.let { finishedOrder ->
                                         OrderSummaryScreen(
                                             order = finishedOrder,
                                             equipments = detailState.checklistItems,
-                                            onBackClick = { selectedOrderId = null }
+                                            onBackClick = { summaryOrderId = null }
                                         )
                                     }
+                                } else if (signatureOrderId != null) {
+                                    val sigViewModel = remember(signatureOrderId) {
+                                        SignatureViewModel(application, signatureOrderId!!)
+                                    }
+                                    SignatureScreen(
+                                        viewModel = sigViewModel,
+                                        onBackClick = { signatureOrderId = null },
+                                        onSuccessFinish = {
+                                            summaryOrderId = signatureOrderId
+                                            signatureOrderId = null
+                                            selectedOrderId = null
+                                        }
+                                    )
+                                } else if (selectedOrderId != null) {
+                                    val orderDetailViewModel = remember(selectedOrderId) {
+                                        OrderDetailViewModel(application, selectedOrderId!!)
+                                    }
+                                    val detailState by orderDetailViewModel.uiState.collectAsState()
+                                    
+                                    if (detailState.order?.status == "finalizada") {
+                                        detailState.order?.let { finishedOrder ->
+                                            OrderSummaryScreen(
+                                                order = finishedOrder,
+                                                equipments = detailState.checklistItems,
+                                                onBackClick = { selectedOrderId = null }
+                                            )
+                                        }
+                                    } else {
+                                        OrderDetailScreen(
+                                            viewModel = orderDetailViewModel,
+                                            onBackClick = { selectedOrderId = null },
+                                            onProceedToSignatureClick = { orderId ->
+                                                signatureOrderId = orderId
+                                            }
+                                        )
+                                    }
+                                } else if (currentDestination == DrawerDestination.SERVICE_ORDERS) {
+                                    ServiceOrdersScreen(
+                                        user = TechnicianEntity(
+                                            uid = state.user.uid,
+                                            name = state.user.name,
+                                            email = state.user.email,
+                                            pin = state.user.pin,
+                                            isActive = true
+                                        ),
+                                        viewModel = serviceOrdersViewModel,
+                                        onMenuClick = {
+                                            scope.launch { drawerState.open() }
+                                        },
+                                        onOrderClick = { orderId ->
+                                            selectedOrderId = orderId
+                                        },
+                                        onProfileClick = {
+                                            showProfileScreen = true
+                                        }
+                                    )
                                 } else {
-                                    OrderDetailScreen(
-                                        viewModel = orderDetailViewModel,
-                                        onBackClick = { selectedOrderId = null },
-                                        onProceedToSignatureClick = { orderId ->
-                                            signatureOrderId = orderId
+                                    DashboardScreen(
+                                        user = state.user,
+                                        viewModel = dashboardViewModel,
+                                        onMenuClick = {
+                                            scope.launch { drawerState.open() }
+                                        },
+                                        onOrderClick = { orderId ->
+                                            selectedOrderId = orderId
+                                        },
+                                        onExpensesClick = {
+                                            showExpensesScreen = true
+                                        },
+                                        onNotificationsClick = {
+                                            showNotificationsScreen = true
+                                        },
+                                        onProfileClick = {
+                                            showProfileScreen = true
+                                        },
+                                        onLogoutClick = {
+                                            authViewModel.switchTechnician()
                                         }
                                     )
                                 }
-                            } else {
-                                DashboardScreen(
-                                    user = state.user,
-                                    viewModel = dashboardViewModel,
-                                    onOrderClick = { orderId ->
-                                        selectedOrderId = orderId
-                                    },
-                                    onExpensesClick = {
-                                        showExpensesScreen = true
-                                    },
-                                    onNotificationsClick = {
-                                        showNotificationsScreen = true
-                                    },
-                                    onProfileClick = {
-                                        showProfileScreen = true
-                                    },
-                                    onLogoutClick = {
-                                        authViewModel.switchTechnician()
-                                    }
-                                )
                             }
                         }
 

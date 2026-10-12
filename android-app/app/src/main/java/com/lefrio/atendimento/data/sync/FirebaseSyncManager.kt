@@ -194,6 +194,49 @@ class FirebaseSyncManager(private val context: Context) {
                 true
             }
 
+            "CREATE_SERVICE_ORDER" -> {
+                val orderId = task.referenceId
+                val osMap = hashMapOf<String, Any>(
+                    "id" to orderId,
+                    "osNumber" to payload.optString("osNumber", "OS-${orderId.takeLast(4)}"),
+                    "clientId" to payload.optString("clientId", ""),
+                    "clientName" to payload.optString("clientName", ""),
+                    "addressId" to payload.optString("addressId", ""),
+                    "addressStreet" to payload.optString("addressStreet", ""),
+                    "equipmentId" to payload.optString("equipmentId", ""),
+                    "equipmentName" to payload.optString("equipmentName", ""),
+                    "status" to payload.optString("status", "aberta"),
+                    "type" to payload.optString("type", "MANUTENÇÃO CORRETIVA CONTRATO"),
+                    "plannedDate" to payload.optString("plannedDate", ""),
+                    "technicianId" to payload.optString("technicianId", ""),
+                    "technician1" to payload.optString("technician1", ""),
+                    "technician2" to payload.optString("technician2", ""),
+                    "description" to payload.optString("description", ""),
+                    "openedAt" to payload.optString("openedAt", ""),
+                    "createdAt" to System.currentTimeMillis(),
+                    "updatedAt" to System.currentTimeMillis()
+                )
+
+                try {
+                    firestore.collection("serviceOrders").document(orderId)
+                        .set(osMap, SetOptions.merge())
+                        .await()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Aviso ao salvar em serviceOrders: ${e.message}")
+                }
+
+                try {
+                    firestore.collection("service_orders").document(orderId)
+                        .set(osMap, SetOptions.merge())
+                        .await()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Aviso ao salvar em service_orders: ${e.message}")
+                }
+
+                db.serviceOrderDao().markAsSynced(orderId)
+                true
+            }
+
             else -> false
         }
     }

@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,23 +44,26 @@ class SignaturePath(
 fun SignaturePad(
     modifier: Modifier = Modifier,
     paths: MutableList<SignaturePath>,
-    onSignatureChanged: (hasSignature: Boolean) -> Unit
+    onSignatureChanged: (hasSignature: Boolean) -> Unit,
+    onDrawingActiveChanged: ((isActive: Boolean) -> Unit)? = null
 ) {
     var drawCounter by remember { mutableIntStateOf(0) }
 
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFFFAFAFA))
-            .border(1.5.dp, Color(0xFFCBD5E1), RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color.White)
+            .border(2.dp, Color(0xFFCBD5E1), RoundedCornerShape(14.dp))
     ) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
+                        // Pass.Initial intercepta ANTES do verticalScroll do Scaffold/Column pai
+                        val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
                         down.consume()
+                        onDrawingActiveChanged?.invoke(true)
 
                         val newPath = SignaturePath()
                         newPath.path.moveTo(down.position.x, down.position.y)
@@ -71,15 +75,16 @@ fun SignaturePad(
                         var lastPoint = down.position
 
                         while (true) {
-                            val event = awaitPointerEvent()
+                            val event = awaitPointerEvent(pass = PointerEventPass.Initial)
                             val pointer = event.changes.firstOrNull { it.id == down.id } ?: break
 
                             if (!pointer.pressed) {
                                 pointer.consume()
+                                onDrawingActiveChanged?.invoke(false)
                                 break
                             }
 
-                            // Consome imediatamente para que a tela pai NÃO roube o scroll vertical
+                            // Consome imediatamente no Pass.Initial para neutralizar qualquer interferência do scroll pai
                             pointer.consume()
 
                             val currentPos = pointer.position
@@ -93,9 +98,9 @@ fun SignaturePad(
                             drawCounter++
                         }
 
-                        // Se foi um toque curto (ponto / acento / pingo no 'i'), garante registro visível
+                        // Se foi um toque curto (ponto / acento / pingo no 'i'), garante traçado visível
                         if (newPath.points.size == 1) {
-                            newPath.path.lineTo(lastPoint.x + 0.5f, lastPoint.y + 0.5f)
+                            newPath.path.lineTo(lastPoint.x + 0.8f, lastPoint.y + 0.8f)
                             drawCounter++
                         }
                     }

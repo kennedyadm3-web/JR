@@ -38,6 +38,8 @@ fun SignatureScreen(
     var signeeDoc by remember { mutableStateOf("") }
     val paths = remember { mutableStateListOf<SignaturePath>() }
     var hasSignature by remember { mutableStateOf(false) }
+    var isDrawingActive by remember { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
 
     LaunchedEffect(order) {
         order?.clientRepresentative?.let { if (it.isNotBlank()) signeeName = it }
@@ -171,7 +173,7 @@ fun SignatureScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues)
-                    .verticalScroll(rememberScrollState())
+                    .verticalScroll(state = scrollState, enabled = !isDrawingActive)
                     .padding(16.dp)
             ) {
                 // Resumo do Chamado
@@ -286,9 +288,10 @@ fun SignatureScreen(
                 SignaturePad(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(200.dp),
+                        .height(240.dp),
                     paths = paths,
-                    onSignatureChanged = { hasSignature = it }
+                    onSignatureChanged = { hasSignature = it },
+                    onDrawingActiveChanged = { isDrawingActive = it }
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))

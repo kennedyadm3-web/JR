@@ -884,4 +884,219 @@ class ServiceOrderRepository(private val context: Context) {
     suspend fun addNotification(notification: TechNotificationEntity) {
         db.techNotificationDao().insertNotification(notification)
     }
+
+    // --- OPERAÇÕES DE CRIAÇÃO E GESTÃO DE ORDENS DE SERVIÇO ---
+
+    suspend fun createServiceOrder(params: CreateServiceOrderParams): ServiceOrderEntity {
+        val timestamp = System.currentTimeMillis()
+        val randomSuffix = (1000..9999).random()
+        val orderId = "OS_${timestamp}_$randomSuffix"
+        
+        // Gera número de OS legível
+        val shortSeq = (1000 + (timestamp % 9000)).toString()
+        val osNumber = "OS-$shortSeq"
+
+        val entity = ServiceOrderEntity(
+            id = orderId,
+            osNumber = osNumber,
+            originalId = orderId,
+            clientId = params.clientId,
+            clientName = params.clientName,
+            addressId = params.addressId,
+            addressStreet = params.addressStreet,
+            plannedDate = params.plannedDate,
+            status = "aberta",
+            type = params.type,
+            technician1 = params.technicianName,
+            technician2 = params.technician2Name,
+            generalNotes = params.description,
+            isSyncedWithServer = false,
+            lastModifiedAt = timestamp
+        )
+
+        // 1. Grava no banco local Room imediatamente (offline-first garantido!)
+        orderDao.insertOrUpdate(entity)
+
+        // 2. Se informou equipamento, cria item no checklist inicial
+        if (!params.equipmentId.isNullOrBlank()) {
+            val checkId = "CHK_${orderId}_${params.equipmentId}"
+            val checkItem = EquipmentChecklistEntity(
+                id = checkId,
+                orderId = orderId,
+                equipmentId = params.equipmentId,
+                equipmentName = params.equipmentName ?: "Equipamento Climatização",
+                equipmentBrand = "Principal",
+                equipmentBtus = "",
+                equipmentSector = "Geral",
+                isChecked = false,
+                isSkipped = false,
+                isSyncedWithServer = false,
+                lastModifiedAt = timestamp
+            )
+            checklistDao.insertOrUpdate(checkItem)
+        }
+
+        // 3. Enfileira na fila de sincronização
+        val payload = JSONObject().apply {
+            put("id", orderId)
+            put("osNumber", osNumber)
+            put("clientId", params.clientId)
+            put("clientName", params.clientName)
+            put("addressId", params.addressId)
+            put("addressStreet", params.addressStreet)
+            put("equipmentId", params.equipmentId ?: "")
+            put("equipmentName", params.equipmentName ?: "")
+            put("status", "aberta")
+            put("type", params.type)
+            put("plannedDate", params.plannedDate)
+            put("technicianId", params.technicianId)
+            put("technician1", params.technicianName)
+            put("technician2", params.technician2Name ?: "")
+            put("description", params.description)
+            put("openedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date()))
+        }
+
+        syncDao.enqueue(
+            SyncQueueEntity(
+                entityType = "CREATE_SERVICE_ORDER",
+                referenceId = orderId,
+                actionType = "CREATE",
+                payloadJson = payload.toString()
+            )
+        )
+
+        // Dispara sincronização em segundo plano
+        SyncWorker.triggerImmediateSync(context)
+
+        return entity
+    }
+
+    suspend fun getAvailableClientsAndAddresses(): Pair<List<ClientOption>, List<AddressOption>> {
+        val clientMap = mutableMapOf<String, ClientOption>()
+        val addressMap = mutableMapOf<String, AddressOption>()
+
+        // 1. Coleta a partir das ordens já salvas localmente no Room
+        val localOrders = orderDao.getAllOrders()
+        for (o in localOrders) {
+            if (o.clientId.isNotBlank() && o.clientName.isNotBlank()) {
+                clientMap[o.clientId] = ClientOption(
+                    id = o.clientId,
+                    name = o.clientName,
+                    document = o.clientDocument
+                )
+            }
+            if (o.addressId.isNotBlank() && o.addressStreet.isNotBlank()) {
+                addressMap[o.addressId] = AddressOption(
+                    id = o.addressId,
+                    clientId = o.clientId,
+                    street = o.addressStreet,
+                    city = o.addressCity
+                )
+            }
+        }
+
+        // 2. Tenta enriquecer com Firestore online se possível
+        try {
+            val firestore = FirebaseConfig.getFirestore()
+            val clientsSnap = firestore.collection("clients").limit(50).get().await()
+            for (doc in clientsSnap.documents) {
+                val name = doc.getString("name") ?: doc.getString("fullName") ?: ""
+                if (name.isNotBlank()) {
+                    clientMap[doc.id] = ClientOption(
+                        id = doc.id,
+                        name = name,
+                        document = doc.getString("cnpj") ?: doc.getString("document")
+                    )
+                }
+            }
+
+            val addrsSnap = firestore.collection("addresses").limit(100).get().await()
+            for (doc in addrsSnap.documents) {
+                val street = doc.getString("street") ?: ""
+                val cId = doc.getString("clientId") ?: ""
+                if (street.isNotBlank() && cId.isNotBlank()) {
+                    val num = doc.getString("number")?.let { ", $it" } ?: ""
+                    val neigh = doc.getString("neighborhood")?.let { " - $it" } ?: ""
+                    addressMap[doc.id] = AddressOption(
+                        id = doc.id,
+                        clientId = cId,
+                        street = "$street$num$neigh",
+                        city = doc.getString("city")
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Uso offline dos clientes locais: ${e.message}")
+        }
+
+        return Pair(
+            clientMap.values.sortedBy { it.name },
+            addressMap.values.sortedBy { it.street }
+        )
+    }
+
+    suspend fun getEquipmentsForAddress(addressId: String): List<EquipmentOption> {
+        val list = mutableListOf<EquipmentOption>()
+        try {
+            val firestore = FirebaseConfig.getFirestore()
+            val snap = firestore.collection("equipments")
+                .whereEqualTo("addressId", addressId)
+                .limit(40)
+                .get()
+                .await()
+            for (doc in snap.documents) {
+                val name = doc.getString("name") ?: "Equipamento"
+                list.add(
+                    EquipmentOption(
+                        id = doc.id,
+                        addressId = addressId,
+                        name = name,
+                        brand = doc.getString("brand"),
+                        sector = doc.getString("sector"),
+                        btu = doc.getString("btus")
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Busca de equipamentos remota indisponível: ${e.message}")
+        }
+        return list
+    }
 }
+
+data class CreateServiceOrderParams(
+    val plannedDate: String,
+    val type: String,
+    val clientId: String,
+    val clientName: String,
+    val addressId: String,
+    val addressStreet: String,
+    val equipmentId: String? = null,
+    val equipmentName: String? = null,
+    val technicianId: String,
+    val technicianName: String,
+    val technician2Name: String? = null,
+    val description: String
+)
+
+data class ClientOption(
+    val id: String,
+    val name: String,
+    val document: String? = null
+)
+
+data class AddressOption(
+    val id: String,
+    val clientId: String,
+    val street: String,
+    val city: String? = null
+)
+
+data class EquipmentOption(
+    val id: String,
+    val addressId: String,
+    val name: String,
+    val brand: String? = null,
+    val sector: String? = null,
+    val btu: String? = null
+)

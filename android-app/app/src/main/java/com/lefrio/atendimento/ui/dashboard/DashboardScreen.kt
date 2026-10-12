@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.ui.dashboard.components.ServiceOrderCard
 import com.lefrio.atendimento.ui.dashboard.components.SyncStatusBar
@@ -44,6 +45,7 @@ import com.lefrio.atendimento.ui.theme.TextSecondary
 fun DashboardScreen(
     user: TechnicianUser,
     viewModel: DashboardViewModel,
+    onMenuClick: () -> Unit = {},
     onOrderClick: (orderId: String) -> Unit,
     onExpensesClick: () -> Unit,
     onNotificationsClick: () -> Unit,
@@ -52,6 +54,7 @@ fun DashboardScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
 
     // Animação de rotação contínua para o ícone de sincronização
     val infiniteTransition = rememberInfiniteTransition(label = "syncRotation")
@@ -79,8 +82,19 @@ fun DashboardScreen(
     }
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
+                scrollBehavior = scrollBehavior,
+                navigationIcon = {
+                    IconButton(onClick = onMenuClick) {
+                        Icon(
+                            imageVector = Icons.Default.Menu,
+                            contentDescription = "Menu Lateral",
+                            tint = BluePrimary
+                        )
+                    }
+                },
                 title = {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
