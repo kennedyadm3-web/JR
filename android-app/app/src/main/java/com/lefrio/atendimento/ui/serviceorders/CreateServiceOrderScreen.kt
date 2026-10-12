@@ -1,5 +1,6 @@
 package com.lefrio.atendimento.ui.serviceorders
 
+import android.util.Base64
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -20,11 +21,23 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lefrio.atendimento.data.auth.TechnicianUser
+import com.lefrio.atendimento.ui.signature.components.SignaturePad
+import com.lefrio.atendimento.ui.signature.components.SignaturePath
+import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
-import java.text.SimpleDateFormat
+import java.io.File
 import java.util.*
+
+private fun fileToBase64(file: File): String? {
+    return try {
+        val bytes = file.readBytes()
+        "data:image/png;base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
+    } catch (e: Exception) {
+        null
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,37 +50,31 @@ fun CreateServiceOrderScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
-    val todayStr = remember {
-        SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-    }
-    var plannedDate by remember { mutableStateOf(todayStr) }
-    var selectedType by remember { mutableStateOf("MANUTENÇÃO CORRETIVA CONTRATO") }
+    // Campos de Seleção do Local do Roteiro
     var selectedClientId by remember { mutableStateOf("") }
     var selectedClientName by remember { mutableStateOf("") }
     var selectedAddressId by remember { mutableStateOf("") }
     var selectedAddressStreet by remember { mutableStateOf("") }
-    var selectedEquipmentId by remember { mutableStateOf<String?>("") }
-    var selectedEquipmentName by remember { mutableStateOf<String?>("") }
-    var selectedTech2Name by remember { mutableStateOf("") }
+    var selectedEquipmentId by remember { mutableStateOf("") }
+    var selectedEquipmentName by remember { mutableStateOf("") }
+
+    // Campos Técnicos do Atendimento
     var description by remember { mutableStateOf("") }
+    var diagnosis by remember { mutableStateOf("") }
+    var solution by remember { mutableStateOf("") }
+
+    // Campos do Fiscal / Responsável
+    var fiscalName by remember { mutableStateOf("") }
+    var fiscalRegistration by remember { mutableStateOf("") }
+    val signaturePaths = remember { mutableStateListOf<SignaturePath>() }
+    var hasSignature by remember { mutableStateOf(false) }
+
+    // Estados de UI e Validação
     var isSubmitting by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
-
-    // Dropdown expanded states
-    var typeExpanded by remember { mutableStateOf(false) }
     var clientExpanded by remember { mutableStateOf(false) }
     var addressExpanded by remember { mutableStateOf(false) }
     var equipmentExpanded by remember { mutableStateOf(false) }
-    var tech2Expanded by remember { mutableStateOf(false) }
-
-    val serviceTypes = listOf(
-        "MANUTENÇÃO CORRETIVA CONTRATO",
-        "MANUTENÇÃO PREVENTIVA EXTRA",
-        "INSTALAÇÃO / REMOÇÃO",
-        "DESLOCAMENTO / VISTORIA",
-        "ORÇAMENTO",
-        "OUTROS"
-    )
 
     val filteredAddresses = remember(selectedClientId, uiState.addresses) {
         if (selectedClientId.isBlank()) {
@@ -88,9 +95,10 @@ fun CreateServiceOrderScreen(
     // Auto-seleciona endereço quando houver apenas 1 para o cliente selecionado
     LaunchedEffect(filteredAddresses) {
         if (filteredAddresses.size == 1 && selectedAddressId.isBlank()) {
-            selectedAddressId = filteredAddresses[0].id
-            selectedAddressStreet = filteredAddresses[0].street
-            viewModel.loadEquipmentsForAddress(filteredAddresses[0].id)
+            val addr = filteredAddresses[0]
+            selectedAddressId = addr.id
+            selectedAddressStreet = addr.street
+            viewModel.loadEquipmentsForAddress(addr.id)
         }
     }
 
@@ -151,7 +159,7 @@ fun CreateServiceOrderScreen(
                         onClick = onBackClick,
                         modifier = Modifier
                             .weight(1f)
-                            .height(48.dp),
+                            .height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                         enabled = !isSubmitting
                     ) {
@@ -165,25 +173,79 @@ fun CreateServiceOrderScreen(
                                 return@Button
                             }
                             if (selectedAddressStreet.isBlank()) {
-                                validationError = "Por favor, selecione o Endereço com atendimento previsto hoje."
+                                validationError = "Por favor, selecione o Endereço do atendimento."
                                 return@Button
                             }
+                            if (selectedEquipmentName.isBlank()) {
+                                validationError = "Por favor, selecione a Máquina atendida deste endereço."
+                                return@Button
+                            }
+                            if (description.isBlank()) {
+                                validationError = "Por favor, preencha a Descrição do chamado / problema."
+                                return@Button
+                            }
+                            if (diagnosis.isBlank()) {
+                                validationError = "Por favor, preencha o Diagnóstico técnico da máquina."
+                                return@Button
+                            }
+                            if (solution.isBlank()) {
+                                validationError = "Por favor, preencha a Solução aplicada."
+                                return@Button
+                            }
+                            if (fiscalName.isBlank()) {
+                                validationError = "Por favor, informe o Nome do fiscal / responsável."
+                                return@Button
+                            }
+                            if (fiscalRegistration.isBlank()) {
+                                validationError = "Por favor, informe a Matrícula do fiscal / responsável."
+                                return@Button
+                            }
+                            if (!hasSignature || signaturePaths.isEmpty()) {
+                                validationError = "Por favor, colha a Assinatura Digital do fiscal na tela."
+                                return@Button
+                            }
+
                             isSubmitting = true
                             validationError = null
+
+                            // Salva a assinatura digital localmente em PNG e converte em Base64
+                            val tempId = "OS_${System.currentTimeMillis()}"
+                            val sigFile = try {
+                                saveSignatureToLocalFile(
+                                    context = context,
+                                    paths = signaturePaths,
+                                    orderId = tempId
+                                )
+                            } catch (e: Exception) {
+                                null
+                            }
+                            val sigBase64 = sigFile?.let { fileToBase64(it) }
+
                             viewModel.createServiceOrder(
-                                date = plannedDate,
-                                type = selectedType,
-                                clientId = selectedClientId.ifBlank { "CLI_MANUAL_${System.currentTimeMillis()}" },
+                                date = "",
+                                type = "MANUTENÇÃO CORRETIVA CONTRATO",
+                                clientId = selectedClientId.ifBlank { "CLI_ROTEIRO_${System.currentTimeMillis()}" },
                                 clientName = selectedClientName,
-                                addressId = selectedAddressId.ifBlank { "ADDR_MANUAL_${System.currentTimeMillis()}" },
+                                addressId = selectedAddressId.ifBlank { "ADDR_ROTEIRO_${System.currentTimeMillis()}" },
                                 addressStreet = selectedAddressStreet,
-                                equipmentId = selectedEquipmentId,
-                                equipmentName = selectedEquipmentName,
-                                tech2Name = selectedTech2Name.ifBlank { null },
+                                equipmentId = selectedEquipmentId.ifBlank { null },
+                                equipmentName = selectedEquipmentName.ifBlank { null },
+                                tech2Name = null,
                                 description = description,
+                                diagnosis = diagnosis,
+                                solution = solution,
+                                fiscalName = fiscalName,
+                                fiscalRegistration = fiscalRegistration,
+                                signaturePath = sigFile?.absolutePath,
+                                signatureBase64 = sigBase64,
+                                isFinalized = true,
                                 onSuccess = { createdId ->
                                     isSubmitting = false
-                                    Toast.makeText(context, "Ordem de Serviço criada com sucesso para este atendimento!", Toast.LENGTH_LONG).show()
+                                    Toast.makeText(
+                                        context,
+                                        "Ordem de Serviço criada e finalizada com sucesso com a assinatura do fiscal!",
+                                        Toast.LENGTH_LONG
+                                    ).show()
                                     onOrderCreated(createdId)
                                 },
                                 onError = { err ->
@@ -194,8 +256,8 @@ fun CreateServiceOrderScreen(
                             )
                         },
                         modifier = Modifier
-                            .weight(1.6f)
-                            .height(48.dp),
+                            .weight(1.8f)
+                            .height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF581C87)),
                         enabled = !isSubmitting && uiState.clients.isNotEmpty()
@@ -207,9 +269,9 @@ fun CreateServiceOrderScreen(
                                 strokeWidth = 2.dp
                             )
                         } else {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("CRIAR ORDEM DE SERVIÇO", fontSize = 12.sp, fontWeight = FontWeight.Black)
+                            Text("FINALIZAR E CRIAR O.S.", fontSize = 12.sp, fontWeight = FontWeight.Black)
                         }
                     }
                 }
@@ -225,7 +287,7 @@ fun CreateServiceOrderScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // Banner informativo
+            // Banner informativo superior
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -254,13 +316,13 @@ fun CreateServiceOrderScreen(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "Nova O.S. no Endereço do Roteiro",
+                            text = "Abertura de Ordem de Serviço",
                             fontWeight = FontWeight.Black,
                             fontSize = 14.sp,
                             color = Color.White
                         )
                         Text(
-                            text = "Abra uma ordem de serviço em um dos locais com atendimento previsto para hoje.",
+                            text = "Preencha a máquina atendida, o laudo e a assinatura do fiscal no local.",
                             fontSize = 11.sp,
                             color = Color(0xFFD8B4FE)
                         )
@@ -268,7 +330,7 @@ fun CreateServiceOrderScreen(
                 }
             }
 
-            // 1. Tipo do Atendimento e Data Fixa do Dia
+            // SEÇÃO 1: LOCAL DO ATENDIMENTO (CLIENTE, ENDEREÇO E MÁQUINA)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -278,221 +340,8 @@ fun CreateServiceOrderScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "1. Tipo do Atendimento",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Black,
-                        color = TextPrimary
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        // Data do Atendimento (Fixa no roteiro de hoje)
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "DATA DO ATENDIMENTO",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(56.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                color = Color(0xFFF1F5F9),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0))
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(horizontal = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        Icons.Default.DateRange,
-                                        contentDescription = null,
-                                        tint = BluePrimary,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        Text(
-                                            text = "Hoje",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = BluePrimary
-                                        )
-                                        Text(
-                                            text = todayStr,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = TextPrimary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Tipo de Atendimento
-                        Column(modifier = Modifier.weight(1.3f)) {
-                            Text(
-                                text = "TIPO DO ATENDIMENTO *",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Box {
-                                OutlinedTextField(
-                                    value = selectedType,
-                                    onValueChange = {},
-                                    readOnly = true,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { typeExpanded = true },
-                                    shape = RoundedCornerShape(12.dp),
-                                    trailingIcon = {
-                                        IconButton(onClick = { typeExpanded = !typeExpanded }) {
-                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                                        }
-                                    },
-                                    singleLine = true
-                                )
-                                DropdownMenu(
-                                    expanded = typeExpanded,
-                                    onDismissRequest = { typeExpanded = false }
-                                ) {
-                                    serviceTypes.forEach { typeItem ->
-                                        DropdownMenuItem(
-                                            text = { Text(typeItem, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
-                                            onClick = {
-                                                selectedType = typeItem
-                                                typeExpanded = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 2. Equipe Técnica
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "2. Equipe Técnica Escalada",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Black,
-                        color = TextPrimary
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "TÉCNICO RESPONSÁVEL *",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            OutlinedTextField(
-                                value = user.name,
-                                onValueChange = {},
-                                readOnly = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(12.dp),
-                                leadingIcon = {
-                                    Icon(Icons.Default.Person, contentDescription = null, tint = Color(0xFF059669), modifier = Modifier.size(18.dp))
-                                },
-                                singleLine = true
-                            )
-                        }
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "TÉCNICO AUXILIAR",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Box {
-                                OutlinedTextField(
-                                    value = selectedTech2Name.ifBlank { "Nenhum / Solo" },
-                                    onValueChange = {},
-                                    readOnly = true,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { tech2Expanded = true },
-                                    shape = RoundedCornerShape(12.dp),
-                                    trailingIcon = {
-                                        IconButton(onClick = { tech2Expanded = !tech2Expanded }) {
-                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                                        }
-                                    },
-                                    singleLine = true
-                                )
-                                DropdownMenu(
-                                    expanded = tech2Expanded,
-                                    onDismissRequest = { tech2Expanded = false }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = { Text("Nenhum / Solo", fontSize = 12.sp) },
-                                        onClick = {
-                                            selectedTech2Name = ""
-                                            tech2Expanded = false
-                                        }
-                                    )
-                                    uiState.technicians.filter { it.id != user.uid }.forEach { tech ->
-                                        DropdownMenuItem(
-                                            text = { Text(tech.name, fontSize = 12.sp) },
-                                            onClick = {
-                                                selectedTech2Name = tech.name
-                                                tech2Expanded = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. Cliente e Endereço Programado no Roteiro
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -500,7 +349,7 @@ fun CreateServiceOrderScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "3. Local Programado no Roteiro de Hoje",
+                            text = "1. Local do Atendimento e Máquina",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Black,
                             color = TextPrimary
@@ -510,7 +359,7 @@ fun CreateServiceOrderScreen(
                             color = Color(0xFFEFF6FF)
                         ) {
                             Text(
-                                text = "${uiState.clients.size} local(is) previsto(s)",
+                                text = "${uiState.clients.size} cliente(s) no roteiro",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = BluePrimary,
@@ -540,7 +389,7 @@ fun CreateServiceOrderScreen(
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text(
-                                    text = "Nenhum endereço programado no seu roteiro de hoje. Você só pode abrir novas O.S. nos locais onde já possua atendimento previsto pelo sistema administrativo.",
+                                    text = "Nenhum atendimento programado no seu roteiro de hoje. Você só pode abrir novas O.S. nos clientes e endereços previstos pela administração.",
                                     fontSize = 11.sp,
                                     color = Color(0xFF92400E),
                                     lineHeight = 15.sp,
@@ -549,17 +398,10 @@ fun CreateServiceOrderScreen(
                             }
                         }
                     } else {
-                        Text(
-                            text = "Apenas clientes e endereços com atendimento programado para você hoje aparecem para seleção.",
-                            fontSize = 11.sp,
-                            color = Color(0xFF059669),
-                            fontWeight = FontWeight.Medium
-                        )
-
-                        // Cliente
+                        // Campo 1: Escolher o Cliente
                         Column {
                             Text(
-                                text = "CLIENTE COM ATENDIMENTO HOJE *",
+                                text = "CLIENTE *",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextSecondary
@@ -602,6 +444,8 @@ fun CreateServiceOrderScreen(
                                                 selectedClientName = c.name
                                                 selectedAddressId = ""
                                                 selectedAddressStreet = ""
+                                                selectedEquipmentId = ""
+                                                selectedEquipmentName = ""
                                                 clientExpanded = false
                                             }
                                         )
@@ -610,10 +454,10 @@ fun CreateServiceOrderScreen(
                             }
                         }
 
-                        // Endereço
+                        // Campo 2: Escolher o Endereço
                         Column {
                             Text(
-                                text = "ENDEREÇO DO ATENDIMENTO *",
+                                text = "ENDEREÇO *",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = TextSecondary
@@ -621,9 +465,12 @@ fun CreateServiceOrderScreen(
                             Spacer(modifier = Modifier.height(4.dp))
                             Box {
                                 OutlinedTextField(
-                                    value = selectedAddressStreet.ifBlank { "Selecione o Endereço do Roteiro..." },
+                                    value = selectedAddressStreet.ifBlank {
+                                        if (selectedClientId.isBlank()) "Selecione o Cliente primeiro..." else "Selecione o Endereço do Roteiro..."
+                                    },
                                     onValueChange = {},
                                     readOnly = true,
+                                    enabled = selectedClientId.isNotBlank(),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clickable { if (selectedClientId.isNotBlank()) addressExpanded = true },
@@ -632,7 +479,10 @@ fun CreateServiceOrderScreen(
                                         Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
                                     },
                                     trailingIcon = {
-                                        IconButton(onClick = { if (selectedClientId.isNotBlank()) addressExpanded = !addressExpanded }) {
+                                        IconButton(
+                                            onClick = { if (selectedClientId.isNotBlank()) addressExpanded = !addressExpanded },
+                                            enabled = selectedClientId.isNotBlank()
+                                        ) {
                                             Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                                         }
                                     }
@@ -649,13 +499,12 @@ fun CreateServiceOrderScreen(
                                     } else {
                                         filteredAddresses.forEach { a ->
                                             DropdownMenuItem(
-                                                text = { Text(a.street, fontSize = 12.sp) },
+                                                text = { Text(a.street, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
                                                 onClick = {
                                                     selectedAddressId = a.id
                                                     selectedAddressStreet = a.street
-                                                    if (selectedClientId.isBlank()) {
-                                                        selectedClientId = a.clientId
-                                                    }
+                                                    selectedEquipmentId = ""
+                                                    selectedEquipmentName = ""
                                                     viewModel.loadEquipmentsForAddress(a.id)
                                                     addressExpanded = false
                                                 }
@@ -665,11 +514,135 @@ fun CreateServiceOrderScreen(
                                 }
                             }
                         }
+
+                        // Campo 3: Selecionar a Máquina do determinado endereço
+                        Column {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "MÁQUINA / EQUIPAMENTO DO ENDEREÇO *",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextSecondary
+                                )
+                                if (uiState.isLoadingEquipments) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(12.dp),
+                                            strokeWidth = 1.5.dp,
+                                            color = BluePrimary
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text("Carregando máquinas...", fontSize = 10.sp, color = BluePrimary)
+                                    }
+                                } else if (selectedAddressId.isNotBlank()) {
+                                    Text(
+                                        text = "${uiState.equipments.size} máquina(s) encontrada(s)",
+                                        fontSize = 10.sp,
+                                        color = Color(0xFF059669),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Box {
+                                OutlinedTextField(
+                                    value = selectedEquipmentName.ifBlank {
+                                        if (selectedAddressId.isBlank()) "Selecione o Endereço primeiro..." else "Selecione a máquina deste endereço..."
+                                    },
+                                    onValueChange = {},
+                                    readOnly = true,
+                                    enabled = selectedAddressId.isNotBlank(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { if (selectedAddressId.isNotBlank()) equipmentExpanded = true },
+                                    shape = RoundedCornerShape(12.dp),
+                                    leadingIcon = {
+                                        Icon(Icons.Default.Settings, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
+                                    },
+                                    trailingIcon = {
+                                        IconButton(
+                                            onClick = { if (selectedAddressId.isNotBlank()) equipmentExpanded = !equipmentExpanded },
+                                            enabled = selectedAddressId.isNotBlank()
+                                        ) {
+                                            Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                        }
+                                    }
+                                )
+                                DropdownMenu(
+                                    expanded = equipmentExpanded,
+                                    onDismissRequest = { equipmentExpanded = false }
+                                ) {
+                                    // Lista de máquinas reais daquele endereço
+                                    if (uiState.equipments.isNotEmpty()) {
+                                        uiState.equipments.forEach { eq ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Column {
+                                                        Text(
+                                                            text = eq.name,
+                                                            fontSize = 13.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = TextPrimary
+                                                        )
+                                                        val details = listOfNotNull(
+                                                            eq.brand?.takeIf { it.isNotBlank() },
+                                                            eq.btu?.takeIf { it.isNotBlank() }?.let { "$it BTUs" },
+                                                            eq.sector?.takeIf { it.isNotBlank() }
+                                                        ).joinToString(" • ")
+                                                        if (details.isNotBlank()) {
+                                                            Text(
+                                                                text = details,
+                                                                fontSize = 11.sp,
+                                                                color = TextSecondary
+                                                            )
+                                                        }
+                                                    }
+                                                },
+                                                onClick = {
+                                                    selectedEquipmentId = eq.id
+                                                    selectedEquipmentName = eq.name
+                                                    equipmentExpanded = false
+                                                }
+                                            )
+                                        }
+                                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                    }
+
+                                    // Opção para equipamento avulso / adicional
+                                    DropdownMenuItem(
+                                        text = {
+                                            Column {
+                                                Text(
+                                                    text = "OUTRO EQUIPAMENTO (Avulso / Não listado)",
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFF6B21A8)
+                                                )
+                                                Text(
+                                                    text = "Selecione caso a máquina não esteja no cadastro",
+                                                    fontSize = 10.sp,
+                                                    color = TextSecondary
+                                                )
+                                            }
+                                        },
+                                        onClick = {
+                                            selectedEquipmentId = "OUTRO_EQUIPAMENTO"
+                                            selectedEquipmentName = "OUTRO EQUIPAMENTO (Avulso)"
+                                            equipmentExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // 4. Máquina e Observações
+            // SEÇÃO 2: DETALHES TÉCNICOS (DESCRIÇÃO, DIAGNÓSTICO E SOLUÇÃO)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -679,78 +652,20 @@ fun CreateServiceOrderScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Text(
-                        text = "4. Equipamento e Detalhes",
+                        text = "2. Laudo e Execução Técnica",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Black,
                         color = TextPrimary
                     )
 
-                    // Equipamento
+                    // Campo: Descrição do Problema / Chamado
                     Column {
                         Text(
-                            text = "MÁQUINA / EQUIPAMENTO ATENDIDO (OPCIONAL)",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = TextSecondary
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box {
-                            OutlinedTextField(
-                                value = selectedEquipmentName?.ifBlank { "OUTRO EQUIPAMENTO" } ?: "OUTRO EQUIPAMENTO",
-                                onValueChange = {},
-                                readOnly = true,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { equipmentExpanded = true },
-                                shape = RoundedCornerShape(12.dp),
-                                leadingIcon = {
-                                    Icon(Icons.Default.Settings, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
-                                },
-                                trailingIcon = {
-                                    IconButton(onClick = { equipmentExpanded = !equipmentExpanded }) {
-                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
-                                    }
-                                }
-                            )
-                            DropdownMenu(
-                                expanded = equipmentExpanded,
-                                onDismissRequest = { equipmentExpanded = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("OUTRO EQUIPAMENTO (Avulso)", fontSize = 12.sp, fontWeight = FontWeight.Bold) },
-                                    onClick = {
-                                        selectedEquipmentId = "OUTRO EQUIPAMENTO"
-                                        selectedEquipmentName = "OUTRO EQUIPAMENTO"
-                                        equipmentExpanded = false
-                                    }
-                                )
-                                uiState.equipments.forEach { eq ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Column {
-                                                Text(eq.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                                Text("${eq.brand ?: ""} ${eq.btu ?: ""} • ${eq.sector ?: ""}", fontSize = 10.sp, color = TextSecondary)
-                                            }
-                                        },
-                                        onClick = {
-                                            selectedEquipmentId = eq.id
-                                            selectedEquipmentName = eq.name
-                                            equipmentExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Descrição
-                    Column {
-                        Text(
-                            text = "MOTIVO DO CHAMADO / OBSERVAÇÕES *",
+                            text = "DESCRIÇÃO DO CHAMADO / PROBLEMA *",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextSecondary
@@ -761,25 +676,210 @@ fun CreateServiceOrderScreen(
                             onValueChange = { description = it },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(110.dp),
+                                .height(85.dp),
                             shape = RoundedCornerShape(12.dp),
                             placeholder = {
                                 Text(
-                                    "Descreva o motivo do chamado, problemas relatados pelo cliente ou instruções da equipe técnica...",
+                                    "Descreva o problema relatado pelo cliente ou motivo do chamado...",
                                     fontSize = 11.sp
                                 )
                             }
                         )
                     }
 
-                    // Erro
-                    validationError?.let { err ->
+                    // Campo: Diagnóstico da Máquina
+                    Column {
                         Text(
-                            text = err,
-                            color = Color(0xFFDC2626),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold
+                            text = "DIAGNÓSTICO DA MÁQUINA *",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
                         )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = diagnosis,
+                            onValueChange = { diagnosis = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(85.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            placeholder = {
+                                Text(
+                                    "Diagnóstico técnico da máquina, testes realizados, defeito encontrado...",
+                                    fontSize = 11.sp
+                                )
+                            }
+                        )
+                    }
+
+                    // Campo: Solução Aplicada
+                    Column {
+                        Text(
+                            text = "SOLUÇÃO APLICADA *",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = solution,
+                            onValueChange = { solution = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(85.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            placeholder = {
+                                Text(
+                                    "Solução aplicada, peças trocadas, higienização, reparo e testes de rendimento...",
+                                    fontSize = 11.sp
+                                )
+                            }
+                        )
+                    }
+                }
+            }
+
+            // SEÇÃO 3: FISCAL / RESPONSÁVEL DO CLIENTE E ASSINATURA DIGITAL
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text(
+                        text = "3. Fiscal / Responsável do Cliente",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = TextPrimary
+                    )
+
+                    // Nome do Responsável (Fiscal)
+                    Column {
+                        Text(
+                            text = "NOME DO RESPONSÁVEL (FISCAL) *",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = fiscalName,
+                            onValueChange = { fiscalName = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            leadingIcon = {
+                                Icon(Icons.Default.Person, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
+                            },
+                            placeholder = {
+                                Text("Nome completo do fiscal que assina a ordem", fontSize = 11.sp)
+                            },
+                            singleLine = true
+                        )
+                    }
+
+                    // Matrícula do Fiscal
+                    Column {
+                        Text(
+                            text = "MATRÍCULA DO RESPONSÁVEL *",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = fiscalRegistration,
+                            onValueChange = { fiscalRegistration = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            leadingIcon = {
+                                Icon(Icons.Default.AccountBox, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
+                            },
+                            placeholder = {
+                                Text("Matrícula funcional ou documento do fiscal", fontSize = 11.sp)
+                            },
+                            singleLine = true
+                        )
+                    }
+
+                    // Assinatura Digital do Fiscal
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "ASSINATURA DIGITAL DO FISCAL *",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextSecondary
+                            )
+                            if (hasSignature) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = Color(0xFF059669),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Assinatura Coletada",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF059669)
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        SignaturePad(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(190.dp),
+                            paths = signaturePaths,
+                            onSignatureChanged = { signed ->
+                                hasSignature = signed
+                            }
+                        )
+                    }
+
+                    // Mensagem de Erro de Validação
+                    validationError?.let { err ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFFEE2E2),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCA5A5))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Warning,
+                                    contentDescription = null,
+                                    tint = Color(0xFFDC2626),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = err,
+                                    color = Color(0xFF991B1B),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -788,3 +888,4 @@ fun CreateServiceOrderScreen(
         }
     }
 }
+

@@ -10,8 +10,26 @@ data class OrderChecklistProgress(
     val completedCount: Int
 )
 
+data class AddressEquipmentResult(
+    val id: String,
+    val name: String,
+    val brand: String? = null,
+    val btu: String? = null,
+    val sector: String? = null,
+    val addressId: String? = null
+)
+
 @Dao
 interface EquipmentChecklistDao {
+
+    @Query("""
+        SELECT DISTINCT ec.equipmentId as id, ec.equipmentName as name, ec.equipmentBrand as brand, ec.equipmentBtus as btu, ec.equipmentSector as sector, so.addressId as addressId
+        FROM equipment_checklists ec
+        INNER JOIN service_orders so ON ec.orderId = so.id
+        WHERE so.addressId = :addressId
+        ORDER BY ec.equipmentName ASC
+    """)
+    suspend fun getDistinctEquipmentsForAddress(addressId: String): List<AddressEquipmentResult>
 
     @Query("""
         SELECT 

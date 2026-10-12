@@ -31,6 +31,7 @@ data class ServiceOrdersUiState(
     val finishedCount: Int = 0,
     val isLoading: Boolean = false,
     val isSyncing: Boolean = false,
+    val isLoadingEquipments: Boolean = false,
     val isCreateModalOpen: Boolean = false,
     val selectedDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
     val clients: List<ClientOption> = emptyList(),
@@ -156,31 +157,39 @@ class ServiceOrdersViewModel(
 
     fun loadEquipmentsForAddress(addressId: String) {
         viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingEquipments = true) }
             val list = repository.getEquipmentsForAddress(addressId)
-            _uiState.update { it.copy(equipments = list) }
+            _uiState.update { it.copy(equipments = list, isLoadingEquipments = false) }
         }
     }
 
     fun createServiceOrder(
-        date: String,
-        type: String,
+        date: String = "",
+        type: String = "MANUTENÇÃO CORRETIVA CONTRATO",
         clientId: String,
         clientName: String,
         addressId: String,
         addressStreet: String,
         equipmentId: String?,
         equipmentName: String?,
-        tech2Name: String?,
+        tech2Name: String? = null,
         description: String,
+        diagnosis: String? = null,
+        solution: String? = null,
+        fiscalName: String? = null,
+        fiscalRegistration: String? = null,
+        signaturePath: String? = null,
+        signatureBase64: String? = null,
+        isFinalized: Boolean = false,
         onSuccess: (orderId: String) -> Unit,
         onError: (message: String) -> Unit
     ) {
         viewModelScope.launch {
             try {
+                val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                val effectiveDate = date.ifBlank { todayStr }
                 val params = CreateServiceOrderParams(
-                    plannedDate = date.ifBlank {
-                        SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-                    },
+                    plannedDate = effectiveDate,
                     type = type,
                     clientId = clientId,
                     clientName = clientName,
@@ -191,7 +200,14 @@ class ServiceOrdersViewModel(
                     technicianId = currentUser.uid,
                     technicianName = currentUser.name,
                     technician2Name = tech2Name,
-                    description = description.ifBlank { "Atendimento / Chamado de Ordem de Serviço" }
+                    description = description.ifBlank { "Atendimento / Chamado de Ordem de Serviço" },
+                    diagnosis = diagnosis,
+                    solution = solution,
+                    fiscalName = fiscalName,
+                    fiscalRegistration = fiscalRegistration,
+                    signaturePath = signaturePath,
+                    signatureBase64 = signatureBase64,
+                    isFinalized = isFinalized
                 )
 
                 val created = repository.createServiceOrder(params)

@@ -27,6 +27,11 @@ import java.util.UUID
  */
 class ServiceOrderRepository(private val context: Context) {
 
+    companion object {
+        // Cache em memória de máquinas por endereço alimentado na sincronização do roteiro
+        private val cachedEquipmentsByAddress = java.util.concurrent.ConcurrentHashMap<String, MutableList<EquipmentOption>>()
+    }
+
     private val db = AppDatabase.getInstance(context)
     private val orderDao = db.serviceOrderDao()
     private val checklistDao = db.equipmentChecklistDao()
@@ -110,13 +115,25 @@ class ServiceOrderRepository(private val context: Context) {
                             if (cid.isNotBlank()) clientsMap[cid] = c
                         }
 
-                        // Mapeia equipamentos por addressId
+                        // Mapeia equipamentos por addressId e alimenta cache de máquinas para ordens de serviço
                         val equipsByAddr = mutableMapOf<String, MutableList<JSONObject>>()
                         for (i in 0 until equipsArr.length()) {
                             val eq = equipsArr.getJSONObject(i)
-                            val eqAid = eq.optString("addressId", "")
+                            val eqAid = eq.optString("addressId", "").trim()
                             if (eqAid.isNotBlank()) {
                                 equipsByAddr.getOrPut(eqAid) { mutableListOf() }.add(eq)
+                                val opt = EquipmentOption(
+                                    id = eq.optString("id", UUID.randomUUID().toString()),
+                                    addressId = eqAid,
+                                    name = eq.optString("name", eq.optString("label", "Equipamento")),
+                                    brand = eq.optString("brand", null).takeIf { !it.isNullOrBlank() },
+                                    sector = eq.optString("sector", null).takeIf { !it.isNullOrBlank() },
+                                    btu = eq.optString("btus", null).takeIf { !it.isNullOrBlank() }
+                                )
+                                val existing = cachedEquipmentsByAddress.getOrPut(eqAid) { mutableListOf() }
+                                if (existing.none { it.id == opt.id }) {
+                                    existing.add(opt)
+                                }
                             }
                         }
 
@@ -779,6 +796,22 @@ class ServiceOrderRepository(private val context: Context) {
         val shortSeq = (1000 + (timestamp % 9000)).toString()
         val osNumber = "OS-$shortSeq"
 
+        val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date())
+        val hasSignature = !params.signaturePath.isNullOrBlank() || !params.signatureBase64.isNullOrBlank()
+        val isFinal = params.isFinalized || hasSignature
+        val status = if (isFinal) "finalizada" else "aberta"
+        val completionDate = if (isFinal) nowIso else null
+
+        val fullNotes = buildString {
+            append("MOTIVO / DESCRIÇÃO: ${params.description.ifBlank { "Atendimento técnico no local" }}")
+            if (!params.diagnosis.isNullOrBlank()) {
+                append("\nDIAGNÓSTICO DA MÁQUINA: ${params.diagnosis}")
+            }
+            if (!params.solution.isNullOrBlank()) {
+                append("\nSOLUÇÃO APLICADA: ${params.solution}")
+            }
+        }
+
         val entity = ServiceOrderEntity(
             id = orderId,
             osNumber = osNumber,
@@ -788,11 +821,17 @@ class ServiceOrderRepository(private val context: Context) {
             addressId = params.addressId,
             addressStreet = params.addressStreet,
             plannedDate = params.plannedDate,
-            status = "aberta",
+            status = status,
             type = params.type,
             technician1 = params.technicianName,
             technician2 = params.technician2Name,
-            generalNotes = params.description,
+            clientRepresentative = params.fiscalName,
+            clientSigneeDoc = params.fiscalRegistration,
+            clientSignatureDate = if (isFinal) nowIso else null,
+            clientSignaturePath = params.signaturePath,
+            completionDate = completionDate,
+            generalNotes = fullNotes,
+            isLockedForEdit = isFinal,
             isSyncedWithServer = false,
             lastModifiedAt = timestamp
         )
@@ -811,7 +850,7 @@ class ServiceOrderRepository(private val context: Context) {
                 equipmentBrand = "Principal",
                 equipmentBtus = "",
                 equipmentSector = "Geral",
-                isChecked = false,
+                isChecked = isFinal,
                 isSkipped = false,
                 isSynced = false,
                 updatedAt = timestamp
@@ -819,7 +858,7 @@ class ServiceOrderRepository(private val context: Context) {
             checklistDao.insertOrUpdate(checkItem)
         }
 
-        // 3. Enfileira na fila de sincronização
+        // 3. Enfileira na fila de sincronização com todos os dados técnicos e fiscal
         val payload = JSONObject().apply {
             put("id", orderId)
             put("osNumber", osNumber)
@@ -829,14 +868,25 @@ class ServiceOrderRepository(private val context: Context) {
             put("addressStreet", params.addressStreet)
             put("equipmentId", params.equipmentId ?: "")
             put("equipmentName", params.equipmentName ?: "")
-            put("status", "aberta")
+            put("status", status)
             put("type", params.type)
             put("plannedDate", params.plannedDate)
             put("technicianId", params.technicianId)
             put("technician1", params.technicianName)
             put("technician2", params.technician2Name ?: "")
             put("description", params.description)
-            put("openedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date()))
+            put("diagnosis", params.diagnosis ?: "")
+            put("solution", params.solution ?: "")
+            put("clientRepresentative", params.fiscalName ?: "")
+            put("clientSigneeName", params.fiscalName ?: "")
+            put("clientSigneeRegistration", params.fiscalRegistration ?: "")
+            put("clientSigneeDoc", params.fiscalRegistration ?: "")
+            put("clientSignaturePath", params.signaturePath ?: "")
+            put("clientSignatureDate", if (isFinal) nowIso else "")
+            put("completionDate", completionDate ?: "")
+            put("clientSignature", params.signatureBase64 ?: "")
+            put("generalNotes", fullNotes)
+            put("openedAt", nowIso)
         }
 
         syncDao.enqueue(
@@ -921,32 +971,120 @@ class ServiceOrderRepository(private val context: Context) {
         )
     }
 
-    suspend fun getEquipmentsForAddress(addressId: String): List<EquipmentOption> {
-        val list = mutableListOf<EquipmentOption>()
-        try {
-            val firestore = FirebaseConfig.getFirestore()
-            val snap = firestore.collection("equipments")
-                .whereEqualTo("addressId", addressId)
-                .limit(40)
-                .get()
-                .await()
-            for (doc in snap.documents) {
-                val name = doc.getString("name") ?: "Equipamento"
-                list.add(
-                    EquipmentOption(
-                        id = doc.id,
-                        addressId = addressId,
-                        name = name,
-                        brand = doc.getString("brand"),
-                        sector = doc.getString("sector"),
-                        btu = doc.getString("btus")
-                    )
-                )
+    suspend fun getEquipmentsForAddress(addressId: String): List<EquipmentOption> = withContext(Dispatchers.IO) {
+        val cleanAid = addressId.trim()
+        if (cleanAid.isBlank()) return@withContext emptyList()
+
+        val resultList = mutableListOf<EquipmentOption>()
+        val seenIds = mutableSetOf<String>()
+
+        // 1. Verifica cache em memória primeiro (alimentado na sincronização do roteiro de hoje)
+        cachedEquipmentsByAddress[cleanAid]?.let { cached ->
+            for (eq in cached) {
+                if (seenIds.add(eq.id)) {
+                    resultList.add(eq)
+                }
             }
-        } catch (e: Exception) {
-            Log.d(TAG, "Busca de equipamentos remota indisponível: ${e.message}")
         }
-        return list
+
+        // 2. Tenta buscar na API HTTP rápida do sistema (/api/equipments?addressId=...)
+        if (resultList.isEmpty()) {
+            val apiEndpoints = listOf(
+                "${FirebaseConfig.SHARED_API_BASE}/api/equipments?addressId=${java.net.URLEncoder.encode(cleanAid, "UTF-8")}",
+                "http://10.0.2.2:3000/api/equipments?addressId=${java.net.URLEncoder.encode(cleanAid, "UTF-8")}"
+            )
+            for (endpoint in apiEndpoints) {
+                try {
+                    val url = java.net.URL(endpoint)
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 3000
+                    conn.readTimeout = 4000
+                    conn.requestMethod = "GET"
+                    conn.setRequestProperty("Accept", "application/json")
+                    if (conn.responseCode == 200) {
+                        val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
+                        val json = JSONObject(responseStr)
+                        if (json.optBoolean("success", false)) {
+                            val arr = json.optJSONArray("equipments") ?: org.json.JSONArray()
+                            for (i in 0 until arr.length()) {
+                                val item = arr.getJSONObject(i)
+                                val eqId = item.optString("id", "")
+                                if (eqId.isNotBlank() && seenIds.add(eqId)) {
+                                    val opt = EquipmentOption(
+                                        id = eqId,
+                                        addressId = cleanAid,
+                                        name = item.optString("name", item.optString("label", "Equipamento")),
+                                        brand = item.optString("brand", null).takeIf { !it.isNullOrBlank() },
+                                        sector = item.optString("sector", null).takeIf { !it.isNullOrBlank() },
+                                        btu = item.optString("btus", null).takeIf { !it.isNullOrBlank() }
+                                    )
+                                    resultList.add(opt)
+                                    cachedEquipmentsByAddress.getOrPut(cleanAid) { mutableListOf() }.add(opt)
+                                }
+                            }
+                            if (resultList.isNotEmpty()) break
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Tentativa de busca de equipamentos via API falhou: ${e.message}")
+                }
+            }
+        }
+
+        // 3. Tenta buscar no banco Room local (offline-first dos checklists gravados das ordens deste endereço)
+        if (resultList.isEmpty()) {
+            try {
+                val localEquips = checklistDao.getDistinctEquipmentsForAddress(cleanAid)
+                for (le in localEquips) {
+                    if (seenIds.add(le.id)) {
+                        val opt = EquipmentOption(
+                            id = le.id,
+                            addressId = cleanAid,
+                            name = le.name,
+                            brand = le.brand,
+                            sector = le.sector,
+                            btu = le.btu
+                        )
+                        resultList.add(opt)
+                        cachedEquipmentsByAddress.getOrPut(cleanAid) { mutableListOf() }.add(opt)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Busca local Room de equipamentos falhou: ${e.message}")
+            }
+        }
+
+        // 4. Última tentativa: busca remota direta no Firestore
+        if (resultList.isEmpty()) {
+            try {
+                val firestore = FirebaseConfig.getFirestore()
+                val snap = firestore.collection("equipments")
+                    .whereEqualTo("addressId", cleanAid)
+                    .limit(40)
+                    .get()
+                    .await()
+                for (doc in snap.documents) {
+                    val docId = doc.id
+                    if (seenIds.add(docId)) {
+                        val name = doc.getString("name") ?: doc.getString("label") ?: "Equipamento"
+                        val opt = EquipmentOption(
+                            id = docId,
+                            addressId = cleanAid,
+                            name = name,
+                            brand = doc.getString("brand"),
+                            sector = doc.getString("sector"),
+                            btu = doc.getString("btus")
+                        )
+                        resultList.add(opt)
+                        cachedEquipmentsByAddress.getOrPut(cleanAid) { mutableListOf() }.add(opt)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Busca remota Firestore de equipamentos indisponível: ${e.message}")
+            }
+        }
+
+        resultList.sortedBy { it.name }
     }
 
     suspend fun getAllTechnicians(): List<com.lefrio.atendimento.data.local.entity.TechnicianEntity> {
@@ -964,7 +1102,7 @@ class ServiceOrderRepository(private val context: Context) {
 
 data class CreateServiceOrderParams(
     val plannedDate: String,
-    val type: String,
+    val type: String = "MANUTENÇÃO CORRETIVA CONTRATO",
     val clientId: String,
     val clientName: String,
     val addressId: String,
@@ -974,7 +1112,14 @@ data class CreateServiceOrderParams(
     val technicianId: String,
     val technicianName: String,
     val technician2Name: String? = null,
-    val description: String
+    val description: String,
+    val diagnosis: String? = null,
+    val solution: String? = null,
+    val fiscalName: String? = null,
+    val fiscalRegistration: String? = null,
+    val signaturePath: String? = null,
+    val signatureBase64: String? = null,
+    val isFinalized: Boolean = false
 )
 
 data class ClientOption(
