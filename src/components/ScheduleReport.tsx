@@ -3,9 +3,10 @@ import { Address, MaintenanceRecord, Client } from '../types';
 import { dataService } from '../services/dataService';
 import { format, differenceInDays, parseISO, isValid } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { AlertTriangle, Clock, Calendar, Search, Printer, CheckCircle, TrendingUp, Award, Users, Target, Percent, Eye, X, MapPin, AlertCircle } from 'lucide-react';
+import { AlertTriangle, Clock, Calendar, Search, Printer, CheckCircle, TrendingUp, Award, Users, Target, Percent, Eye, X, MapPin, AlertCircle, Building2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { ExecutiveBoardReport } from './ExecutiveBoardReport';
 
 interface PriorityRouteModalState {
   isOpen: boolean;
@@ -30,8 +31,8 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   
-  const [viewMode, setViewMode] = useState<'pending' | 'completed' | 'client_routes'>(() => {
-    return (localStorage.getItem('schedule_report_view_mode') as 'pending' | 'completed' | 'client_routes') || 'pending';
+  const [viewMode, setViewMode] = useState<'pending' | 'completed' | 'client_routes' | 'diretoria'>(() => {
+    return (localStorage.getItem('schedule_report_view_mode') as any) || 'pending';
   });
   
   const [selectedMonth, setSelectedMonth] = useState(() => {
@@ -583,6 +584,13 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
               <Target className={cn("w-4 h-4", viewMode === 'client_routes' ? "text-blue-600" : "")} />
               Acompanhamento por Cliente
             </button>
+            <button
+              onClick={() => setViewMode('diretoria')}
+              className={cn("flex-1 sm:flex-none px-4 py-2 text-sm font-black rounded-lg transition-all whitespace-nowrap flex items-center justify-center gap-2", viewMode === 'diretoria' ? "bg-slate-900 text-white shadow-sm" : "text-gray-500 hover:text-gray-700")}
+            >
+              <Building2 className={cn("w-4 h-4", viewMode === 'diretoria' ? "text-amber-400" : "text-slate-600")} />
+              Diretoria
+            </button>
         </div>
         <div className="flex items-center gap-3">
             {viewMode === 'completed' && (
@@ -912,7 +920,11 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
          </div>
       )}
 
-      {viewMode === 'client_routes' ? (
+      {viewMode === 'diretoria' ? (
+        <div className="p-2 sm:p-4 print:p-0">
+          <ExecutiveBoardReport managerClientId={managerClientId} />
+        </div>
+      ) : viewMode === 'client_routes' ? (
          <div className="p-6 print:p-0 space-y-6 print:space-y-4 w-full">
             {/* Seletor de Cliente */}
             <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4 print:hidden">

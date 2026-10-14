@@ -9,7 +9,9 @@ import {
   Clock, 
   FileText, 
   SlidersHorizontal,
-  ChevronDown,
+  Eye,
+  EyeOff,
+  RotateCcw,
   Info
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
@@ -40,6 +42,10 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
   });
 
   const [datePreset, setDatePreset] = useState<'this_week' | 'last_7_days' | 'custom'>('this_week');
+
+  // Hidden items state (customization power for user)
+  const [hiddenClients, setHiddenClients] = useState<Set<string>>(new Set());
+  const [hiddenTechs, setHiddenTechs] = useState<Set<string>>(new Set());
 
   // User observations for Chart 1 and Chart 2
   const [techObs, setTechObs] = useState<string>(
@@ -78,6 +84,38 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Toggle client visibility
+  const toggleClientVisibility = (clientId: string) => {
+    setHiddenClients(prev => {
+      const next = new Set(prev);
+      if (next.has(clientId)) {
+        next.delete(clientId);
+      } else {
+        next.add(clientId);
+      }
+      return next;
+    });
+  };
+
+  // Toggle technician visibility
+  const toggleTechVisibility = (techName: string) => {
+    setHiddenTechs(prev => {
+      const next = new Set(prev);
+      if (next.has(techName)) {
+        next.delete(techName);
+      } else {
+        next.add(techName);
+      }
+      return next;
+    });
+  };
+
+  // Reset hidden items
+  const handleResetHidden = () => {
+    setHiddenClients(new Set());
+    setHiddenTechs(new Set());
   };
 
   // Handle Preset Changes
@@ -129,7 +167,6 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       if (rec.status === MaintenanceStatus.COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0)) {
         const executedQty = rec.executedQuantity || 0;
         
-        // Parse execution date
         let recDate: Date | null = null;
         if (rec.executionDate) {
           try { recDate = parseISO(rec.executionDate); } catch (e) {}
@@ -155,10 +192,8 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       }
     });
 
-    // Filter out techs with 0 machines in both period and month
     const list = Array.from(techMap.values()).filter(t => t.periodMachines > 0 || t.monthMachines > 0);
 
-    // Sort descending: highest period machines first, then month machines
     list.sort((a, b) => {
       if (b.periodMachines !== a.periodMachines) {
         return b.periodMachines - a.periodMachines;
@@ -212,10 +247,8 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       }
     });
 
-    // Convert map to list and filter clients with addresses
     let list = Array.from(statsMap.values()).filter(s => s.totalAddresses > 0);
 
-    // Calculate percentage
     list = list.map(item => {
       let percent = 0;
       if (item.totalMachines > 0) {
@@ -226,7 +259,6 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       return { ...item, percent };
     });
 
-    // Sort by billing day ascending, then by percentage descending
     list.sort((a, b) => {
       const dayA = a.billingDay || 999;
       const dayB = b.billingDay || 999;
@@ -236,7 +268,6 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       return dayA - dayB;
     });
 
-    // Group clients by billing day
     const grouped = new Map<number, typeof list>();
     list.forEach(item => {
       const day = item.billingDay || 0;
@@ -264,6 +295,8 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
     };
   }, [records, addresses]);
 
+  const totalHiddenCount = hiddenClients.size + hiddenTechs.size;
+
   return (
     <div className="space-y-6 max-w-5xl mx-auto pb-12 animate-in fade-in duration-300">
       {/* CSS Rules for A4 Paper Printing */}
@@ -271,6 +304,10 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
         @media print {
           /* Hide all non-printable elements */
           aside, nav, header, button, input, select, textarea, .no-print, .print\\:hidden, [role="navigation"] {
+            display: none !important;
+          }
+          /* Hide elements marked as hidden in print */
+          .is-hidden-print {
             display: none !important;
           }
           /* Reset viewport for full width A4 */
@@ -314,6 +351,18 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          {/* Reset Hidden Items Button if any hidden */}
+          {totalHiddenCount > 0 && (
+            <button
+              onClick={handleResetHidden}
+              className="flex items-center gap-1.5 px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-xl text-xs font-extrabold transition cursor-pointer shadow-2xs"
+              title="Exibir novamente todos os clientes e técnicos ocultos"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Exibir Todos ({totalHiddenCount} ocultos)</span>
+            </button>
+          )}
+
           {/* Month Selector */}
           <div className="flex items-center gap-1.5 bg-gray-50 px-3 py-1.5 border border-gray-200 rounded-xl">
             <Calendar className="w-4 h-4 text-gray-400" />
@@ -417,7 +466,7 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
           </div>
 
           <span className="text-[11px] text-slate-500 italic ml-auto">
-            A coluna de "Total do Mês" refere-se ao mês selecionado ({format(new Date(month + '-01T12:00:00'), 'MMMM/yyyy', { locale: ptBR })}).
+            Dica: Clique no ícone <Eye className="w-3 h-3 inline text-slate-600" /> para ocultar clientes ou técnicos específicos da impressão.
           </span>
         </div>
       </div>
@@ -504,8 +553,11 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
               {/* Table Header */}
               <div className="grid grid-cols-12 bg-slate-900 text-white font-extrabold text-[10px] uppercase tracking-wider p-2.5">
                 <div className="col-span-3">Nome do Técnico</div>
-                <div className="col-span-6 text-center">Produção no Período ({format(parseISO(startDate), 'dd/MM')} - {format(parseISO(endDate), 'dd/MM')})</div>
+                <div className="col-span-5 text-center">Produção no Período ({format(parseISO(startDate), 'dd/MM')} - {format(parseISO(endDate), 'dd/MM')})</div>
                 <div className="col-span-3 text-right">Total no Mês</div>
+                <div className="col-span-1 text-center print:hidden" title="Clique para ocultar ou exibir este técnico no relatório impresso">
+                  Exibir
+                </div>
               </div>
 
               {/* Rows */}
@@ -515,18 +567,31 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
                     ? Math.max(8, Math.round((item.periodMachines / techData.maxPeriod) * 100)) 
                     : 0;
 
+                  const isHidden = hiddenTechs.has(item.name);
                   const isEven = idx % 2 === 0;
 
                   return (
-                    <div key={item.name} className={cn("grid grid-cols-12 items-center p-2.5", isEven ? "bg-white" : "bg-slate-50/60")}>
+                    <div 
+                      key={item.name} 
+                      className={cn(
+                        "grid grid-cols-12 items-center p-2.5 transition-colors",
+                        isEven ? "bg-white" : "bg-slate-50/60",
+                        isHidden && "is-hidden-print bg-amber-50/40 opacity-60"
+                      )}
+                    >
                       {/* Column 1: Tech Name */}
                       <div className="col-span-3 font-bold text-slate-900 truncate pr-2 uppercase text-[11px]" title={item.name}>
                         <span className="text-[10px] text-slate-400 mr-1.5 font-mono">#{idx + 1}</span>
                         {item.name}
+                        {isHidden && (
+                          <span className="ml-1 text-[9px] text-amber-700 bg-amber-100 px-1 py-0.2 rounded font-semibold print:hidden">
+                            (Oculto)
+                          </span>
+                        )}
                       </div>
 
                       {/* Column 2: Horizontal Bar & Quantity */}
-                      <div className="col-span-6 px-2 flex items-center gap-3">
+                      <div className="col-span-5 px-2 flex items-center gap-3">
                         <div className="flex-1 bg-slate-200/80 rounded-full h-4 relative overflow-hidden border border-slate-300">
                           <div 
                             className="h-full bg-blue-600 transition-all duration-300 rounded-full"
@@ -543,6 +608,22 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
                         <span className="bg-slate-100 text-slate-800 px-2.5 py-1 rounded border border-slate-300 inline-block font-mono">
                           {item.monthMachines} <span className="text-[9px] text-slate-500 font-semibold uppercase">no mês</span>
                         </span>
+                      </div>
+
+                      {/* Column 4: Toggle Visibility Icon (Screen only) */}
+                      <div className="col-span-1 text-center print:hidden">
+                        <button
+                          onClick={() => toggleTechVisibility(item.name)}
+                          className={cn(
+                            "p-1.5 rounded-lg transition-colors cursor-pointer outline-none mx-auto",
+                            isHidden 
+                              ? "text-amber-600 hover:bg-amber-100 bg-amber-50" 
+                              : "text-slate-400 hover:text-slate-800 hover:bg-slate-100"
+                          )}
+                          title={isHidden ? "Exibir este técnico na folha de impressão" : "Ocultar este técnico da folha de impressão"}
+                        >
+                          {isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
                       </div>
                     </div>
                   );
@@ -606,8 +687,11 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
               <div className="grid grid-cols-12 bg-slate-900 text-white font-extrabold text-[10px] uppercase tracking-wider p-2.5">
                 <div className="col-span-2">Faturamento</div>
                 <div className="col-span-4">Cliente</div>
-                <div className="col-span-4 text-center">% Concluído das Máquinas</div>
+                <div className="col-span-3 text-center">% Concluído das Máquinas</div>
                 <div className="col-span-2 text-right">Progresso</div>
+                <div className="col-span-1 text-center print:hidden" title="Clique no ícone de olho para ocultar ou exibir o cliente no relatório impresso">
+                  Exibir
+                </div>
               </div>
 
               {/* Body */}
@@ -622,9 +706,16 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
 
                     {groupClients.map((client) => {
                       const is100 = client.percent >= 100;
+                      const isHidden = hiddenClients.has(client.clientId);
 
                       return (
-                        <div key={client.clientId} className="grid grid-cols-12 items-center p-2.5 hover:bg-slate-50">
+                        <div 
+                          key={client.clientId} 
+                          className={cn(
+                            "grid grid-cols-12 items-center p-2.5 hover:bg-slate-50 transition-colors",
+                            isHidden && "is-hidden-print bg-amber-50/40 opacity-60"
+                          )}
+                        >
                           {/* Col 1: Day */}
                           <div className="col-span-2 font-bold text-slate-700 text-[11px]">
                             Dia {client.billingDay > 0 ? String(client.billingDay).padStart(2, '0') : '--'}
@@ -633,10 +724,15 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
                           {/* Col 2: Client Name */}
                           <div className="col-span-4 font-black text-slate-950 text-[11px] truncate uppercase pr-2" title={client.clientName}>
                             {client.clientName}
+                            {isHidden && (
+                              <span className="ml-1 text-[9px] text-amber-700 bg-amber-100 px-1 py-0.2 rounded font-semibold print:hidden">
+                                (Oculto)
+                              </span>
+                            )}
                           </div>
 
                           {/* Col 3: Horizontal Bar & Percentage */}
-                          <div className="col-span-4 px-2 flex items-center gap-3">
+                          <div className="col-span-3 px-2 flex items-center gap-2">
                             <div className="flex-1 bg-slate-200 rounded-full h-4 relative overflow-hidden border border-slate-300">
                               <div 
                                 className={cn(
@@ -647,7 +743,7 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
                               />
                             </div>
                             <span className={cn(
-                              "text-[10px] font-black px-2 py-0.5 rounded border shrink-0 min-w-[50px] text-center",
+                              "text-[10px] font-black px-2 py-0.5 rounded border shrink-0 min-w-[48px] text-center",
                               is100 ? "bg-emerald-100 text-emerald-800 border-emerald-300" : "bg-slate-100 text-slate-800 border-slate-300"
                             )}>
                               {client.percent}%
@@ -665,6 +761,22 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
                                 {client.executedMachines}/{client.totalMachines} máq.
                               </span>
                             )}
+                          </div>
+
+                          {/* Col 5: Discreet Toggle Visibility Icon (Screen only) */}
+                          <div className="col-span-1 text-center print:hidden">
+                            <button
+                              onClick={() => toggleClientVisibility(client.clientId)}
+                              className={cn(
+                                "p-1.5 rounded-lg transition-colors cursor-pointer outline-none mx-auto",
+                                isHidden 
+                                  ? "text-amber-600 hover:bg-amber-100 bg-amber-50" 
+                                  : "text-slate-400 hover:text-slate-800 hover:bg-slate-100"
+                              )}
+                              title={isHidden ? "Exibir este cliente na folha de impressão" : "Ocultar este cliente da folha de impressão"}
+                            >
+                              {isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                            </button>
                           </div>
                         </div>
                       );

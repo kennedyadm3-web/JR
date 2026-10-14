@@ -47,7 +47,7 @@ interface Props {
   managerClientId?: string;
 }
 
-type ReportTab = 'dashboard' | 'service-calls' | 'schedule' | 'production' | 'route-analysis' | 'daily-schedule' | 'billing-status' | 'route-expenses' | 'diretoria';
+type ReportTab = 'dashboard' | 'schedule' | 'production' | 'route-analysis' | 'daily-schedule' | 'billing-status' | 'route-expenses';
 
 export default function ReportsView({ managerClientId }: Props) {
   const [activeTab, setActiveTab] = useState<ReportTab>('dashboard');
@@ -218,23 +218,10 @@ export default function ReportsView({ managerClientId }: Props) {
     <div className="space-y-6 pb-10">
       <div className="bg-white p-1.5 rounded-xl border border-gray-200 shadow-sm inline-flex mb-2 print:hidden w-full sm:w-auto overflow-x-auto gap-1">
         <button
-          onClick={() => setActiveTab('diretoria')}
-          className={cn("px-4 py-2 rounded-lg text-sm font-black transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer", activeTab === 'diretoria' ? "bg-slate-900 text-white shadow-md shadow-slate-300" : "text-slate-700 hover:text-slate-900 hover:bg-slate-100 bg-slate-50")}
-        >
-          <Building2 className="w-4 h-4 text-amber-400" />
-          Diretoria
-        </button>
-        <button
           onClick={() => setActiveTab('dashboard')}
           className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'dashboard' ? "bg-blue-600 text-white shadow-md shadow-blue-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
         >
           Análise de Produtividade
-        </button>
-        <button
-          onClick={() => setActiveTab('service-calls')}
-          className={cn("px-4 py-2 rounded-lg text-sm font-bold transition-all whitespace-nowrap", activeTab === 'service-calls' ? "bg-cyan-600 text-white shadow-md shadow-cyan-200" : "text-gray-500 hover:text-gray-900 hover:bg-gray-100")}
-        >
-          Análise de Chamados
         </button>
         <button
           onClick={() => setActiveTab('schedule')}
@@ -268,11 +255,9 @@ export default function ReportsView({ managerClientId }: Props) {
         </button>
       </div>
 
-      {activeTab === 'diretoria' && <ExecutiveBoardReport managerClientId={managerClientId} />}
       {activeTab === 'schedule' && <ScheduleReport managerClientId={managerClientId} />}
       {activeTab === 'production' && <TechnicalProduction managerClientId={managerClientId} />}
       {activeTab === 'route-analysis' && <RouteAnalysisReport managerClientId={managerClientId} />}
-      {activeTab === 'service-calls' && <ServiceCallAnalysisReport managerClientId={managerClientId} />}
       {activeTab === 'billing-status' && <ClientBillingReport managerClientId={managerClientId} />}
       {activeTab === 'route-expenses' && <RouteExpensesReport managerClientId={managerClientId} />}
 
