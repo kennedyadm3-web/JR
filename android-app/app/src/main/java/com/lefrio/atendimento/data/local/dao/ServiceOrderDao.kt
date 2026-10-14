@@ -81,7 +81,7 @@ interface ServiceOrderDao {
         SELECT * FROM service_orders 
         WHERE type != 'MANUTENÇÃO PREVENTIVA' 
           AND id NOT LIKE 'PREV_%'
-          AND plannedDate = :date
+          AND (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%')
           AND (
             UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
             OR UPPER(technician1) = UPPER(:technicianId)
@@ -101,9 +101,10 @@ interface ServiceOrderDao {
     @Query("""
         SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
         FROM service_orders 
-        WHERE plannedDate = :date
+        WHERE (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%')
           AND (
-            UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
+            :technicianName = '' 
+            OR UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
             OR UPPER(technician1) = UPPER(:technicianId)
             OR UPPER(technician2) LIKE '%' || UPPER(:technicianName) || '%'
             OR UPPER(technician2) = UPPER(:technicianId)
@@ -119,6 +120,52 @@ interface ServiceOrderDao {
         technicianId: String,
         date: String
     ): List<ScheduledLocationTuple>
+
+    @Query("""
+        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        FROM service_orders 
+        WHERE (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%')
+          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
+          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
+          AND clientId != ''
+          AND addressId != ''
+        ORDER BY clientName ASC, addressStreet ASC
+    """)
+    suspend fun getScheduledLocationsForDateOnly(
+        date: String
+    ): List<ScheduledLocationTuple>
+
+    @Query("""
+        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        FROM service_orders 
+        WHERE (
+            :technicianName = '' 
+            OR UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
+            OR UPPER(technician1) = UPPER(:technicianId)
+            OR UPPER(technician2) LIKE '%' || UPPER(:technicianName) || '%'
+            OR UPPER(technician2) = UPPER(:technicianId)
+          )
+          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
+          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
+          AND clientId != ''
+          AND addressId != ''
+        ORDER BY clientName ASC, addressStreet ASC
+    """)
+    suspend fun getAllLocationsForTechnician(
+        technicianName: String,
+        technicianId: String
+    ): List<ScheduledLocationTuple>
+
+    @Query("""
+        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        FROM service_orders 
+        WHERE clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
+          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
+          AND clientId != ''
+          AND addressId != ''
+        ORDER BY clientName ASC, addressStreet ASC
+    """)
+    suspend fun getAllValidLocations(): List<ScheduledLocationTuple>
 
     @Query("""
         DELETE FROM service_orders 

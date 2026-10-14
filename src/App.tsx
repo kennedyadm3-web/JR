@@ -36,9 +36,7 @@ import {
   ExternalLink,
   TrendingUp,
   Receipt,
-  FileSpreadsheet,
-  Sparkles,
-  Download
+  FileSpreadsheet
 } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import { cn } from './lib/utils';
@@ -81,23 +79,10 @@ const menuItems = [
   { id: 'profile', label: 'Meu Perfil', icon: User, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT, UserRole.TECHNICIAN] },
 ];
 
-// Versão atual base do aplicativo
-const CURRENT_APP_VERSION = "1.0.0";
-
-interface AppUpdateConfig {
-  versionCode: number;
-  versionName: string;
-  downloadUrl: string;
-  releaseNotes?: string;
-  releasedAt?: string;
-}
-
 export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateConfig | null>(null);
-  const [showUpdateBanner, setShowUpdateBanner] = useState(true);
   const [activeView, setActiveView] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('lefrio_active_view');
@@ -129,29 +114,19 @@ export default function App() {
     }
   }, [activePopup]);
 
-  // Busca e compara a versão do aplicativo com update-config.json
-  useEffect(() => {
-    const checkAppVersion = async () => {
-      try {
-        const response = await fetch('/update-config.json?v=' + Date.now());
-        if (response.ok) {
-          const config: AppUpdateConfig = await response.json();
-          if (config && config.versionName && config.versionName !== CURRENT_APP_VERSION) {
-            setAvailableUpdate(config);
-          }
-        }
-      } catch (err) {
-        console.warn('Verificação de atualização de aplicativo:', err);
-      }
-    };
-    checkAppVersion();
-  }, []);
-
   // Carrega e atualiza notificações do usuário em tempo real por assinatura (otimizado!)
   useEffect(() => {
     if (!profile) return;
     
-    const unsubscribe = dataService.subscribeNotifications(profile.uid, (list) => {
+    const unsubscribe = dataService.subscribeNotifications(profile.uid, (rawList) => {
+      // REGRA: Avisos de atualização do APK Android pertencem EXCLUSIVAMENTE ao aplicativo Android.
+      // Filtra permanentemente do sistema administrativo web e do sistema PWA.
+      const list = rawList.filter(n => {
+        const text = `${n.title || ''} ${n.content || ''}`.toLowerCase();
+        const isAndroidUpdate = text.includes('atualizaç') || text.includes('atualizac') || text.includes('apk') || text.includes('nova versão android') || text.includes('versão do aplicativo');
+        return !isAndroidUpdate;
+      });
+
       setNotifications(prev => {
         // Se já havia notificações antes, verifica se chegaram novas não lidas
         if (prev.length > 0) {
@@ -953,46 +928,6 @@ export default function App() {
 
       {/* Main Content */}
       <main className="flex-1 flex flex-col min-w-0 print:overflow-visible overflow-hidden">
-        {/* Banner de Atualização do Aplicativo Android (Visível exclusivamente para técnicos no sistema de atendimento) */}
-        {availableUpdate && showUpdateBanner && profile?.role === UserRole.TECHNICIAN && (
-          <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 text-white px-4 py-2.5 flex items-center justify-between shadow-md shrink-0 print:hidden z-30 transition-all border-b border-blue-500/40">
-            <div className="flex items-center gap-2.5 flex-1 min-w-0">
-              <div className="bg-white/20 p-1.5 rounded-lg shrink-0">
-                <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
-              </div>
-              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5 min-w-0">
-                <span className="text-[10px] font-black uppercase tracking-wider bg-white/20 px-2 py-0.5 rounded text-white shrink-0 w-fit">
-                  Atualização Disponível
-                </span>
-                <span className="text-xs font-medium text-white truncate">
-                  Nova versão <strong>v{availableUpdate.versionName}</strong> do aplicativo Android disponível para instalação!
-                </span>
-              </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0 ml-3">
-              <a
-                href={availableUpdate.downloadUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                download
-                className="px-3 py-1 bg-white hover:bg-blue-50 text-blue-700 rounded-lg text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all"
-                title="Baixar nova versão do aplicativo Android"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Baixar APK</span>
-                <span className="sm:hidden">Baixar</span>
-              </a>
-              <button
-                onClick={() => setShowUpdateBanner(false)}
-                className="p-1 text-white/70 hover:text-white hover:bg-white/10 rounded-lg transition"
-                title="Fechar aviso"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
         <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 shrink-0 print:hidden">
           <div className="flex items-center gap-4">
             <button 

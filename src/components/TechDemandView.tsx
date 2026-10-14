@@ -2229,11 +2229,18 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         row.getCell(6).value = eq ? eq.patrimony : '';
         
         let statusText = 'Pendente';
-        if (item.checked) statusText = 'Concluído';
-        if (item.skipped) statusText = 'Pendente / Pulado';
+        if (item.checked && !item.skipped) statusText = 'Concluído';
+        if (item.skipped) statusText = ''; // Coluna em branco para máquina pulada
         
+        let itemObs = item.notes || '';
+        if (item.skipped) {
+          const just = (item.justification || '').trim();
+          const n = (item.notes || '').trim();
+          itemObs = just && n && just !== n ? `${just} - ${n}` : (just || n || '');
+        }
+
         row.getCell(7).value = statusText;
-        row.getCell(8).value = item.notes || '';
+        row.getCell(8).value = itemObs;
 
         // Stylize Row Cells
         for (let col = 1; col <= 8; col++) {
@@ -4237,9 +4244,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                           if (val) {
                             updated[slot] = val;
                           } else {
-                            updated.splice(slot, 1);
+                            updated[slot] = '';
                           }
-                          setTechOSPhotos(updated.filter(Boolean));
+                          setTechOSPhotos(updated.filter(p => typeof p === 'string' && p.trim().length > 30));
                         }}
                       />
                     </div>
@@ -6510,7 +6517,21 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                   const found = existingChecklist.find(item => item && item.equipmentId === eq.id);
                   const isChecked = found ? found.checked : false;
                   const isSkipped = found ? found.skipped : false;
-                  const obsValue = isPrintingBlank ? '' : (found ? found.notes : '');
+                  
+                  let obsValue = '';
+                  if (!isPrintingBlank && found) {
+                    if (isSkipped) {
+                      const just = (found.justification || '').trim();
+                      const n = (found.notes || '').trim();
+                      if (just && n && just !== n) {
+                        obsValue = `${just} - ${n}`;
+                      } else {
+                        obsValue = just || n || '';
+                      }
+                    } else {
+                      obsValue = (found.notes || '').trim();
+                    }
+                  }
                   
                   let statusText = '';
                   const itemDate = found?.checkedAt 
@@ -6534,8 +6555,8 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                       }
                       statusText = `(APP: ${itemDate}${timeText} ${isPrintingChecklist.technician1 || 'Técnico'})`;
                     } else if (isSkipped) {
-                      const hasJustification = found?.justification && found.justification.trim().length > 0;
-                      statusText = hasJustification ? `PULADO EM ${itemDate}` : '';
+                      // Máquina pulada: coluna de visto deve ficar em branco na folha de impressão
+                      statusText = '';
                     }
                   }
 

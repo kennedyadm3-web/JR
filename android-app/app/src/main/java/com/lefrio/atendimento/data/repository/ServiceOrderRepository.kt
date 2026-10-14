@@ -325,15 +325,30 @@ class ServiceOrderRepository(private val context: Context) {
                     } catch (ignored: Exception) {}
                 }
 
-                // Busca equipamentos reais para os endereços encontrados
+                // Busca equipamentos reais para os endereços encontrados e popula cache do aplicativo
                 val equipmentsMap = mutableMapOf<String, MutableList<com.google.firebase.firestore.DocumentSnapshot>>()
                 for (aid in matchedAddressIds) {
+                    val cleanAid = aid.trim()
+                    if (cleanAid.isBlank()) continue
                     try {
-                        val eqSnap = firestore.collection("equipments").whereEqualTo("addressId", aid).get().await()
+                        val eqSnap = firestore.collection("equipments").whereEqualTo("addressId", cleanAid).get().await()
                         for (eqDoc in eqSnap.documents) {
                             val isActive = eqDoc.getBoolean("active") ?: true
                             if (isActive && eqDoc.getString("status") != "deactivated") {
-                                equipmentsMap.getOrPut(aid) { mutableListOf() }.add(eqDoc)
+                                equipmentsMap.getOrPut(cleanAid) { mutableListOf() }.add(eqDoc)
+                                val eqName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split"
+                                val opt = EquipmentOption(
+                                    id = eqDoc.id,
+                                    addressId = cleanAid,
+                                    name = eqName,
+                                    brand = eqDoc.getString("brand"),
+                                    sector = eqDoc.getString("sector"),
+                                    btu = eqDoc.getString("btus")
+                                )
+                                val existingList = cachedEquipmentsByAddress.getOrPut(cleanAid) { mutableListOf() }
+                                if (existingList.none { it.id == opt.id }) {
+                                    existingList.add(opt)
+                                }
                             }
                         }
                     } catch (ignored: Exception) {}

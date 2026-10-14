@@ -26,10 +26,18 @@ interface EquipmentChecklistDao {
         SELECT DISTINCT ec.equipmentId as id, ec.equipmentName as name, ec.equipmentBrand as brand, ec.equipmentBtus as btu, ec.equipmentSector as sector, so.addressId as addressId
         FROM equipment_checklists ec
         INNER JOIN service_orders so ON ec.orderId = so.id
-        WHERE so.addressId = :addressId
+        WHERE TRIM(so.addressId) = TRIM(:addressId) OR so.addressId LIKE '%' || :addressId || '%'
         ORDER BY ec.equipmentName ASC
     """)
     suspend fun getDistinctEquipmentsForAddress(addressId: String): List<AddressEquipmentResult>
+
+    @Query("""
+        SELECT DISTINCT ec.equipmentId as id, ec.equipmentName as name, ec.equipmentBrand as brand, ec.equipmentBtus as btu, ec.equipmentSector as sector, so.addressId as addressId
+        FROM equipment_checklists ec
+        INNER JOIN service_orders so ON ec.orderId = so.id
+        ORDER BY ec.equipmentName ASC
+    """)
+    suspend fun getDistinctEquipmentsAll(): List<AddressEquipmentResult>
 
     @Query("""
         SELECT 

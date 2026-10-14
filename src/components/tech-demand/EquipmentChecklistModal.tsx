@@ -43,6 +43,7 @@ import {
 } from '../../types';
 import { format, parseISO } from 'date-fns';
 import { cn } from '../../lib/utils';
+import { compressImageToBase64 } from '../../lib/image-utils';
 
 export interface EquipmentChecklistModalProps {
   activeChecklistRecord: MaintenanceRecord | null;
@@ -619,43 +620,24 @@ export function EquipmentChecklistModal({
   };
 
   // Upload de foto por equipamento
-  const handlePhotoUpload = (eqId: string, photoIndex: number, file: File) => {
+  const handlePhotoUpload = async (eqId: string, photoIndex: number, file: File) => {
     if (!file || isRecordCompleted) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const maxDim = 600;
-        let width = img.width;
-        let height = img.height;
-        if (width > maxDim || height > maxDim) {
-          if (width > height) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          } else {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          const base64Str = canvas.toDataURL('image/jpeg', 0.7);
-          const existing = modalChecklist.find(it => it.equipmentId === eqId);
-          const photos = [...(existing?.photos || [])];
-          photos[photoIndex] = base64Str;
-          const updated: EquipmentChecklistItem = existing
-            ? { ...existing, photos }
-            : { equipmentId: eqId, checked: false, photos, checklistAnswers: {} };
-          saveChecklistItemRealtime(updated);
-        }
-      };
-      img.src = event.target?.result as string;
-    };
-    reader.readAsDataURL(file);
+    try {
+      const base64Str = await compressImageToBase64(file, 600, 600, 0.50);
+      const existing = modalChecklist.find(it => it.equipmentId === eqId);
+      const rawPhotos = [...(existing?.photos || [])];
+      rawPhotos[photoIndex] = base64Str;
+      const cleanPhotos = rawPhotos.filter(p => typeof p === 'string' && p.trim().length > 30);
+
+      const updated: EquipmentChecklistItem = existing
+        ? { ...existing, photos: cleanPhotos }
+        : { equipmentId: eqId, checked: false, photos: cleanPhotos, checklistAnswers: {} };
+
+      saveChecklistItemRealtime(updated);
+    } catch (e) {
+      console.error('Erro ao processar imagem do equipamento:', e);
+      alert('Não foi possível anexar a foto. Tente novamente.');
+    }
   };
 
   const handleRemovePhoto = (eqId: string, photoIndex: number) => {

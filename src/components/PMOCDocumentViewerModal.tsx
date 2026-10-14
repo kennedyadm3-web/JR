@@ -391,7 +391,21 @@ export function PMOCDocumentViewerModal({
                       const found = existingChecklist.find(item => item && item.equipmentId === eq.id);
                       const isChecked = found ? found.checked : false;
                       const isSkipped = found ? found.skipped : false;
-                      const obsValue = found ? found.notes : '';
+                      
+                      let obsValue = '';
+                      if (found) {
+                        if (isSkipped) {
+                          const just = (found.justification || '').trim();
+                          const n = (found.notes || '').trim();
+                          if (just && n && just !== n) {
+                            obsValue = `${just} - ${n}`;
+                          } else {
+                            obsValue = just || n || '';
+                          }
+                        } else {
+                          obsValue = (found.notes || '').trim();
+                        }
+                      }
 
                       let statusText = '';
                       const itemDate = found?.checkedAt 
@@ -412,7 +426,8 @@ export function PMOCDocumentViewerModal({
                         }
                         statusText = `(APP: ${itemDate}${timeText} ${record.technician1 || 'Técnico'})`;
                       } else if (isSkipped) {
-                        statusText = `PULADO EM ${itemDate}`;
+                        // Máquina pulada: coluna de visto deve ficar em branco na folha de impressão
+                        statusText = '';
                       }
 
                       return (
@@ -423,7 +438,7 @@ export function PMOCDocumentViewerModal({
                           <td className="p-1 border-r border-black uppercase">{eq.brand || '-'}</td>
                           <td className="p-1 border-r border-black text-center font-bold">{formatBtus(eq.btus)}</td>
                           <td className="p-1 border-r border-black text-center font-mono">{eq.patrimony || eq.id.slice(0, 6)}</td>
-                          <td className="p-1 border-r border-black text-[8px] uppercase font-normal">{statusText || '-'}</td>
+                          <td className="p-1 border-r border-black text-[8px] uppercase font-normal">{isSkipped ? '' : (statusText || '-')}</td>
                           <td className="p-1 text-[8px] font-semibold text-slate-800 break-words">{obsValue || '-'}</td>
                         </tr>
                       );

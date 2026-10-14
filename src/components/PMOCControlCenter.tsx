@@ -983,7 +983,21 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
       const found = existingChecklist.find(item => item && item.equipmentId === eq.id);
       const isChecked = found ? found.checked : false;
       const isSkipped = found ? found.skipped : false;
-      const obsValue = found ? found.notes : '';
+      
+      let obsValue = '';
+      if (found) {
+        if (isSkipped) {
+          const just = (found.justification || '').trim();
+          const n = (found.notes || '').trim();
+          if (just && n && just !== n) {
+            obsValue = `${just} - ${n}`;
+          } else {
+            obsValue = just || n || '';
+          }
+        } else {
+          obsValue = (found.notes || '').trim();
+        }
+      }
       
       let statusText = '';
       let itemDate = '';
@@ -1041,8 +1055,8 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
         }
         statusText = `(APP: ${itemDate}${timeText} ${record.technician1 || 'Técnico'})`;
       } else if (isSkipped) {
-        const hasJustification = found?.justification && found.justification.trim().length > 0;
-        statusText = hasJustification ? `PULADO EM ${itemDate}` : '';
+        // Máquina pulada: coluna de visto deve ficar em branco
+        statusText = '';
       } else {
         statusText = '';
       }
@@ -1799,7 +1813,21 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
       const found = existingChecklist.find(item => item && item.equipmentId === eq.id);
       const isChecked = found ? found.checked : false;
       const isSkipped = found ? found.skipped : false;
-      const obsValue = found ? found.notes : '';
+      
+      let obsValue = '';
+      if (found) {
+        if (isSkipped) {
+          const just = (found.justification || '').trim();
+          const n = (found.notes || '').trim();
+          if (just && n && just !== n) {
+            obsValue = `${just} - ${n}`;
+          } else {
+            obsValue = just || n || '';
+          }
+        } else {
+          obsValue = (found.notes || '').trim();
+        }
+      }
 
       let statusText = '';
       const itemDate = found?.checkedAt 
@@ -1818,8 +1846,8 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
         }
         statusText = `(APP: ${itemDate}${timeText} ${record.technician1 || 'TÉCNICO'})`;
       } else if (isSkipped) {
-        const hasJustification = found?.justification && found.justification.trim().length > 0;
-        statusText = hasJustification ? `PULADO EM ${itemDate}` : 'PULADO';
+        // Máquina pulada: coluna de visto deve ficar em branco
+        statusText = '';
       } else {
         statusText = 'PENDENTE';
       }
@@ -1830,9 +1858,9 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
       if (statusText === 'PENDENTE') {
         statusBg = "FEE2E2"; // Vermelho claro
         statusFg = "DC2626"; // Vermelho escuro
-      } else if (statusText.startsWith('PULADO')) {
-        statusBg = "FEF3C7"; // Âmbar claro
-        statusFg = "D97706"; // Âmbar escuro
+      } else if (isSkipped) {
+        statusBg = "FFFFFF"; // Branco
+        statusFg = "000000";
       }
 
       equipTableRows.push(

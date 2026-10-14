@@ -7,20 +7,20 @@ export function isValidImageUrl(url?: string | null): boolean {
 
 export async function compressImageToBase64(
   file: File, 
-  maxWidth = 800, 
-  maxHeight: number = 800, 
-  quality = 0.55
+  maxWidth = 600, 
+  maxHeight: number = 600, 
+  quality = 0.50
 ): Promise<string> {
-  // Proteção contra chamadas com 3 argumentos onde o 3º é a qualidade (ex: compressImageToBase64(file, 1280, 0.8))
-  if (typeof maxHeight === 'number' && maxHeight > 0 && maxHeight <= 1 && quality === 0.55) {
+  // Proteção contra chamadas com 3 argumentos onde o 3º é a qualidade
+  if (typeof maxHeight === 'number' && maxHeight > 0 && maxHeight <= 1 && quality === 0.50) {
     quality = maxHeight;
     maxHeight = maxWidth;
   }
 
   // Garantir limites mínimos seguros
-  const safeMaxWidth = Math.max(100, maxWidth || 800);
-  const safeMaxHeight = Math.max(100, maxHeight || 800);
-  const safeQuality = Math.min(1, Math.max(0.1, quality || 0.55));
+  const safeMaxWidth = Math.max(100, maxWidth || 600);
+  const safeMaxHeight = Math.max(100, maxHeight || 600);
+  const safeQuality = Math.min(1, Math.max(0.1, quality || 0.50));
 
   return new Promise((resolve, reject) => {
     const reader = new FileReader();

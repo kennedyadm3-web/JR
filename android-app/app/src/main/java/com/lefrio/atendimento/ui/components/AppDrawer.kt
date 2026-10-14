@@ -169,7 +169,7 @@ fun AppDrawerContent(
 
                 DrawerNavigationItem(
                     title = "Ordens de Serviço",
-                    subtitle = "Gestão de O.S. e Chamados",
+                    subtitle = "Atendimentos e Chamados do Dia",
                     icon = Icons.Default.Assignment,
                     badgeCount = null,
                     badgeColor = Color(0xFF581C87),
@@ -179,7 +179,7 @@ fun AppDrawerContent(
 
                 DrawerNavigationItem(
                     title = "Criar Nova O.S.",
-                    subtitle = "Agendar Chamado Corretivo",
+                    subtitle = "Abertura no Local de Atendimento",
                     icon = Icons.Default.AddCircle,
                     iconTint = Color(0xFF581C87),
                     isSelected = false,

@@ -396,7 +396,6 @@ fun CreateServiceOrderScreen(
                                     fontWeight = FontWeight.Medium
                                 )
                             }
-                        }
                     } else {
                         // Campo 1: Escolher o Cliente
                         Column {
@@ -407,14 +406,12 @@ fun CreateServiceOrderScreen(
                                 color = TextSecondary
                             )
                             Spacer(modifier = Modifier.height(4.dp))
-                            Box {
+                            Box(modifier = Modifier.fillMaxWidth()) {
                                 OutlinedTextField(
                                     value = selectedClientName.ifBlank { "Selecione o Cliente do Roteiro..." },
                                     onValueChange = {},
                                     readOnly = true,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { clientExpanded = true },
+                                    modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
                                     leadingIcon = {
                                         Icon(Icons.Default.Business, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
@@ -424,6 +421,11 @@ fun CreateServiceOrderScreen(
                                             Icon(Icons.Default.ArrowDropDown, contentDescription = null)
                                         }
                                     }
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .matchParentSize()
+                                        .clickable { clientExpanded = true }
                                 )
                                 DropdownMenu(
                                     expanded = clientExpanded,
@@ -463,7 +465,7 @@ fun CreateServiceOrderScreen(
                                 color = TextSecondary
                             )
                             Spacer(modifier = Modifier.height(4.dp))
-                            Box {
+                            Box(modifier = Modifier.fillMaxWidth()) {
                                 OutlinedTextField(
                                     value = selectedAddressStreet.ifBlank {
                                         if (selectedClientId.isBlank()) "Selecione o Cliente primeiro..." else "Selecione o Endereço do Roteiro..."
@@ -471,9 +473,7 @@ fun CreateServiceOrderScreen(
                                     onValueChange = {},
                                     readOnly = true,
                                     enabled = selectedClientId.isNotBlank(),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { if (selectedClientId.isNotBlank()) addressExpanded = true },
+                                    modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
                                     leadingIcon = {
                                         Icon(Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFFDC2626), modifier = Modifier.size(18.dp))
@@ -487,6 +487,13 @@ fun CreateServiceOrderScreen(
                                         }
                                     }
                                 )
+                                if (selectedClientId.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .matchParentSize()
+                                            .clickable { addressExpanded = true }
+                                    )
+                                }
                                 DropdownMenu(
                                     expanded = addressExpanded,
                                     onDismissRequest = { addressExpanded = false }
@@ -548,7 +555,7 @@ fun CreateServiceOrderScreen(
                                 }
                             }
                             Spacer(modifier = Modifier.height(4.dp))
-                            Box {
+                            Box(modifier = Modifier.fillMaxWidth()) {
                                 OutlinedTextField(
                                     value = selectedEquipmentName.ifBlank {
                                         if (selectedAddressId.isBlank()) "Selecione o Endereço primeiro..." else "Selecione a máquina deste endereço..."
@@ -556,9 +563,7 @@ fun CreateServiceOrderScreen(
                                     onValueChange = {},
                                     readOnly = true,
                                     enabled = selectedAddressId.isNotBlank(),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { if (selectedAddressId.isNotBlank()) equipmentExpanded = true },
+                                    modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
                                     leadingIcon = {
                                         Icon(Icons.Default.Settings, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
@@ -572,6 +577,13 @@ fun CreateServiceOrderScreen(
                                         }
                                     }
                                 )
+                                if (selectedAddressId.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .matchParentSize()
+                                            .clickable { equipmentExpanded = true }
+                                    )
+                                }
                                 DropdownMenu(
                                     expanded = equipmentExpanded,
                                     onDismissRequest = { equipmentExpanded = false }
