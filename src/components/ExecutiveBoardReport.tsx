@@ -15,8 +15,8 @@ import {
   Info
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
-import { MaintenanceRecord, Address, Client, MaintenanceStatus } from '../types';
-import { format, subDays, startOfWeek, endOfWeek, parseISO, isWithinInterval, startOfDay, endOfDay } from 'date-fns';
+import { MaintenanceRecord, Address, Client, MaintenanceStatus, ServiceOrder, Technician } from '../types';
+import { format, subDays, startOfWeek, endOfWeek, parseISO, isWithinInterval, startOfDay, endOfDay, startOfMonth, endOfMonth } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { cn } from '../lib/utils';
 
@@ -24,53 +24,103 @@ interface Props {
   managerClientId?: string;
 }
 
+const STORAGE_KEY = 'lefrio_diretoria_report_config';
+
 export function ExecutiveBoardReport({ managerClientId }: Props) {
-  // Main month selector (defaults to current month, e.g. 2026-10)
-  const [month, setMonth] = useState(format(new Date(), 'yyyy-MM'));
+  // Load saved configuration from localStorage if available
+  const savedConfig = useMemo(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  // Main month selector (defaults to saved or current month)
+  const [month, setMonth] = useState(() => savedConfig?.month || format(new Date(), 'yyyy-MM'));
   
-  // Date period filter for Chart 1 (Periodo de Análise dos Técnicos)
+  // Date period filter for Chart 1
   const [startDate, setStartDate] = useState(() => {
+    if (savedConfig?.startDate) return savedConfig.startDate;
     const now = new Date();
     const start = startOfWeek(now, { weekStartsOn: 1 }); // Monday
     return format(start, 'yyyy-MM-dd');
   });
   
   const [endDate, setEndDate] = useState(() => {
+    if (savedConfig?.endDate) return savedConfig.endDate;
     const now = new Date();
     const end = endOfWeek(now, { weekStartsOn: 1 }); // Sunday
     return format(end, 'yyyy-MM-dd');
   });
 
-  const [datePreset, setDatePreset] = useState<'this_week' | 'last_7_days' | 'custom'>('this_week');
+  const [datePreset, setDatePreset] = useState<'this_week' | 'last_7_days' | 'custom'>(
+    () => savedConfig?.datePreset || 'this_week'
+  );
 
-  // Hidden items state (customization power for user)
-  const [hiddenClients, setHiddenClients] = useState<Set<string>>(new Set());
-  const [hiddenTechs, setHiddenTechs] = useState<Set<string>>(new Set());
+  // Hidden items state
+  const [hiddenClients, setHiddenClients] = useState<Set<string>>(() => {
+    if (Array.isArray(savedConfig?.hiddenClients)) {
+      return new Set(savedConfig.hiddenClients);
+    }
+    return new Set();
+  });
+
+  const [hiddenTechs, setHiddenTechs] = useState<Set<string>>(() => {
+    if (Array.isArray(savedConfig?.hiddenTechs)) {
+      return new Set(savedConfig.hiddenTechs);
+    }
+    return new Set();
+  });
 
   // User observations for Chart 1 and Chart 2
   const [techObs, setTechObs] = useState<string>(
-    'Nesta semana, a equipe técnica manteve o foco na finalização do cronograma com alta eficiência operacional e cobertura priorizada.'
+    () => savedConfig?.techObs ?? 'Nesta semana, a equipe técnica manteve o foco na finalização do cronograma com alta eficiência operacional e cobertura priorizada.'
   );
   const [clientObs, setClientObs] = useState<string>(
-    'Os clientes com faturamento previsto para o início do mês já atingiram 100% de conclusão das manutenções preventivas.'
+    () => savedConfig?.clientObs ?? 'Os clientes com faturamento previsto para o início do mês já atingiram 100% de conclusão das manutenções preventivas.'
   );
 
   const [records, setRecords] = useState<MaintenanceRecord[]>([]);
+  const [serviceOrders, setServiceOrders] = useState<ServiceOrder[]>([]);
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
+  const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Sync configuration to localStorage on any state change
+  useEffect(() => {
+    try {
+      const configToSave = {
+        month,
+        startDate,
+        endDate,
+        datePreset,
+        hiddenClients: Array.from(hiddenClients),
+        hiddenTechs: Array.from(hiddenTechs),
+        techObs,
+        clientObs
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(configToSave));
+    } catch (e) {
+      console.error('Error saving diretoria report config:', e);
+    }
+  }, [month, startDate, endDate, datePreset, hiddenClients, hiddenTechs, techObs, clientObs]);
 
   useEffect(() => {
     loadData();
-  }, [month]);
+  }, [month, managerClientId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [r, a, c] = await Promise.all([
+      const [r, a, c, osList, tList] = await Promise.all([
         dataService.getRecords(month),
         dataService.getAddresses(),
-        dataService.getClients()
+        dataService.getClients(),
+        dataService.getServiceOrders(managerClientId),
+        dataService.getTechnicians()
       ]);
 
       const filteredAddresses = a.filter(addr => !managerClientId || addr.clientId === managerClientId);
@@ -79,6 +129,8 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       setRecords(r.filter(rec => addressIds.has(rec.addressId)));
       setAddresses(filteredAddresses);
       setClients(c.filter(client => !managerClientId || client.id === managerClientId));
+      setServiceOrders(osList || []);
+      setTechnicians(tList || []);
     } catch (e) {
       console.error('Error loading board report data:', e);
     } finally {
@@ -134,12 +186,14 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
     }
   };
 
-  // 1. Process Technicians Performance Data (Chart 1)
+  // 1. Process Technicians Performance Data (Chart 1: Preventive Machines & Chart 1.1: Service Orders)
   const techData = useMemo(() => {
     const techMap = new Map<string, {
       name: string;
       periodMachines: number;
       monthMachines: number;
+      periodOS: number;
+      monthOS: number;
     }>();
 
     const getOrCreateTech = (name: string) => {
@@ -148,7 +202,9 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
         techMap.set(cleanName, {
           name: cleanName,
           periodMachines: 0,
-          monthMachines: 0
+          monthMachines: 0,
+          periodOS: 0,
+          monthOS: 0
         });
       }
       return techMap.get(cleanName)!;
@@ -163,6 +219,15 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       } catch (e) {}
     }
 
+    let startMonth: Date | null = null;
+    let endMonth: Date | null = null;
+    try {
+      const monthDate = parseISO(month + '-01');
+      startMonth = startOfMonth(monthDate);
+      endMonth = endOfMonth(monthDate);
+    } catch (e) {}
+
+    // 1. Process Preventive Maintenance Records (PMOC) -> Machines
     records.forEach(rec => {
       if (rec.status === MaintenanceStatus.COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0)) {
         const executedQty = rec.executedQuantity || 0;
@@ -181,30 +246,83 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
         if (rec.technician1) {
           const t1 = getOrCreateTech(rec.technician1);
           t1.monthMachines += executedQty;
-          if (inPeriod) t1.periodMachines += executedQty;
+          if (inPeriod) {
+            t1.periodMachines += executedQty;
+          }
         }
 
         if (rec.technician2) {
           const t2 = getOrCreateTech(rec.technician2);
           t2.monthMachines += executedQty;
-          if (inPeriod) t2.periodMachines += executedQty;
+          if (inPeriod) {
+            t2.periodMachines += executedQty;
+          }
         }
       }
     });
 
-    const list = Array.from(techMap.values()).filter(t => t.periodMachines > 0 || t.monthMachines > 0);
-
-    list.sort((a, b) => {
-      if (b.periodMachines !== a.periodMachines) {
-        return b.periodMachines - a.periodMachines;
+    // 2. Process Service Orders (O.S.) from ServiceOrders module -> O.S. Count
+    const techIdNameMap = new Map<string, string>();
+    technicians.forEach(t => {
+      if (t.id && t.name) {
+        techIdNameMap.set(t.id, t.name.trim().toUpperCase());
       }
-      return b.monthMachines - a.monthMachines;
     });
 
-    const maxPeriod = Math.max(...list.map(t => t.periodMachines), 1);
+    serviceOrders.forEach(so => {
+      if (so.status === 'cancelada') return;
 
-    return { list, maxPeriod };
-  }, [records, startDate, endDate]);
+      let soDate: Date | null = null;
+      if (so.finishedAt) {
+        try {
+          soDate = typeof so.finishedAt === 'string' ? parseISO(so.finishedAt) : new Date(so.finishedAt);
+        } catch (e) {}
+      } else if (so.plannedDate) {
+        try { soDate = parseISO(so.plannedDate); } catch (e) {}
+      } else if (so.openedAt) {
+        try {
+          soDate = typeof so.openedAt === 'string' ? parseISO(so.openedAt) : new Date(so.openedAt);
+        } catch (e) {}
+      }
+
+      const inPeriod = Boolean(soDate && start && end && isWithinInterval(soDate, { start, end }));
+      const inMonth = Boolean(soDate && startMonth && endMonth && isWithinInterval(soDate, { start: startMonth, end: endMonth }));
+
+      const t1Raw = so.technicianId ? (techIdNameMap.get(so.technicianId) || so.technicianId.trim().toUpperCase()) : null;
+      const t2Raw = so.technician2Id ? (techIdNameMap.get(so.technician2Id) || so.technician2Id.trim().toUpperCase()) : null;
+
+      if (t1Raw && t1Raw !== 'UNDEFINED' && t1Raw !== 'NULL' && t1Raw !== '') {
+        const t1 = getOrCreateTech(t1Raw);
+        if (inMonth) t1.monthOS += 1;
+        if (inPeriod) t1.periodOS += 1;
+      }
+
+      if (t2Raw && t2Raw !== 'UNDEFINED' && t2Raw !== 'NULL' && t2Raw !== '') {
+        const t2 = getOrCreateTech(t2Raw);
+        if (inMonth) t2.monthOS += 1;
+        if (inPeriod) t2.periodOS += 1;
+      }
+    });
+
+    const machinesList = Array.from(techMap.values())
+      .filter(t => t.periodMachines > 0 || t.monthMachines > 0)
+      .sort((a, b) => b.periodMachines !== a.periodMachines ? b.periodMachines - a.periodMachines : b.monthMachines - a.monthMachines);
+
+    const maxPeriodMachines = Math.max(...machinesList.map(t => t.periodMachines), 1);
+
+    const osList = Array.from(techMap.values())
+      .filter(t => t.periodOS > 0 || t.monthOS > 0)
+      .sort((a, b) => b.periodOS !== a.periodOS ? b.periodOS - a.periodOS : b.monthOS - a.monthOS);
+
+    const maxPeriodOS = Math.max(...osList.map(t => t.periodOS), 1);
+
+    return { 
+      machinesList, 
+      maxPeriodMachines,
+      osList,
+      maxPeriodOS
+    };
+  }, [records, serviceOrders, technicians, startDate, endDate, month]);
 
   // 2. Process Client Billing Data (Chart 2)
   const clientBillingData = useMemo(() => {
@@ -280,8 +398,36 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
 
   // Overall Board Summary Metrics
   const summaryMetrics = useMemo(() => {
+    let start: Date | null = null;
+    let end: Date | null = null;
+    if (startDate && endDate) {
+      try {
+        start = startOfDay(parseISO(startDate));
+        end = endOfDay(parseISO(endDate));
+      } catch (e) {}
+    }
+
     const totalContractMachines = addresses.reduce((sum, a) => sum + (a.totalMachines || 0), 0);
     const totalDoneMachines = records.reduce((sum, r) => sum + (r.executedQuantity || 0), 0);
+
+    let periodDoneMachines = 0;
+    records.forEach(rec => {
+      if (rec.status === MaintenanceStatus.COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0)) {
+        let recDate: Date | null = null;
+        if (rec.executionDate) {
+          try { recDate = parseISO(rec.executionDate); } catch (e) {}
+        } else if (rec.completionDate) {
+          try { recDate = parseISO(rec.completionDate); } catch (e) {}
+        } else if (rec.plannedDate) {
+          try { recDate = parseISO(rec.plannedDate); } catch (e) {}
+        }
+
+        if (recDate && start && end && isWithinInterval(recDate, { start, end })) {
+          periodDoneMachines += rec.executedQuantity || 0;
+        }
+      }
+    });
+
     const globalPercent = totalContractMachines > 0 ? Math.round((totalDoneMachines / totalContractMachines) * 100) : 0;
     const completedAddresses = new Set(records.filter(r => (r.executedQuantity || 0) > 0).map(r => r.addressId)).size;
     const totalAddresses = addresses.length;
@@ -289,11 +435,12 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
     return {
       totalContractMachines,
       totalDoneMachines,
+      periodDoneMachines,
       globalPercent,
       completedAddresses,
       totalAddresses
     };
-  }, [records, addresses]);
+  }, [records, addresses, startDate, endDate]);
 
   const totalHiddenCount = hiddenClients.size + hiddenTechs.size;
 
@@ -505,8 +652,8 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
           {/* KPI Mini-Cards Row */}
           <div className="grid grid-cols-4 gap-3 mt-5 text-center">
             <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg">
-              <span className="block text-[9px] font-black text-slate-400 uppercase tracking-widest">Maq. Contratuais</span>
-              <span className="text-lg font-black text-slate-900">{summaryMetrics.totalContractMachines}</span>
+              <span className="block text-[9px] font-black text-slate-400 uppercase tracking-widest">Concluídas no Período</span>
+              <span className="text-lg font-black text-slate-900">{summaryMetrics.periodDoneMachines}</span>
             </div>
             <div className="bg-slate-50 border border-slate-200 p-2.5 rounded-lg">
               <span className="block text-[9px] font-black text-slate-400 uppercase tracking-widest">Concluídas no Mês</span>
@@ -524,10 +671,10 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
         </div>
 
         {/* ========================================================================= */}
-        {/* CHART 1: TECHNICIAN PERFORMANCE (HORIZONTAL BARS WITH 3 COLUMNS)        */}
+        {/* CHART 1: PREVENTIVE MAINTENANCE MACHINES (COMPACT HORIZONTAL BARS)       */}
         {/* ========================================================================= */}
-        <div className="space-y-4 page-break-avoid">
-          <div className="flex justify-between items-end border-b border-slate-300 pb-2">
+        <div className="space-y-3 page-break-avoid">
+          <div className="flex justify-between items-end border-b border-slate-300 pb-1.5">
             <div>
               <h3 className="text-xs font-black text-slate-950 uppercase tracking-wider flex items-center gap-2">
                 <Users className="w-4 h-4 text-blue-600 print:hidden" />
@@ -543,17 +690,17 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
           </div>
 
           {loading ? (
-            <div className="py-12 text-center text-xs text-slate-400 animate-pulse">Carregando dados dos técnicos...</div>
-          ) : techData.list.length === 0 ? (
-            <div className="py-8 text-center text-xs text-slate-400 italic bg-slate-50 rounded-xl border border-dashed border-slate-200">
-              Nenhuma manutenção realizada por técnicos no período selecionado.
+            <div className="py-8 text-center text-xs text-slate-400 animate-pulse">Carregando dados dos técnicos...</div>
+          ) : techData.machinesList.length === 0 ? (
+            <div className="py-6 text-center text-xs text-slate-400 italic bg-slate-50 rounded-xl border border-dashed border-slate-200">
+              Nenhuma manutenção preventiva realizada por técnicos no período selecionado.
             </div>
           ) : (
             <div className="border border-slate-900 rounded-lg overflow-hidden text-xs">
               {/* Table Header */}
-              <div className="grid grid-cols-12 bg-slate-900 text-white font-extrabold text-[10px] uppercase tracking-wider p-2.5">
+              <div className="grid grid-cols-12 bg-slate-900 text-white font-extrabold text-[10px] uppercase tracking-wider p-1.5">
                 <div className="col-span-3">Nome do Técnico</div>
-                <div className="col-span-5 text-center">Produção no Período ({format(parseISO(startDate), 'dd/MM')} - {format(parseISO(endDate), 'dd/MM')})</div>
+                <div className="col-span-5 text-center">Máquinas no Período ({format(parseISO(startDate), 'dd/MM')} - {format(parseISO(endDate), 'dd/MM')})</div>
                 <div className="col-span-3 text-right">Total no Mês</div>
                 <div className="col-span-1 text-center print:hidden" title="Clique para ocultar ou exibir este técnico no relatório impresso">
                   Exibir
@@ -562,9 +709,9 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
 
               {/* Rows */}
               <div className="divide-y divide-slate-200">
-                {techData.list.map((item, idx) => {
-                  const barWidthPercent = techData.maxPeriod > 0 
-                    ? Math.max(8, Math.round((item.periodMachines / techData.maxPeriod) * 100)) 
+                {techData.machinesList.map((item, idx) => {
+                  const barWidthPercent = techData.maxPeriodMachines > 0 
+                    ? Math.max(8, Math.round((item.periodMachines / techData.maxPeriodMachines) * 100)) 
                     : 0;
 
                   const isHidden = hiddenTechs.has(item.name);
@@ -574,55 +721,165 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
                     <div 
                       key={item.name} 
                       className={cn(
-                        "grid grid-cols-12 items-center p-2.5 transition-colors",
+                        "grid grid-cols-12 items-center p-1.5 transition-colors",
                         isEven ? "bg-white" : "bg-slate-50/60",
                         isHidden && "is-hidden-print bg-amber-50/40 opacity-60"
                       )}
                     >
                       {/* Column 1: Tech Name */}
-                      <div className="col-span-3 font-bold text-slate-900 truncate pr-2 uppercase text-[11px]" title={item.name}>
-                        <span className="text-[10px] text-slate-400 mr-1.5 font-mono">#{idx + 1}</span>
+                      <div className="col-span-3 font-bold text-slate-900 truncate pr-2 uppercase text-[10px]" title={item.name}>
+                        <span className="text-[9px] text-slate-400 mr-1 font-mono">#{idx + 1}</span>
                         {item.name}
                         {isHidden && (
-                          <span className="ml-1 text-[9px] text-amber-700 bg-amber-100 px-1 py-0.2 rounded font-semibold print:hidden">
+                          <span className="ml-1 text-[8px] text-amber-700 bg-amber-100 px-1 py-0.2 rounded font-semibold print:hidden">
                             (Oculto)
                           </span>
                         )}
                       </div>
 
                       {/* Column 2: Horizontal Bar & Quantity */}
-                      <div className="col-span-5 px-2 flex items-center gap-3">
-                        <div className="flex-1 bg-slate-200/80 rounded-full h-4 relative overflow-hidden border border-slate-300">
+                      <div className="col-span-5 px-2 flex items-center gap-2">
+                        <div className="flex-1 bg-slate-200/80 rounded-full h-2.5 relative overflow-hidden border border-slate-300">
                           <div 
                             className="h-full bg-blue-600 transition-all duration-300 rounded-full"
                             style={{ width: `${barWidthPercent}%` }}
                           />
                         </div>
-                        <span className="text-[11px] font-black text-blue-900 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded shrink-0 min-w-[55px] text-center">
+                        <span className="text-[10px] font-black text-blue-900 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded shrink-0 min-w-[50px] text-center">
                           {item.periodMachines} máq.
                         </span>
                       </div>
 
                       {/* Column 3: Total Month Quantity */}
-                      <div className="col-span-3 text-right font-black text-slate-900 text-xs">
-                        <span className="bg-slate-100 text-slate-800 px-2.5 py-1 rounded border border-slate-300 inline-block font-mono">
-                          {item.monthMachines} <span className="text-[9px] text-slate-500 font-semibold uppercase">no mês</span>
+                      <div className="col-span-3 text-right font-black text-slate-900 text-[11px]">
+                        <span className="bg-slate-100 text-slate-800 px-2.5 py-0.5 rounded border border-slate-300 inline-block font-mono">
+                          {item.monthMachines}
                         </span>
                       </div>
 
-                      {/* Column 4: Toggle Visibility Icon (Screen only) */}
+                      {/* Column 4: Toggle Visibility Icon */}
                       <div className="col-span-1 text-center print:hidden">
                         <button
                           onClick={() => toggleTechVisibility(item.name)}
                           className={cn(
-                            "p-1.5 rounded-lg transition-colors cursor-pointer outline-none mx-auto",
+                            "p-1 rounded-lg transition-colors cursor-pointer outline-none mx-auto",
                             isHidden 
                               ? "text-amber-600 hover:bg-amber-100 bg-amber-50" 
                               : "text-slate-400 hover:text-slate-800 hover:bg-slate-100"
                           )}
                           title={isHidden ? "Exibir este técnico na folha de impressão" : "Ocultar este técnico da folha de impressão"}
                         >
-                          {isHidden ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          {isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ========================================================================= */}
+        {/* CHART 1.1: SERVICE ORDERS (O.S.) EXECUTED PER TECHNICIAN                   */}
+        {/* ========================================================================= */}
+        <div className="space-y-3 page-break-avoid pt-2">
+          <div className="flex justify-between items-end border-b border-slate-300 pb-1.5">
+            <div>
+              <h3 className="text-xs font-black text-slate-950 uppercase tracking-wider flex items-center gap-2">
+                <FileText className="w-4 h-4 text-indigo-600 print:hidden" />
+                1.1 Produção de Ordens de Serviço (O.S.) por Técnico
+              </h3>
+              <p className="text-[10px] text-slate-500">
+                Quantidade de Ordens de Serviço concluídas no período ({format(parseISO(startDate), 'dd/MM')} a {format(parseISO(endDate), 'dd/MM')}). Exibe apenas técnicos com O.S. executadas.
+              </p>
+            </div>
+            <div className="text-right text-[10px] font-bold text-slate-600">
+              Mês: <span className="uppercase">{format(new Date(month + '-01T12:00:00'), 'MMMM', { locale: ptBR })}</span>
+            </div>
+          </div>
+
+          {loading ? (
+            <div className="py-8 text-center text-xs text-slate-400 animate-pulse">Carregando dados das O.S. dos técnicos...</div>
+          ) : techData.osList.length === 0 ? (
+            <div className="py-6 text-center text-xs text-slate-400 italic bg-slate-50 rounded-xl border border-dashed border-slate-200">
+              Nenhuma Ordem de Serviço (O.S.) realizada por técnicos no período selecionado.
+            </div>
+          ) : (
+            <div className="border border-indigo-950 rounded-lg overflow-hidden text-xs">
+              {/* Table Header */}
+              <div className="grid grid-cols-12 bg-indigo-950 text-white font-extrabold text-[10px] uppercase tracking-wider p-1.5">
+                <div className="col-span-3">Nome do Técnico</div>
+                <div className="col-span-5 text-center">O.S. no Período ({format(parseISO(startDate), 'dd/MM')} - {format(parseISO(endDate), 'dd/MM')})</div>
+                <div className="col-span-3 text-right">Total no Mês</div>
+                <div className="col-span-1 text-center print:hidden" title="Clique para ocultar ou exibir este técnico no relatório impresso">
+                  Exibir
+                </div>
+              </div>
+
+              {/* Rows */}
+              <div className="divide-y divide-slate-200">
+                {techData.osList.map((item, idx) => {
+                  const barWidthPercent = techData.maxPeriodOS > 0 
+                    ? Math.max(8, Math.round((item.periodOS / techData.maxPeriodOS) * 100)) 
+                    : 0;
+
+                  const isHidden = hiddenTechs.has(item.name);
+                  const isEven = idx % 2 === 0;
+
+                  return (
+                    <div 
+                      key={'os-' + item.name} 
+                      className={cn(
+                        "grid grid-cols-12 items-center p-1.5 transition-colors",
+                        isEven ? "bg-white" : "bg-slate-50/60",
+                        isHidden && "is-hidden-print bg-amber-50/40 opacity-60"
+                      )}
+                    >
+                      {/* Column 1: Tech Name */}
+                      <div className="col-span-3 font-bold text-slate-900 truncate pr-2 uppercase text-[10px]" title={item.name}>
+                        <span className="text-[9px] text-slate-400 mr-1 font-mono">#{idx + 1}</span>
+                        {item.name}
+                        {isHidden && (
+                          <span className="ml-1 text-[8px] text-amber-700 bg-amber-100 px-1 py-0.2 rounded font-semibold print:hidden">
+                            (Oculto)
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Column 2: Horizontal Bar & Quantity */}
+                      <div className="col-span-5 px-2 flex items-center gap-2">
+                        <div className="flex-1 bg-slate-200/80 rounded-full h-2.5 relative overflow-hidden border border-slate-300">
+                          <div 
+                            className="h-full bg-indigo-600 transition-all duration-300 rounded-full"
+                            style={{ width: `${barWidthPercent}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-black text-indigo-900 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded shrink-0 min-w-[50px] text-center">
+                          {item.periodOS} O.S.
+                        </span>
+                      </div>
+
+                      {/* Column 3: Total Month Quantity */}
+                      <div className="col-span-3 text-right font-black text-slate-900 text-[11px]">
+                        <span className="bg-slate-100 text-slate-800 px-2.5 py-0.5 rounded border border-slate-300 inline-block font-mono">
+                          {item.monthOS}
+                        </span>
+                      </div>
+
+                      {/* Column 4: Toggle Visibility Icon */}
+                      <div className="col-span-1 text-center print:hidden">
+                        <button
+                          onClick={() => toggleTechVisibility(item.name)}
+                          className={cn(
+                            "p-1 rounded-lg transition-colors cursor-pointer outline-none mx-auto",
+                            isHidden 
+                              ? "text-amber-600 hover:bg-amber-100 bg-amber-50" 
+                              : "text-slate-400 hover:text-slate-800 hover:bg-slate-100"
+                          )}
+                          title={isHidden ? "Exibir este técnico na folha de impressão" : "Ocultar este técnico da folha de impressão"}
+                        >
+                          {isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                         </button>
                       </div>
                     </div>
@@ -632,11 +889,11 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
             </div>
           )}
 
-          {/* Technician Observation Field */}
+          {/* Technician Performance Observation Field (Moved Below Chart 1.1) */}
           <div className="mt-3">
             <div className="flex items-center gap-1.5 mb-1 text-[10px] font-black text-slate-500 uppercase tracking-wider">
               <FileText className="w-3.5 h-3.5 text-slate-600 print:hidden" />
-              <span>Observações da Diretoria (Gráfico 1):</span>
+              <span>Observações da Diretoria (Desempenho Técnico):</span>
             </div>
             
             {/* Screen Textarea */}
@@ -650,8 +907,8 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
 
             {/* Print Rendered Observation Callout Box */}
             <div className="hidden print:block p-2.5 bg-slate-50 border border-slate-400 rounded text-[10px] text-slate-900 italic font-medium">
-              <strong className="not-italic font-bold text-slate-950 uppercase block mb-0.5">Observações:</strong>
-              {techObs || 'Sem observações adicionais para este gráfico.'}
+              <strong className="not-italic font-bold text-slate-950 uppercase block mb-0.5">Observações da Diretoria:</strong>
+              {techObs || 'Sem observações adicionais para a produção técnica.'}
             </div>
           </div>
         </div>
