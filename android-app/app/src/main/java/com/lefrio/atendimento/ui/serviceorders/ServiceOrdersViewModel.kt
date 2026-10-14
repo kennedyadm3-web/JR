@@ -74,11 +74,16 @@ class ServiceOrdersViewModel(
             _uiState.update { it.copy(isLoading = true) }
             try {
                 val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-                val (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
+                var (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
                     technicianName = currentUser.name,
                     technicianId = currentUser.uid,
                     date = todayStr
                 )
+                if (scheduledClients.isEmpty() || scheduledAddresses.isEmpty()) {
+                    val available = repository.getAvailableClientsAndAddresses()
+                    if (scheduledClients.isEmpty()) scheduledClients = available.first
+                    if (scheduledAddresses.isEmpty()) scheduledAddresses = available.second
+                }
                 val techs = repository.getAllTechnicians()
                 _uiState.update {
                     it.copy(
@@ -228,11 +233,16 @@ class ServiceOrdersViewModel(
                 technicianId = currentUser.uid,
                 targetDate = todayStr
             )
-            val (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
+            var (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
                 technicianName = currentUser.name,
                 technicianId = currentUser.uid,
                 date = todayStr
             )
+            if (scheduledClients.isEmpty() || scheduledAddresses.isEmpty()) {
+                val available = repository.getAvailableClientsAndAddresses()
+                if (scheduledClients.isEmpty()) scheduledClients = available.first
+                if (scheduledAddresses.isEmpty()) scheduledAddresses = available.second
+            }
             val techs = repository.getAllTechnicians()
             SyncWorker.triggerImmediateSync(getApplication())
             _uiState.update {

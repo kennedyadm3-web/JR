@@ -153,22 +153,130 @@ class FirebaseSyncManager(private val context: Context) {
 
             "FINALIZE_SERVICE" -> {
                 val orderId = task.referenceId
+                val isPreventive = payload.optBoolean("isPreventive", false) || orderId.startsWith("PREV_")
+                val clientRepresentative = payload.optString("clientRepresentative", "")
+                val clientSigneeDoc = payload.optString("clientSigneeDoc", "")
+                val clientSignatureDate = payload.optString("clientSignatureDate", "")
+                val completionDate = payload.optString("completionDate", "")
+                val clientSignature = payload.optString("clientSignature", "")
+                val completionLatitude = payload.optDouble("completionLatitude", 0.0)
+                val completionLongitude = payload.optDouble("completionLongitude", 0.0)
+                val completionAccuracy = payload.optDouble("completionAccuracy", 0.0)
+                val executedQuantity = payload.optInt("executedQuantity", 0)
+
+                val checklistArr = payload.optJSONArray("checklist") ?: org.json.JSONArray()
+                val checklistItems = mutableListOf<Map<String, Any>>()
+                for (i in 0 until checklistArr.length()) {
+                    val obj = checklistArr.getJSONObject(i)
+                    checklistItems.add(
+                        mapOf(
+                            "equipmentId" to obj.optString("equipmentId", ""),
+                            "checked" to obj.optBoolean("checked", false),
+                            "skipped" to obj.optBoolean("skipped", false),
+                            "justification" to obj.optString("justification", ""),
+                            "notes" to obj.optString("notes", ""),
+                            "checkedAt" to obj.optString("checkedAt", "")
+                        )
+                    )
+                }
+
+                val nowIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.format(java.util.Date())
+                val todayDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+
+                if (isPreventive) {
+                    // FLUXO DE MANUTENÇÃO PREVENTIVA -> VAI DIRETO PARA A TELA DE APROVAÇÃO DO PWA!
+                    // O PWA lê 'maintenanceRecords' e requer:
+                    // status: 'pre_completed', routeStatus: 'pre_completed', clientSignature, clientSigneeName, clientSigneeRegistration, adminApproved: false
+                    val originalRecordId = payload.optString("originalRecordId", "").ifBlank { orderId.removePrefix("PREV_") }
+                    val addressId = payload.optString("addressId", "")
+                    val currentMonth = payload.optString("month", todayDate.take(7))
+
+                    val prevUpdates = hashMapOf<String, Any>(
+                        "status" to "pre_completed",
+                        "routeStatus" to "pre_completed",
+                        "clientSignature" to clientSignature,
+                        "clientSignatureDate" to (if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso),
+                        "clientSigneeName" to clientRepresentative,
+                        "clientSigneeRegistration" to clientSigneeDoc,
+                        "completionDate" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                        "executionDate" to todayDate,
+                        "adminApproved" to false,
+                        "executedQuantity" to executedQuantity,
+                        "completionLatitude" to completionLatitude,
+                        "completionLongitude" to completionLongitude,
+                        "completionAccuracy" to completionAccuracy,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+
+                    if (checklistItems.isNotEmpty()) {
+                        prevUpdates["checklist"] = checklistItems
+                    }
+
+                    // 1. Tenta atualizar pelo originalRecordId direto
+                    if (originalRecordId.isNotBlank()) {
+                        try {
+                            firestore.collection("maintenanceRecords").document(originalRecordId)
+                                .set(prevUpdates, SetOptions.merge())
+                                .await()
+                            Log.d(TAG, "Preventiva atualizada em maintenanceRecords com docId: " + originalRecordId)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Erro ao atualizar maintenanceRecords/" + originalRecordId + ": " + e.message)
+                        }
+                    }
+
+                    // 2. Se tiver addressId e month, atualiza também a chave canônica ${month}_${addressId}
+                    if (addressId.isNotBlank() && currentMonth.isNotBlank()) {
+                        val canonicalKey = currentMonth + "_" + addressId
+                        if (canonicalKey != originalRecordId) {
+                            try {
+                                firestore.collection("maintenanceRecords").document(canonicalKey)
+                                    .set(prevUpdates, SetOptions.merge())
+                                    .await()
+                                Log.d(TAG, "Preventiva atualizada em maintenanceRecords com chave canônica: " + canonicalKey)
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Erro ao atualizar chave canônica " + canonicalKey + ": " + e.message)
+                            }
+                        }
+                    }
+                }
+
+                // FLUXO DE ORDEM DE SERVIÇO / ESPELHO:
+                // Atualiza tanto em 'serviceOrders' (coleção padrão do PWA) quanto em 'service_orders' (compatibilidade)
                 val finalizeMap = hashMapOf<String, Any>(
                     "status" to "finalizada",
-                    "clientRepresentative" to payload.getString("clientRepresentative"),
-                    "clientSigneeDoc" to payload.optString("clientSigneeDoc", ""),
-                    "clientSignatureDate" to payload.getString("clientSignatureDate"),
-                    "completionDate" to payload.getString("completionDate"),
-                    "completionLatitude" to payload.getDouble("completionLatitude"),
-                    "completionLongitude" to payload.getDouble("completionLongitude"),
-                    "completionAccuracy" to payload.getDouble("completionAccuracy"),
+                    "clientRepresentative" to clientRepresentative,
+                    "clientSigneeName" to clientRepresentative,
+                    "clientSigneeDoc" to clientSigneeDoc,
+                    "clientSigneeRegistration" to clientSigneeDoc,
+                    "clientSignatureDate" to (if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso),
+                    "completionDate" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                    "finishedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                    "clientSignature" to clientSignature,
+                    "completionLatitude" to completionLatitude,
+                    "completionLongitude" to completionLongitude,
+                    "completionAccuracy" to completionAccuracy,
                     "isLockedForTech" to true,
                     "updatedAt" to System.currentTimeMillis()
                 )
 
-                // Transação garantida: finaliza a O.S. no Firestore com carimbo e auditoria
-                firestore.collection("service_orders").document(orderId)
-                    .set(finalizeMap, SetOptions.merge())
+                try {
+                    firestore.collection("serviceOrders").document(orderId)
+                        .set(finalizeMap, SetOptions.merge())
+                        .await()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Aviso ao salvar em serviceOrders: " + e.message)
+                }
+
+                try {
+                    firestore.collection("service_orders").document(orderId)
+                        .set(finalizeMap, SetOptions.merge())
+                        .await()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Aviso ao salvar em service_orders: " + e.message)
+                }
+
                 db.serviceOrderDao().markAsSynced(orderId)
                 true
             }

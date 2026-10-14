@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Clock, Shield, Smartphone, Wrench, Volume2 } from 'lucide-react';
+import { Clock, Shield, Smartphone, Wrench, Volume2, Sparkles } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { UserRole, UserProfile } from '../types';
 import HistoryView from './HistoryView';
@@ -7,6 +7,7 @@ import UserManagementView from './UserManagementView';
 import DeviceSettingsView from './DeviceSettingsView';
 import ServiceOrderSettingsView from './ServiceOrderSettingsView';
 import NotificationSettingsView from './NotificationSettingsView';
+import UsageSettingsView from './UsageSettingsView';
 
 interface SettingsViewProps {
   userRole?: UserRole;
@@ -14,7 +15,7 @@ interface SettingsViewProps {
   onProfileUpdate?: (profile: UserProfile) => void;
 }
 
-type SettingsTab = 'users' | 'orders' | 'notifications' | 'history' | 'devices';
+type SettingsTab = 'users' | 'orders' | 'notifications' | 'history' | 'devices' | 'usage';
 
 export default function SettingsView({ userRole, userProfile, onProfileUpdate }: SettingsViewProps) {
   // Determine available tabs based on user role
@@ -52,6 +53,12 @@ export default function SettingsView({ userRole, userProfile, onProfileUpdate }:
       icon: Smartphone,
       allowed: isDocAdmin || isDocSupport,
     },
+    {
+      id: 'usage',
+      label: 'Uso & IA',
+      icon: Sparkles,
+      allowed: true,
+    },
   ];
 
   const allowedTabs = tabs.filter((t) => t.allowed);
@@ -77,7 +84,7 @@ export default function SettingsView({ userRole, userProfile, onProfileUpdate }:
     <div id="settings-view-container" className="flex flex-col h-full space-y-6">
       <div className="flex flex-col gap-1">
         <h1 className="text-2xl font-black text-gray-950 tracking-tight">Configurações</h1>
-        <p className="text-sm text-gray-500">Gerencie os usuários do sistema, audite o histórico de alterações e configure dispositivos móveis.</p>
+        <p className="text-sm text-gray-500">Gerencie os usuários do sistema, audite o histórico de alterações, ajuste o uso de recursos de IA e configure dispositivos móveis.</p>
       </div>
 
       {/* Tabs Selector */}
@@ -116,7 +123,9 @@ export default function SettingsView({ userRole, userProfile, onProfileUpdate }:
         )}
         {activeTab === 'history' && (isDocAdmin || isDocSupport) && <HistoryView />}
         {activeTab === 'devices' && (isDocAdmin || isDocSupport) && <DeviceSettingsView />}
+        {activeTab === 'usage' && <UsageSettingsView />}
       </div>
     </div>
   );
 }
+

@@ -396,6 +396,7 @@ fun CreateServiceOrderScreen(
                                     fontWeight = FontWeight.Medium
                                 )
                             }
+                        }
                     } else {
                         // Campo 1: Escolher o Cliente
                         Column {

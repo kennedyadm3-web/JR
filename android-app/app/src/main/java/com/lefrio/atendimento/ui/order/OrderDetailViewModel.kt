@@ -161,7 +161,9 @@ class OrderDetailViewModel(
                     completionDate = nowStr,
                     latitude = latitude,
                     longitude = longitude,
-                    accuracy = accuracy
+                    accuracy = accuracy,
+                    signatureBase64 = null,
+                    checklistItems = currentState.checklistItems
                 )
 
                 _uiState.update {

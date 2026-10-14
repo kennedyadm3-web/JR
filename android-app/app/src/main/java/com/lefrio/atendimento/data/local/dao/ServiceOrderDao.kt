@@ -99,7 +99,13 @@ interface ServiceOrderDao {
     ): Flow<List<ServiceOrderEntity>>
 
     @Query("""
-        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        SELECT DISTINCT 
+            CASE WHEN clientId IS NULL OR clientId = '' THEN addressId ELSE clientId END AS clientId,
+            CASE WHEN clientName IS NULL OR clientName = '' OR clientName IN ('Cliente LeFrio', 'Cliente PMOC') THEN addressStreet ELSE clientName END AS clientName,
+            clientSigneeDoc AS clientDocument, 
+            addressId, 
+            addressStreet, 
+            addressCity
         FROM service_orders 
         WHERE (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%')
           AND (
@@ -109,9 +115,7 @@ interface ServiceOrderDao {
             OR UPPER(technician2) LIKE '%' || UPPER(:technicianName) || '%'
             OR UPPER(technician2) = UPPER(:technicianId)
           )
-          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
-          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
-          AND clientId != ''
+          AND addressStreet NOT IN ('', 'Endereço Teste')
           AND addressId != ''
         ORDER BY clientName ASC, addressStreet ASC
     """)
@@ -122,12 +126,16 @@ interface ServiceOrderDao {
     ): List<ScheduledLocationTuple>
 
     @Query("""
-        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        SELECT DISTINCT 
+            CASE WHEN clientId IS NULL OR clientId = '' THEN addressId ELSE clientId END AS clientId,
+            CASE WHEN clientName IS NULL OR clientName = '' OR clientName IN ('Cliente LeFrio', 'Cliente PMOC') THEN addressStreet ELSE clientName END AS clientName,
+            clientSigneeDoc AS clientDocument, 
+            addressId, 
+            addressStreet, 
+            addressCity
         FROM service_orders 
         WHERE (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%')
-          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
-          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
-          AND clientId != ''
+          AND addressStreet NOT IN ('', 'Endereço Teste')
           AND addressId != ''
         ORDER BY clientName ASC, addressStreet ASC
     """)
@@ -136,7 +144,13 @@ interface ServiceOrderDao {
     ): List<ScheduledLocationTuple>
 
     @Query("""
-        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        SELECT DISTINCT 
+            CASE WHEN clientId IS NULL OR clientId = '' THEN addressId ELSE clientId END AS clientId,
+            CASE WHEN clientName IS NULL OR clientName = '' OR clientName IN ('Cliente LeFrio', 'Cliente PMOC') THEN addressStreet ELSE clientName END AS clientName,
+            clientSigneeDoc AS clientDocument, 
+            addressId, 
+            addressStreet, 
+            addressCity
         FROM service_orders 
         WHERE (
             :technicianName = '' 
@@ -145,9 +159,7 @@ interface ServiceOrderDao {
             OR UPPER(technician2) LIKE '%' || UPPER(:technicianName) || '%'
             OR UPPER(technician2) = UPPER(:technicianId)
           )
-          AND clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
-          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
-          AND clientId != ''
+          AND addressStreet NOT IN ('', 'Endereço Teste')
           AND addressId != ''
         ORDER BY clientName ASC, addressStreet ASC
     """)
@@ -157,11 +169,15 @@ interface ServiceOrderDao {
     ): List<ScheduledLocationTuple>
 
     @Query("""
-        SELECT DISTINCT clientId, clientName, clientSigneeDoc AS clientDocument, addressId, addressStreet, addressCity
+        SELECT DISTINCT 
+            CASE WHEN clientId IS NULL OR clientId = '' THEN addressId ELSE clientId END AS clientId,
+            CASE WHEN clientName IS NULL OR clientName = '' OR clientName IN ('Cliente LeFrio', 'Cliente PMOC') THEN addressStreet ELSE clientName END AS clientName,
+            clientSigneeDoc AS clientDocument, 
+            addressId, 
+            addressStreet, 
+            addressCity
         FROM service_orders 
-        WHERE clientName NOT IN ('', 'Cliente LeFrio', 'Cliente PMOC', 'Cliente Teste')
-          AND addressStreet NOT IN ('', 'Endereço do Chamado', 'Endereço Teste')
-          AND clientId != ''
+        WHERE addressStreet NOT IN ('', 'Endereço Teste')
           AND addressId != ''
         ORDER BY clientName ASC, addressStreet ASC
     """)
@@ -169,9 +185,7 @@ interface ServiceOrderDao {
 
     @Query("""
         DELETE FROM service_orders 
-        WHERE clientName IN ('Cliente LeFrio', 'Cliente PMOC', 'Endereço do Chamado', 'Cliente Teste', '')
-           OR addressStreet IN ('Endereço do Chamado', 'Endereço Teste', '')
-           OR id IN ('PREV_CORREIOS_ANADIA', 'PREV_BB_CENTRO', 'OS_CORRETIVA_1042', 'PREV_HOSPITAL_METRO', 'OS_CORRETIVA_1055')
+        WHERE id IN ('PREV_CORREIOS_ANADIA', 'PREV_BB_CENTRO', 'OS_CORRETIVA_1042', 'PREV_HOSPITAL_METRO', 'OS_CORRETIVA_1055')
            OR osNumber IN ('PMOC-101', 'PMOC-102', '1042', 'PMOC-103', '1055')
            OR clientName IN ('BANCO DO BRASIL - AGÊNCIA 0058', 'TRIBUNAL DE JUSTIÇA - ANEXO II', 'CORREIOS - AGÊNCIA ANADIA', 'HOSPITAL METROPOLITANO - ALA SUL', 'SEDUC - CENTRO DE FORMAÇÃO')
     """)
