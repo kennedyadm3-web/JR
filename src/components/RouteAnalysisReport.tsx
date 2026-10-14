@@ -18,7 +18,8 @@ export function RouteAnalysisReport({ managerClientId }: { managerClientId?: str
     return localStorage.getItem('route_analysis_sort') || 'ALPHABETICAL';
   });
   const [hideCapital, setHideCapital] = useState<boolean>(() => {
-    return localStorage.getItem('route_analysis_hide_capital') === 'true';
+    const saved = localStorage.getItem('route_analysis_hide_capital');
+    return saved !== null ? saved === 'true' : true;
   });
 
   const handleSortChange = (value: string) => {

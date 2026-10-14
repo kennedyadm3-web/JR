@@ -1351,24 +1351,61 @@ async function startServer() {
       const allTechs = techsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
       const allOS = serviceOrdersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
 
-      // Identificar identificadores válidos do técnico alvo (nome e id)
-      const validTargetTechIdentifiers = new Set<string>();
-      if (rawTargetTech) {
-        const norm = rawTargetTech.toUpperCase();
-        validTargetTechIdentifiers.add(norm);
-        const matchedTech = allTechs.find(t => 
-          (t.id && t.id.toUpperCase() === norm) || 
-          (t.name && t.name.trim().toUpperCase() === norm)
+      // Função auxiliar de correspondência resiliente de técnico (por ID, Nome, Substring e Palavras)
+      const matchesTechResilient = (t1Val: string | undefined | null, t2Val: string | undefined | null): boolean => {
+        if (!rawTargetTech) return true;
+        const targetNorm = rawTargetTech.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        if (!targetNorm) return true;
+
+        const matchedTargetTech = allTechs.find(t => 
+          (t.id && t.id.trim().toUpperCase() === targetNorm) ||
+          (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === targetNorm) ||
+          (t.name && targetNorm.includes(t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) ||
+          (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes(targetNorm))
         );
-        if (matchedTech) {
-          if (matchedTech.id) validTargetTechIdentifiers.add(matchedTech.id.toUpperCase().trim());
-          if (matchedTech.name) validTargetTechIdentifiers.add(matchedTech.name.toUpperCase().trim());
+
+        const validTargetNames = new Set<string>();
+        validTargetNames.add(targetNorm);
+        if (matchedTargetTech) {
+          if (matchedTargetTech.id) validTargetNames.add(matchedTargetTech.id.trim().toUpperCase());
+          if (matchedTargetTech.name) {
+            const cleanName = matchedTargetTech.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            validTargetNames.add(cleanName);
+          }
         }
-      }
+
+        const checkSingleField = (fieldVal: string | undefined | null): boolean => {
+          if (!fieldVal) return false;
+          const fNorm = fieldVal.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          if (!fNorm) return false;
+
+          if (validTargetNames.has(fNorm)) return true;
+
+          for (const v of validTargetNames) {
+            if (fNorm.includes(v) || v.includes(fNorm)) return true;
+          }
+
+          const matchedFieldTech = allTechs.find(t =>
+            (t.id && t.id.trim().toUpperCase() === fNorm) ||
+            (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === fNorm)
+          );
+
+          if (matchedFieldTech && matchedTargetTech) {
+            if (matchedFieldTech.id && matchedTargetTech.id && matchedFieldTech.id.toUpperCase() === matchedTargetTech.id.toUpperCase()) return true;
+            if (matchedFieldTech.name && matchedTargetTech.name && matchedFieldTech.name.trim().toUpperCase() === matchedTargetTech.name.trim().toUpperCase()) return true;
+          }
+
+          const targetWords = Array.from(validTargetNames).flatMap(v => v.split(/\s+/)).filter(w => w.length >= 3);
+          const fieldWords = fNorm.split(/\s+/).filter(w => w.length >= 3);
+          if (targetWords.some(tw => fieldWords.includes(tw))) return true;
+
+          return false;
+        };
+
+        return checkSingleField(t1Val) || checkSingleField(t2Val);
+      };
 
       // REGRA MANDATÓRIA: Endereços NÃO podem ter múltiplas datas agendadas. É somente uma data para cada endereço!
-      // Se um endereço tinha uma data anterior e recebeu novo agendamento, ele sai totalmente do agendamento anterior.
-      // Identificamos o registro de agendamento ativo canônico para cada endereço:
       const byAddress = new Map<string, any[]>();
       for (const r of allRecords) {
         if (!r.addressId || r.isTemporaryRoute) continue;
@@ -1377,7 +1414,6 @@ async function startServer() {
         byAddress.get(aid)!.push(r);
       }
 
-      // Para cada endereço com registros com plannedDate, apenas um único registro pode manter plannedDate ativa
       const activeAddressScheduleDocId = new Map<string, string>();
       for (const [aid, list] of byAddress.entries()) {
         const scheduledList = list.filter(r => Boolean(r.plannedDate));
@@ -1387,10 +1423,7 @@ async function startServer() {
           continue;
         }
 
-        // Se houver mais de um documento agendado para o mesmo endereço,
-        // o mais recente / do mês mais próximo do targetMonth ou da data atual é o canônico
         scheduledList.sort((a, b) => {
-          // Pontuação por status e data
           const score = (rec: any) => {
             let pts = 0;
             if (rec.month === targetMonth) pts += 50;
@@ -1408,13 +1441,33 @@ async function startServer() {
         activeAddressScheduleDocId.set(aid, scheduledList[0].id);
       }
 
-      // Filtragem estrita dos registros de preventiva:
+      // Determina a data efetiva: se não houver agendamentos na data exata, busca o último/próximo agendamento ativo
+      let effectiveTargetDate = targetDate;
+      const techRecordsAllDates = allRecords.filter(r => {
+        if (!r || !r.plannedDate) return false;
+        if (r.addressId && !r.isTemporaryRoute) {
+          const aid = String(r.addressId).trim();
+          const canonicalDocId = activeAddressScheduleDocId.get(aid);
+          if (canonicalDocId && canonicalDocId !== r.id) return false;
+        }
+        return matchesTechResilient(r.technician1, r.technician2);
+      });
+
+      const hasExactDateMatch = techRecordsAllDates.some(r => (r.plannedDate || "").split("T")[0].trim() === targetDate);
+      if (!hasExactDateMatch && techRecordsAllDates.length > 0) {
+        // Encontra a data mais próxima
+        const dates = Array.from(new Set(techRecordsAllDates.map(r => (r.plannedDate || "").split("T")[0].trim()))).sort();
+        if (dates.length > 0) {
+          effectiveTargetDate = dates.find(d => d >= targetDate) || dates[dates.length - 1];
+        }
+      }
+
+      // Filtragem dos registros de preventiva:
       const filteredRecords = allRecords.filter((r: any) => {
         if (!r) return false;
         const rDate = (r.plannedDate || "").split("T")[0].trim();
-        if (rDate !== targetDate) return false;
+        if (rDate !== effectiveTargetDate) return false;
 
-        // Se o endereço tem agendamento ativo em outro documento, este documento antigo é descartado
         if (r.addressId && !r.isTemporaryRoute) {
           const aid = String(r.addressId).trim();
           const canonicalDocId = activeAddressScheduleDocId.get(aid);
@@ -1423,33 +1476,16 @@ async function startServer() {
           }
         }
 
-        // Filtragem estrita por técnico:
-        if (validTargetTechIdentifiers.size > 0) {
-          const t1 = (r.technician1 || "").trim().toUpperCase();
-          const t2 = (r.technician2 || "").trim().toUpperCase();
-          const matches = (Boolean(t1) && validTargetTechIdentifiers.has(t1)) || 
-                          (Boolean(t2) && validTargetTechIdentifiers.has(t2));
-          if (!matches) return false;
-        }
-
-        return true;
+        return matchesTechResilient(r.technician1, r.technician2);
       });
 
-      // Filtragem estrita das Ordens de Serviço:
+      // Filtragem das Ordens de Serviço:
       const filteredOS = allOS.filter((os: any) => {
         if (!os || os.status === "cancelada") return false;
         const osDate = (os.plannedDate || (os.openedAt ? os.openedAt.substring(0, 10) : "")).split("T")[0].trim();
-        if (osDate !== targetDate) return false;
+        if (osDate !== effectiveTargetDate && osDate !== targetDate) return false;
 
-        if (validTargetTechIdentifiers.size > 0) {
-          const t1 = (os.technicianId || "").trim().toUpperCase();
-          const t2 = (os.technician2Id || "").trim().toUpperCase();
-          const matches = (Boolean(t1) && validTargetTechIdentifiers.has(t1)) || 
-                          (Boolean(t2) && validTargetTechIdentifiers.has(t2));
-          if (!matches) return false;
-        }
-
-        return true;
+        return matchesTechResilient(os.technicianId || os.technician1, os.technician2Id || os.technician2);
       });
 
       const addressIds = new Set<string>();

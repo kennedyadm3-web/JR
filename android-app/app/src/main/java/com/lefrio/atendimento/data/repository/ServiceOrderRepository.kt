@@ -38,6 +38,29 @@ class ServiceOrderRepository(private val context: Context) {
     private val syncDao = db.syncQueueDao()
     private val TAG = "ServiceOrderRepo"
 
+    private fun matchesTechResilient(techField: String?, targetTechName: String, targetTechId: String): Boolean {
+        if (techField.isNullOrBlank()) return false
+        val tf = techField.trim().uppercase()
+        val tn = targetTechName.trim().uppercase()
+        val ti = targetTechId.trim().uppercase()
+
+        if (tf == tn || tf == ti) return true
+        if (tn.isNotBlank() && (tf.contains(tn) || tn.contains(tf))) return true
+        if (ti.isNotBlank() && (tf.contains(ti) || ti.contains(tf))) return true
+
+        val normTf = java.text.Normalizer.normalize(tf, java.text.Normalizer.Form.NFD).replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+        val normTn = java.text.Normalizer.normalize(tn, java.text.Normalizer.Form.NFD).replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+
+        if (normTf == normTn || normTf.contains(normTn) || normTn.contains(normTf)) return true
+
+        val tokensF = normTf.split("\\s+".toRegex()).filter { it.length >= 3 }
+        val tokensN = normTn.split("\\s+".toRegex()).filter { it.length >= 3 }
+        if (tokensF.isNotEmpty() && tokensN.isNotEmpty()) {
+            if (tokensF.any { it in tokensN }) return true
+        }
+        return false
+    }
+
     fun getAllOrders(): Flow<List<ServiceOrderEntity>> = orderDao.getAllOrdersFlow()
 
     fun getAllOrdersProgress(): Flow<List<com.lefrio.atendimento.data.local.dao.OrderChecklistProgress>> =
@@ -292,8 +315,7 @@ class ServiceOrderRepository(private val context: Context) {
                     val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
 
                     val isSameMonthOrDate = pDate.startsWith(targetDate) || month == currentMonth || pDate.startsWith(currentMonth)
-                    val isMyTech = (t1.isNotBlank() && (t1.contains(normTechName) || t1 == normTechId)) ||
-                                   (t2.isNotBlank() && (t2.contains(normTechName) || t2 == normTechId))
+                    val isMyTech = matchesTechResilient(t1, normTechName, normTechId) || matchesTechResilient(t2, normTechName, normTechId)
 
                     if (isSameMonthOrDate && isMyTech) {
                         matchedDocs.add(doc)
@@ -441,10 +463,10 @@ class ServiceOrderRepository(private val context: Context) {
                         val pDate = (doc.getString("plannedDate") ?: (doc.getString("openedAt")?.take(10) ?: "")).trim()
                         val status = doc.getString("status") ?: "aberta"
 
-                        val matchesTech = (tId.isNotBlank() && (tId == normTechId || tId.contains(normTechName))) ||
-                                          (tName.isNotBlank() && (tName == normTechId || tName.contains(normTechName))) ||
-                                          (t2Id.isNotBlank() && (t2Id == normTechId || t2Id.contains(normTechName))) ||
-                                          (t2Name.isNotBlank() && (t2Name == normTechId || t2Name.contains(normTechName)))
+                        val matchesTech = matchesTechResilient(tId, normTechName, normTechId) ||
+                                          matchesTechResilient(tName, normTechName, normTechId) ||
+                                          matchesTechResilient(t2Id, normTechName, normTechId) ||
+                                          matchesTechResilient(t2Name, normTechName, normTechId)
 
                         val matchesDate = pDate.startsWith(targetDate)
 
@@ -701,9 +723,7 @@ class ServiceOrderRepository(private val context: Context) {
         completionDate: String,
         latitude: Double,
         longitude: Double,
-        accuracy: Float,
-        signatureBase64: String? = null,
-        checklistItems: List<EquipmentChecklistEntity> = emptyList()
+        accuracy: Float
     ) {
         orderDao.finalizeOrderWithSignature(
             orderId = orderId,
@@ -717,66 +737,14 @@ class ServiceOrderRepository(private val context: Context) {
             accuracy = accuracy
         )
 
-        val localOrder = orderDao.getOrderById(orderId)
-        val isPreventive = orderId.startsWith("PREV_") || localOrder?.type == "MANUTENÇÃO PREVENTIVA"
-        val originalRecordId = localOrder?.originalId?.ifBlank { null } ?: orderId.removePrefix("PREV_")
-
-        // Converte a assinatura para base64 se ainda não estiver pronta
-        val finalSignatureBase64 = if (!signatureBase64.isNullOrBlank()) {
-            signatureBase64
-        } else {
-            try {
-                val f = java.io.File(signatureFilePath)
-                if (f.exists() && f.length() > 0) {
-                    "data:image/png;base64," + android.util.Base64.encodeToString(f.readBytes(), android.util.Base64.NO_WRAP)
-                } else ""
-            } catch (e: Exception) {
-                ""
-            }
-        }
-
-        val checklistArray = org.json.JSONArray()
-        val items = if (checklistItems.isNotEmpty()) checklistItems else checklistDao.getItemsForOrderSync(orderId)
-        var executedCount = 0
-        for (item in items) {
-            if (item.isChecked) executedCount++
-            val itemObj = JSONObject().apply {
-                put("equipmentId", item.equipmentId)
-                put("checked", item.isChecked)
-                put("skipped", item.isSkipped)
-                put("justification", item.justification ?: "")
-                put("notes", item.notes ?: "")
-                put("checkedAt", item.checkedAt ?: "")
-                put("equipmentName", item.equipmentName)
-                put("brand", item.equipmentBrand ?: "")
-                put("btus", item.equipmentBtus ?: "")
-                put("sector", item.equipmentSector ?: "")
-            }
-            checklistArray.put(itemObj)
-        }
-
         val payload = JSONObject().apply {
-            put("orderId", orderId)
-            put("isPreventive", isPreventive)
-            put("originalRecordId", originalRecordId)
-            put("addressId", localOrder?.addressId ?: "")
-            put("addressStreet", localOrder?.addressStreet ?: "")
-            put("clientId", localOrder?.clientId ?: "")
-            put("clientName", localOrder?.clientName ?: "")
-            put("plannedDate", localOrder?.plannedDate ?: "")
             put("clientRepresentative", signeeName)
-            put("clientSigneeName", signeeName)
             put("clientSigneeDoc", signeeDoc)
-            put("clientSigneeRegistration", signeeDoc)
             put("clientSignatureDate", signatureDate)
             put("completionDate", completionDate)
-            put("clientSignature", finalSignatureBase64)
             put("completionLatitude", latitude)
             put("completionLongitude", longitude)
             put("completionAccuracy", accuracy.toDouble())
-            put("executedQuantity", executedCount)
-            put("totalCount", items.size)
-            put("checklist", checklistArray)
         }
 
         syncDao.enqueue(
@@ -978,63 +946,31 @@ class ServiceOrderRepository(private val context: Context) {
         technicianId: String,
         date: String
     ): Pair<List<ClientOption>, List<AddressOption>> {
-        var scheduledList = orderDao.getScheduledLocationsForTechnicianAndDate(
+        val scheduledList = orderDao.getScheduledLocationsForTechnicianAndDate(
             technicianName = technicianName,
             technicianId = technicianId,
             date = date
         )
 
-        // Se estiver vazio para data específica, busca todas as ordens e preventivas do técnico
-        if (scheduledList.isEmpty()) {
-            scheduledList = orderDao.getAllLocationsForTechnician(technicianName, technicianId)
-        }
-        if (scheduledList.isEmpty()) {
-            scheduledList = orderDao.getScheduledLocationsForDateOnly(date)
-        }
-        if (scheduledList.isEmpty()) {
-            scheduledList = orderDao.getAllValidLocations()
-        }
-
         val clientMap = mutableMapOf<String, ClientOption>()
         val addressMap = mutableMapOf<String, AddressOption>()
 
         for (item in scheduledList) {
-            val rawStreet = item.addressStreet.trim()
-            if (rawStreet.isBlank() || rawStreet == "Endereço Teste") continue
-
-            val rawAddrId = item.addressId.ifBlank { "ADDR_" + Math.abs(rawStreet.hashCode()) }
-
-            // Nome e ID do Cliente: se vier em branco ou PMOC, deriva do endereço/escola
-            val effectiveClientName = if (item.clientName.isNotBlank() && item.clientName != "Cliente LeFrio" && item.clientName != "Cliente PMOC") {
-                item.clientName.trim()
-            } else {
-                if (rawStreet.contains("-")) {
-                    rawStreet.split("-")[0].trim()
-                } else {
-                    rawStreet
-                }
-            }
-
-            val effectiveClientId = if (item.clientId.isNotBlank()) {
-                item.clientId.trim()
-            } else {
-                "CLIENT_" + Math.abs(effectiveClientName.hashCode())
-            }
-
-            clientMap.getOrPut(effectiveClientId) {
-                ClientOption(
-                    id = effectiveClientId,
-                    name = effectiveClientName,
+            if (item.clientId.isNotBlank() && item.clientName.isNotBlank() && item.clientName != "Cliente LeFrio" && item.clientName != "Cliente PMOC") {
+                clientMap[item.clientId] = ClientOption(
+                    id = item.clientId,
+                    name = item.clientName,
                     document = item.clientDocument
                 )
             }
-
-            addressMap[rawAddrId] = AddressOption(
-                id = rawAddrId,
-                clientId = effectiveClientId,
-                street = rawStreet,
-                city = item.addressCity ?: "Maceió"
-            )
+            if (item.addressId.isNotBlank() && item.addressStreet.isNotBlank() && item.addressStreet != "Endereço do Chamado") {
+                addressMap[item.addressId] = AddressOption(
+                    id = item.addressId,
+                    clientId = item.clientId,
+                    street = item.addressStreet,
+                    city = item.addressCity
+                )
+            }
         }
 
         return Pair(
@@ -1049,31 +985,21 @@ class ServiceOrderRepository(private val context: Context) {
 
         val localOrders = orderDao.getAllOrders()
         for (o in localOrders) {
-            val rawStreet = o.addressStreet.trim()
-            if (rawStreet.isBlank() || rawStreet == "Endereço Teste") continue
-
-            val rawAddrId = o.addressId.ifBlank { "ADDR_" + Math.abs(rawStreet.hashCode()) }
-            val effectiveClientName = if (o.clientName.isNotBlank() && o.clientName != "Cliente LeFrio" && o.clientName != "Cliente PMOC") {
-                o.clientName.trim()
-            } else {
-                if (rawStreet.contains("-")) rawStreet.split("-")[0].trim() else rawStreet
-            }
-            val effectiveClientId = if (o.clientId.isNotBlank()) o.clientId.trim() else "CLIENT_" + Math.abs(effectiveClientName.hashCode())
-
-            clientMap.getOrPut(effectiveClientId) {
-                ClientOption(
-                    id = effectiveClientId,
-                    name = effectiveClientName,
-                    document = o.clientSigneeDoc
+            if (o.clientId.isNotBlank() && o.clientName.isNotBlank() && o.clientName != "Cliente LeFrio" && o.clientName != "Cliente PMOC") {
+                clientMap[o.clientId] = ClientOption(
+                    id = o.clientId,
+                    name = o.clientName,
+                    document = o.clientDocument
                 )
             }
-
-            addressMap[rawAddrId] = AddressOption(
-                id = rawAddrId,
-                clientId = effectiveClientId,
-                street = rawStreet,
-                city = o.addressCity
-            )
+            if (o.addressId.isNotBlank() && o.addressStreet.isNotBlank() && o.addressStreet != "Endereço do Chamado") {
+                addressMap[o.addressId] = AddressOption(
+                    id = o.addressId,
+                    clientId = o.clientId,
+                    street = o.addressStreet,
+                    city = o.addressCity
+                )
+            }
         }
 
         return Pair(
@@ -1098,24 +1024,20 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
-        // 2. Tenta buscar nas APIs HTTP rápidas do sistema (/api/equipments?addressId=...)
+        // 2. Tenta buscar na API HTTP rápida do sistema (/api/equipments?addressId=...)
         if (resultList.isEmpty()) {
-            val encodedAid = java.net.URLEncoder.encode(cleanAid, "UTF-8")
             val apiEndpoints = listOf(
-                "https://ais-dev-ar7bordx5nsnyiemayswdy-507910401461.us-west2.run.app/api/equipments?addressId=" + encodedAid,
-                FirebaseConfig.SHARED_API_BASE + "/api/equipments?addressId=" + encodedAid,
-                "http://10.0.2.2:3000/api/equipments?addressId=" + encodedAid,
-                "http://localhost:3000/api/equipments?addressId=" + encodedAid
+                "${FirebaseConfig.SHARED_API_BASE}/api/equipments?addressId=${java.net.URLEncoder.encode(cleanAid, "UTF-8")}",
+                "http://10.0.2.2:3000/api/equipments?addressId=${java.net.URLEncoder.encode(cleanAid, "UTF-8")}"
             )
             for (endpoint in apiEndpoints) {
                 try {
                     val url = java.net.URL(endpoint)
                     val conn = url.openConnection() as java.net.HttpURLConnection
-                    conn.connectTimeout = 3500
-                    conn.readTimeout = 4500
+                    conn.connectTimeout = 3000
+                    conn.readTimeout = 4000
                     conn.requestMethod = "GET"
                     conn.setRequestProperty("Accept", "application/json")
-
                     if (conn.responseCode == 200) {
                         val responseStr = conn.inputStream.bufferedReader().use { it.readText() }
                         val json = JSONObject(responseStr)
@@ -1141,7 +1063,7 @@ class ServiceOrderRepository(private val context: Context) {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.d(TAG, "Tentativa de busca de equipamentos via API falhou para " + endpoint + ": " + e.message)
+                    Log.d(TAG, "Tentativa de busca de equipamentos via API falhou: ${e.message}")
                 }
             }
         }
@@ -1165,7 +1087,7 @@ class ServiceOrderRepository(private val context: Context) {
                     }
                 }
             } catch (e: Exception) {
-                Log.d(TAG, "Busca local Room de equipamentos falhou: " + e.message)
+                Log.d(TAG, "Busca local Room de equipamentos falhou: ${e.message}")
             }
         }
 
@@ -1175,10 +1097,9 @@ class ServiceOrderRepository(private val context: Context) {
                 val firestore = FirebaseConfig.getFirestore()
                 val snap = firestore.collection("equipments")
                     .whereEqualTo("addressId", cleanAid)
-                    .limit(100)
+                    .limit(40)
                     .get()
                     .await()
-
                 for (doc in snap.documents) {
                     val docId = doc.id
                     if (seenIds.add(docId)) {
@@ -1196,11 +1117,11 @@ class ServiceOrderRepository(private val context: Context) {
                     }
                 }
             } catch (e: Exception) {
-                Log.d(TAG, "Busca remota Firestore de equipamentos indisponível: " + e.message)
+                Log.d(TAG, "Busca remota Firestore de equipamentos indisponível: ${e.message}")
             }
         }
 
-        resultList.sortedWith(compareBy({ it.sector ?: "" }, { it.name }))
+        resultList.sortedBy { it.name }
     }
 
     suspend fun getAllTechnicians(): List<com.lefrio.atendimento.data.local.entity.TechnicianEntity> {

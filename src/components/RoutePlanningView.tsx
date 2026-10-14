@@ -492,7 +492,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   const [serviceCalls, setServiceCalls] = useState<ServiceCall[]>([]);
   const [orderValueMap, setOrderValueMap] = useState<Record<string, string | number>>({});
-  const [hideVariableRoutes, setHideVariableRoutes] = useState(false);
+  const [hideVariableRoutes, setHideVariableRoutes] = useState(true);
   const [selectedTechForSchedule, setSelectedTechForSchedule] = useState<string>('');
   const [activeMainTab, setActiveMainTab] = useState<'planning' | 'expenses' | 'card_summary'>('planning');
   
@@ -1934,10 +1934,10 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                 window.focus(); 
                 setTimeout(() => window.print(), 200); 
             }}
-            className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-xl text-sm font-bold text-gray-700 hover:bg-gray-50 transition-all shadow-sm"
+            className="p-2 bg-white border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 transition-all shadow-sm cursor-pointer"
+            title="Imprimir"
           >
-            <Printer className="w-4 h-4" />
-            Imprimir
+            <Printer className="w-4 h-4 text-gray-700" />
           </button>
           <div className="flex bg-gray-100 p-1 rounded-xl">
             <button 
@@ -3985,11 +3985,6 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                               <span className="text-[9px] text-gray-400 font-extrabold uppercase mt-0.5 block leading-none">
                                 {data.records.length} {data.records.length === 1 ? 'Endereço registrado' : 'Endereços registrados'}
                               </span>
-                              {cardDetails && (
-                                <span className="text-[9px] text-blue-600 font-black mt-1.5 flex items-center gap-1 leading-none uppercase print:text-black">
-                                  💳 {cardDetails}
-                                </span>
-                              )}
                             </td>
                             {/* Status */}
                             <td className="py-3 px-2 text-center">
