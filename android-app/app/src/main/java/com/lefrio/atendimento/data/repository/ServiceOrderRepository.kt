@@ -723,7 +723,9 @@ class ServiceOrderRepository(private val context: Context) {
         completionDate: String,
         latitude: Double,
         longitude: Double,
-        accuracy: Float
+        accuracy: Float,
+        signatureBase64: String? = null,
+        checklistItems: List<EquipmentChecklistEntity>? = null
     ) {
         orderDao.finalizeOrderWithSignature(
             orderId = orderId,
@@ -745,6 +747,9 @@ class ServiceOrderRepository(private val context: Context) {
             put("completionLatitude", latitude)
             put("completionLongitude", longitude)
             put("completionAccuracy", accuracy.toDouble())
+            if (!signatureBase64.isNullOrBlank()) {
+                put("clientSignature", signatureBase64)
+            }
         }
 
         syncDao.enqueue(
