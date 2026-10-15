@@ -309,10 +309,25 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   const [executionFilter, setExecutionFilter] = useState<'all' | 'executed' | 'pending'>('all');
   const [pautaSearchTerm, setPautaSearchTerm] = useState('');
 
-  const [records, setRecords] = useState<MaintenanceRecord[]>([]);
+  const [records, setRecords] = useState<MaintenanceRecord[]>(() => {
+    try {
+      const saved = localStorage.getItem('lefrio_cached_records');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings | null>(null);
-  const [addresses, setAddresses] = useState<Address[]>([]);
-  const [clients, setClients] = useState<Client[]>([]);
+  const [addresses, setAddresses] = useState<Address[]>(() => {
+    try {
+      const saved = localStorage.getItem('lefrio_cached_addresses');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+  const [clients, setClients] = useState<Client[]>(() => {
+    try {
+      const saved = localStorage.getItem('lefrio_cached_clients');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
   const [techs, setTechs] = useState<Technician[]>([]);
   const [equipments, setEquipments] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -977,12 +992,18 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       (eq || []).forEach((equip: Equipment) => { if (equip?.id) mergedEquipmentsMap.set(equip.id, equip); });
       apiEquipments.forEach((equip: Equipment) => { if (equip?.id && !mergedEquipmentsMap.has(equip.id)) mergedEquipmentsMap.set(equip.id, equip); });
 
+      const finalAddresses = Array.from(mergedAddressesMap.values());
+      const finalClients = Array.from(mergedClientsMap.values());
+      const finalTechs = Array.from(mergedTechsMap.values());
+      const finalEquipments = Array.from(mergedEquipmentsMap.values());
+      const finalOrders = Array.from(mergedOrdersMap.values());
+
       setRecords(combinedRecords);
       setRecentApprovedRecords(appvd || []);
-      setAddresses(Array.from(mergedAddressesMap.values()));
-      setClients(Array.from(mergedClientsMap.values()));
-      setTechs(Array.from(mergedTechsMap.values()));
-      setEquipments(Array.from(mergedEquipmentsMap.values()));
+      setAddresses(finalAddresses);
+      setClients(finalClients);
+      setTechs(finalTechs);
+      setEquipments(finalEquipments);
       setDeviceSettings(settings);
       if (soSettings) {
         setServiceOrderSettings(soSettings);
@@ -992,7 +1013,19 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
           }
         } catch (e) {}
       }
-      setServiceOrders(Array.from(mergedOrdersMap.values()));
+      setServiceOrders(finalOrders);
+
+      // Persiste cache para acesso offline instantâneo no aplicativo Android/Tablet do técnico
+      try {
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('lefrio_cached_records', JSON.stringify(combinedRecords.slice(0, 500)));
+          localStorage.setItem('lefrio_cached_addresses', JSON.stringify(finalAddresses));
+          localStorage.setItem('lefrio_cached_clients', JSON.stringify(finalClients));
+          localStorage.setItem('lefrio_cached_service_orders', JSON.stringify(finalOrders));
+        }
+      } catch (e) {
+        console.warn('Erro ao salvar cache local de endereços e roteiro:', e);
+      }
     } catch (error) {
       console.error('Error loading tech demand data:', error);
     } finally {
@@ -1220,8 +1253,12 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         return true;
       })
       .map(r => {
-        const addr = addresses.find(a => a.id === r.addressId) || (r as any).address;
-        const client = clients.find(c => c.id === addr?.clientId) || (r as any).client;
+        const addr = addresses.find(a => String(a.id || '').trim().toLowerCase() === String(r.addressId || '').trim().toLowerCase()) 
+          || (r as any).address 
+          || (r.addressId ? { id: r.addressId, street: (r as any).addressStreet || 'Endereço', route: 'Sem Rota', totalMachines: 1 } : undefined);
+        const client = clients.find(c => String(c.id || '').trim().toLowerCase() === String(addr?.clientId || (r as any).clientId || '').trim().toLowerCase()) 
+          || (r as any).client 
+          || { name: 'Cliente', id: addr?.clientId || '' };
         return {
           ...r,
           itemType: 'preventive',
@@ -1246,12 +1283,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         if (!matchesDate) return false;
 
         if (activeTechFilter) {
-          // Exclusividade do técnico titular: impede que a mesma ordem apareça para ambos os técnicos
-          const isOSTitular = techIndex.matchesTechTitular(os.technicianId, activeTechFilter);
+          // Pertencimento do técnico titular, auxiliar ou abridor da ordem
+          const isOSTitular = techIndex.matchesTechTitular(os.technicianId, activeTechFilter) ||
+                              techIndex.matchesTechTitular(os.technician2Id, activeTechFilter) ||
+                              techIndex.matchesTechTitular((os as any).technician1, activeTechFilter) ||
+                              (os.openedBy && techIndex.matchesTechTitular(os.openedBy, activeTechFilter));
           if (!isOSTitular) return false;
         }
 
-        if (userRole === UserRole.TECHNICIAN || isTabletMode) return false;
         return true;
       })
       .map(os => {
@@ -5623,6 +5662,10 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
             techs={techs}
             month={month}
             onMonthChange={setMonth}
+            onRefreshEquipments={async () => {
+              const freshEqs = await dataService.getEquipments();
+              setEquipments(freshEqs || []);
+            }}
             onPrintChecklist={(record, options) => {
                setIsPrintingBlank(false);
                setPrintPhotosOption(options?.printPhotos ?? true);

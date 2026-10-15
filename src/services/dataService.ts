@@ -279,10 +279,14 @@ export const deduplicateRecordsList = (records: MaintenanceRecord[]): { deduplic
       withPlannedDate.sort((a, b) => {
         const score = (rec: any) => {
           let pts = 0;
-          if (rec.status === MaintenanceStatus.COMPLETED) pts += 100;
+          const nowMonthStr = new Date().toISOString().slice(0, 7);
+          const recMonth = rec.month || (rec.plannedDate ? String(rec.plannedDate).slice(0, 7) : '');
+          if (recMonth >= nowMonthStr) pts += 100; // Prioriza o mês atual ou futuro sobre meses anteriores
+          if (rec.status === MaintenanceStatus.PENDING) pts += 60; // Pauta ativa agendada
           if (rec.status === MaintenanceStatus.PRE_COMPLETED) pts += 50;
           if (rec.executionDate) pts += 40;
           if (rec.checklist && Array.isArray(rec.checklist) && rec.checklist.some((it: any) => it?.checked)) pts += 30;
+          if (rec.status === MaintenanceStatus.COMPLETED) pts += 20;
           if (rec.technician1) pts += 10;
           return pts;
         };
@@ -335,10 +339,14 @@ const clearCache = (prefix?: string) => {
         delete memoryCache[key];
       }
     });
+    if (prefix.startsWith('equipments')) {
+      fetch('/api/equipments/cache-clear', { method: 'POST' }).catch(() => {});
+    }
   } else {
     Object.keys(memoryCache).forEach(key => {
       delete memoryCache[key];
     });
+    fetch('/api/equipments/cache-clear', { method: 'POST' }).catch(() => {});
   }
 };
 
@@ -2927,27 +2935,12 @@ export const dataService = {
 
   async deleteEquipment(id: string, permanent: boolean = false) {
     try {
-      if (!permanent) {
-        // Por padrão e para segurança de auditoria, realiza desativação suave (soft-deactivate)
-        return await dataService.deactivateEquipment(id, 'Exclusão solicitada via painel', 'Administrador');
-      }
-
-      const eqDoc = await getDoc(doc(db, COLLECTIONS.EQUIPMENTS, id));
-      let addressId = '';
-      if (eqDoc.exists()) {
-        addressId = eqDoc.data()?.addressId || '';
-      }
-
-      await deleteDoc(doc(db, COLLECTIONS.EQUIPMENTS, id));
-      await historyService.log(id, 'Equipment', 'Delete', { message: 'Equipamento removido permanentemente' });
-      
-      clearCache('equipments_');
-
-      if (addressId) {
-        await dataService.syncAddressMachinesCount(addressId);
-      }
+      // Regra do Sistema: Nenhuma máquina é excluída fisicamente do banco de dados.
+      // Toda solicitação de remoção/exclusão realiza inativação suave (soft-deactivate) mantendo os dados desabilitados.
+      return await dataService.deactivateEquipment(id, 'Exclusão/Remoção solicitada via painel', 'Administrador');
     } catch (e) {
-      handleFirestoreError(e, OperationType.DELETE, `${COLLECTIONS.EQUIPMENTS}/${id}`);
+      handleFirestoreError(e, OperationType.UPDATE, `${COLLECTIONS.EQUIPMENTS}/${id}`);
+      return false;
     }
   },
 

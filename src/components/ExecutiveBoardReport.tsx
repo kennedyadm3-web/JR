@@ -365,9 +365,9 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       }
     });
 
-    let list = Array.from(statsMap.values()).filter(s => s.totalAddresses > 0);
+    let rawList = Array.from(statsMap.values()).filter(s => s.totalAddresses > 0);
 
-    list = list.map(item => {
+    let list = rawList.map(item => {
       let percent = 0;
       if (item.totalMachines > 0) {
         percent = Math.min(100, Math.round((item.executedMachines / item.totalMachines) * 100));

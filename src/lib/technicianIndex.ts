@@ -127,7 +127,15 @@ export function buildTechnicianIndex(techs: Technician[] = []): TechnicianIndexS
     const t1 = findTech(tf);
     const t2 = findTech(tq);
     if (t1 && t2) {
-      return t1.id.toUpperCase() === t2.id.toUpperCase() || t1.indexedCode === t2.indexedCode;
+      if (t1.id.toUpperCase() === t2.id.toUpperCase() || t1.indexedCode === t2.indexedCode) return true;
+    }
+
+    // Tolerância resiliente: comparação de substring e sobreposição de palavras (ex: "Erinaldo", "Erinaldo Maciel", "ERINALDO / JOAO")
+    if (normTf && normTq) {
+      if (normTf.includes(normTq) || normTq.includes(normTf)) return true;
+      const wordsTf = normTf.split(/\s+/).filter(w => w.length >= 3);
+      const wordsTq = normTq.split(/\s+/).filter(w => w.length >= 3);
+      if (wordsTf.some(w => wordsTq.includes(w))) return true;
     }
 
     return false;

@@ -16,7 +16,7 @@ import {
   VerticalAlign
 } from 'docx';
 import { MaintenanceRecord, Address, Client, Equipment, Technician, MaintenanceStatus, UserRole } from '../types';
-import { FileText, Search, MapPin, CheckCircle, Printer, Filter, Settings, History, Info, ChevronRight, X, Briefcase, FileSignature, BookOpen, Trash2, ChevronDown, ChevronUp, CheckSquare, Square, Calendar, UserCheck, Save, Check, RotateCcw } from 'lucide-react';
+import { FileText, Search, MapPin, CheckCircle, Printer, Filter, Settings, History, Info, ChevronRight, X, Briefcase, FileSignature, BookOpen, Trash2, ChevronDown, ChevronUp, CheckSquare, Square, Calendar, UserCheck, Save, Check, RotateCcw, RefreshCw } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -35,15 +35,104 @@ interface PMOCControlCenterProps {
   userRole?: UserRole;
   month?: string;
   onMonthChange?: (month: string) => void;
+  onRefreshEquipments?: () => Promise<void>;
 }
 
-export function PMOCControlCenter({ records, addresses, clients, equipments, techs, onPrintChecklist, onPrintBlankChecklist, onUpdateRecord, userRole, month, onMonthChange }: PMOCControlCenterProps) {
+export function PMOCControlCenter({ records, addresses, clients, equipments, techs, onPrintChecklist, onPrintBlankChecklist, onUpdateRecord, userRole, month, onMonthChange, onRefreshEquipments }: PMOCControlCenterProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClientId, setSelectedClientId] = useState<string>('');
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [selectedCycleFilter, setSelectedCycleFilter] = useState<string>('all');
   const [selectedTechFilter, setSelectedTechFilter] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+
+  // Sub-Aba Central PMOC
+  const [pmocSubTab, setPmocSubTab] = useState<'main' | 'removed'>('main');
+  const [deactivatedEquipments, setDeactivatedEquipments] = useState<Equipment[]>([]);
+  const [loadingDeactivated, setLoadingDeactivated] = useState<boolean>(false);
+
+  // Filtros da Aba de Máquinas Removidas
+  const [removedSearchTerm, setRemovedSearchTerm] = useState<string>('');
+  const [removedClientId, setRemovedClientId] = useState<string>('');
+  const [removedAddressId, setRemovedAddressId] = useState<string>('');
+  const [removedTechFilter, setRemovedTechFilter] = useState<string>('');
+
+  // Modal de Reabilitação
+  const [reactivateModalEq, setReactivateModalEq] = useState<Equipment | null>(null);
+  const [isReactivating, setIsReactivating] = useState<boolean>(false);
+
+  const loadDeactivatedEquipments = async () => {
+    setLoadingDeactivated(true);
+    try {
+      const list = await dataService.getDeactivatedEquipments();
+      setDeactivatedEquipments(list || []);
+    } catch (err) {
+      console.error('Erro ao carregar equipamentos desativados:', err);
+    } finally {
+      setLoadingDeactivated(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDeactivatedEquipments();
+  }, []);
+
+  const handleReactivateEquipment = async (eq: Equipment) => {
+    setIsReactivating(true);
+    try {
+      const ok = await dataService.reactivateEquipment(eq.id);
+      if (ok) {
+        alert(`Máquina "${eq.label || ''} ${eq.name}" (#${eq.id}) reabilitada com sucesso!\n\nEla já voltou a constar como ativa no endereço e está disponível na Folha de Atendimento PMOC e na abertura de Ordens de Serviço.`);
+        setReactivateModalEq(null);
+        await loadDeactivatedEquipments();
+        if (onRefreshEquipments) {
+          await onRefreshEquipments();
+        }
+      } else {
+        alert('Erro ao reabilitar máquina. Tente novamente.');
+      }
+    } catch (err: any) {
+      alert('Erro ao reabilitar máquina: ' + (err.message || err));
+    } finally {
+      setIsReactivating(false);
+    }
+  };
+
+  const filteredDeactivatedEquipments = useMemo(() => {
+    return deactivatedEquipments.filter(eq => {
+      // Filtro por Cliente
+      if (removedClientId) {
+        const addr = addresses.find(a => a.id === eq.addressId);
+        if (addr && addr.clientId !== removedClientId) return false;
+      }
+      // Filtro por Endereço
+      if (removedAddressId && eq.addressId !== removedAddressId) {
+        return false;
+      }
+      // Filtro por Técnico Solicitante
+      if (removedTechFilter) {
+        const techMatch = (eq.deactivatedBy || '').toLowerCase().includes(removedTechFilter.toLowerCase());
+        if (!techMatch) return false;
+      }
+      // Filtro de Busca Geral
+      if (removedSearchTerm) {
+        const term = removedSearchTerm.toLowerCase();
+        const match =
+          (eq.id || '').toLowerCase().includes(term) ||
+          (eq.name || '').toLowerCase().includes(term) ||
+          (eq.label || '').toLowerCase().includes(term) ||
+          (eq.brand || '').toLowerCase().includes(term) ||
+          (eq.sector || '').toLowerCase().includes(term) ||
+          (eq.patrimony || '').toLowerCase().includes(term) ||
+          (eq.deactivatedReason || '').toLowerCase().includes(term) ||
+          (eq.deactivatedBy || '').toLowerCase().includes(term) ||
+          (eq.deactivatedClientName || '').toLowerCase().includes(term) ||
+          (eq.deactivatedAddressName || '').toLowerCase().includes(term);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [deactivatedEquipments, removedClientId, removedAddressId, removedTechFilter, removedSearchTerm, addresses]);
 
   // Group addresses by Client
   const activeClients = useMemo(() => {
@@ -123,16 +212,70 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
 
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="bg-indigo-100 p-2.5 rounded-xl">
-            <BookOpen className="w-6 h-6 text-indigo-600" />
-          </div>
-          <div>
-            <h2 className="text-xl font-black text-slate-800">PMOC (Plano de Manutenção)</h2>
-            <p className="text-sm text-slate-500 font-medium">Gestão central de manutenções preventivas por local</p>
-          </div>
+      {/* NAVEGAÇÃO DE SUB-ABAS DA CENTRAL PMOC */}
+      <div className="flex flex-wrap items-center justify-between gap-4 bg-white rounded-3xl border border-slate-200 p-4 shadow-sm">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPmocSubTab('main')}
+            className={cn(
+              "px-5 py-2.5 rounded-2xl text-xs sm:text-sm font-bold transition-all flex items-center gap-2 outline-none cursor-pointer",
+              pmocSubTab === 'main'
+                ? "bg-indigo-600 text-white shadow-md shadow-indigo-200"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900"
+            )}
+          >
+            <BookOpen className="w-4 h-4" />
+            Atendimentos e Folhas PMOC
+          </button>
+          <button
+            onClick={() => {
+              setPmocSubTab('removed');
+              loadDeactivatedEquipments();
+            }}
+            className={cn(
+              "px-5 py-2.5 rounded-2xl text-xs sm:text-sm font-bold transition-all flex items-center gap-2 outline-none cursor-pointer relative",
+              pmocSubTab === 'removed'
+                ? "bg-red-600 text-white shadow-md shadow-red-200"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200 hover:text-slate-900"
+            )}
+          >
+            <Trash2 className="w-4 h-4" />
+            Histórico de Máquinas Removidas
+            {deactivatedEquipments.length > 0 && (
+              <span className={cn(
+                "ml-1.5 px-2 py-0.5 rounded-full text-[11px] font-black",
+                pmocSubTab === 'removed' ? "bg-white text-red-600" : "bg-red-100 text-red-600"
+              )}>
+                {deactivatedEquipments.length}
+              </span>
+            )}
+          </button>
         </div>
+
+        {pmocSubTab === 'removed' && (
+          <button
+            onClick={() => loadDeactivatedEquipments()}
+            disabled={loadingDeactivated}
+            className="px-3 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw className={cn("w-3.5 h-3.5", loadingDeactivated ? "animate-spin" : "")} />
+            Atualizar
+          </button>
+        )}
+      </div>
+
+      {pmocSubTab === 'main' && (
+        <>
+          <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-6">
+          <div className="flex items-center gap-3">
+            <div className="bg-indigo-100 p-2.5 rounded-xl">
+              <BookOpen className="w-6 h-6 text-indigo-600" />
+            </div>
+            <div>
+              <h2 className="text-xl font-black text-slate-800">PMOC (Plano de Manutenção)</h2>
+              <p className="text-sm text-slate-500 font-medium">Gestão central de manutenções preventivas por local</p>
+            </div>
+          </div>
 
         <div className="flex flex-col md:flex-row gap-4">
           <div className="flex-1 relative">
@@ -378,6 +521,286 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
           )}
         </div>
       </div>
+        </>
+      )}
+
+      {/* RENDER DA SUB-ABA 2: HISTÓRICO DE MÁQUINAS REMOVIDAS / DESATIVADAS */}
+      {pmocSubTab === 'removed' && (
+        <div className="space-y-6">
+          {/* Card de Título e Filtros */}
+          <div className="bg-white rounded-3xl border border-slate-200 p-6 shadow-sm space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="bg-red-100 p-2.5 rounded-xl text-red-600">
+                  <Trash2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-800">Histórico de Remoção de Máquinas</h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Auditoria e controle de máquinas desabilitadas por cliente e endereço. Nenhuma máquina é excluída permanentemente.
+                  </p>
+                </div>
+              </div>
+
+              {/* Indicadores / Métricas */}
+              <div className="flex items-center gap-3">
+                <div className="bg-slate-50 border border-slate-200 px-4 py-2 rounded-2xl text-center">
+                  <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Total Removidas</div>
+                  <div className="text-lg font-black text-slate-800">{deactivatedEquipments.length}</div>
+                </div>
+                <div className="bg-amber-50 border border-amber-200 px-4 py-2 rounded-2xl text-center">
+                  <div className="text-[10px] text-amber-600 font-bold uppercase tracking-wider">Clientes Afetados</div>
+                  <div className="text-lg font-black text-amber-800">
+                    {new Set(deactivatedEquipments.map(e => e.deactivatedClientName || e.addressId)).size}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Campo de Busca e Dropdowns de Filtro */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* Busca Geral */}
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                  <Search className="h-4 w-4 text-slate-400" />
+                </div>
+                <input
+                  type="text"
+                  className="block w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-medium focus:ring-2 focus:ring-red-500 outline-none transition-all placeholder:text-slate-400"
+                  placeholder="Buscar código, nome, setor, motivo, técnico..."
+                  value={removedSearchTerm}
+                  onChange={(e) => setRemovedSearchTerm(e.target.value)}
+                />
+              </div>
+
+              {/* Filtro por Cliente */}
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                  <Filter className="h-4 w-4 text-slate-400" />
+                </div>
+                <select
+                  className="block w-full pl-10 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-medium focus:ring-2 focus:ring-red-500 outline-none appearance-none cursor-pointer"
+                  value={removedClientId}
+                  onChange={(e) => {
+                    setRemovedClientId(e.target.value);
+                    setRemovedAddressId('');
+                  }}
+                >
+                  <option value="">Todos os Clientes</option>
+                  {activeClients.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Filtro por Endereço */}
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                  <MapPin className="h-4 w-4 text-slate-400" />
+                </div>
+                <select
+                  className="block w-full pl-10 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-medium focus:ring-2 focus:ring-red-500 outline-none appearance-none cursor-pointer disabled:opacity-50"
+                  value={removedAddressId}
+                  onChange={(e) => setRemovedAddressId(e.target.value)}
+                >
+                  <option value="">Todos os Endereços</option>
+                  {addresses
+                    .filter(a => !removedClientId || a.clientId === removedClientId)
+                    .map(a => {
+                      const client = clients.find(c => c.id === a.clientId);
+                      return (
+                        <option key={a.id} value={a.id}>
+                          {a.street}, {a.number || 'S/N'} {client ? `(${client.name})` : ''}
+                        </option>
+                      );
+                    })}
+                </select>
+              </div>
+
+              {/* Filtro por Técnico Solicitante */}
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                  <UserCheck className="h-4 w-4 text-slate-400" />
+                </div>
+                <select
+                  className="block w-full pl-10 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-medium focus:ring-2 focus:ring-red-500 outline-none appearance-none cursor-pointer"
+                  value={removedTechFilter}
+                  onChange={(e) => setRemovedTechFilter(e.target.value)}
+                >
+                  <option value="">Todos os Técnicos Solicitantes</option>
+                  {techs.map(t => (
+                    <option key={t.id} value={t.name}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Lista de Equipamentos Desativados */}
+          {loadingDeactivated ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center text-slate-500 font-medium">
+              <RefreshCw className="w-8 h-8 text-red-500 animate-spin mx-auto mb-3" />
+              Carregando histórico de máquinas removidas...
+            </div>
+          ) : filteredDeactivatedEquipments.length === 0 ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-12 text-center space-y-3">
+              <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto opacity-80" />
+              <h4 className="text-base font-black text-slate-800">Nenhuma máquina desativada encontrada</h4>
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                {deactivatedEquipments.length === 0 
+                  ? "Não há máquinas salvas como desabilitadas ou removidas no banco de dados."
+                  : "Nenhuma máquina desativada corresponde aos filtros selecionados."}
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-4">
+              {filteredDeactivatedEquipments.map(eq => {
+                const addr = addresses.find(a => a.id === eq.addressId);
+                const client = addr ? clients.find(c => c.id === addr.clientId) : null;
+                const clientName = eq.deactivatedClientName || client?.name || 'Cliente Não Identificado';
+                const addressStreet = eq.deactivatedAddressName || (addr ? `${addr.street}, ${addr.number || 'S/N'} - ${addr.neighborhood || ''}` : 'Endereço Não Identificado');
+                const deactDate = eq.deactivatedAt ? new Date(eq.deactivatedAt) : null;
+                const deactDateStr = deactDate && !isNaN(deactDate.getTime())
+                  ? format(deactDate, "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })
+                  : 'Data não informada';
+
+                return (
+                  <div 
+                    key={eq.id}
+                    className="bg-white rounded-3xl border border-slate-200 p-5 shadow-sm hover:border-red-200 transition-all flex flex-col md:flex-row md:items-center justify-between gap-5"
+                  >
+                    <div className="space-y-2 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="bg-slate-900 text-white text-xs font-black px-2.5 py-1 rounded-xl">
+                          #{eq.id}
+                        </span>
+                        {eq.label && (
+                          <span className="bg-indigo-50 text-indigo-700 text-xs font-bold px-2.5 py-1 rounded-xl">
+                            Etiqueta: {eq.label}
+                          </span>
+                        )}
+                        <span className="bg-red-100 text-red-700 text-xs font-black px-2.5 py-1 rounded-xl uppercase tracking-wider flex items-center gap-1">
+                          <Trash2 className="w-3 h-3" /> Removida / Desabilitada
+                        </span>
+                      </div>
+
+                      <h4 className="text-base font-black text-slate-800">
+                        {eq.name} {eq.btus ? `(${eq.btus} BTUs)` : ''} {eq.brand ? `- ${eq.brand}` : ''}
+                      </h4>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs font-medium text-slate-600 bg-slate-50 p-3 rounded-2xl border border-slate-100">
+                        <div>
+                          <strong className="text-slate-900">Cliente:</strong> {clientName}
+                        </div>
+                        <div>
+                          <strong className="text-slate-900">Endereço:</strong> {addressStreet}
+                        </div>
+                        <div>
+                          <strong className="text-slate-900">Setor/Ambiente:</strong> {eq.sector || 'Não informado'}
+                        </div>
+                        <div>
+                          <strong className="text-slate-900">Patrimônio:</strong> {eq.patrimony || 'N/A'}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs text-slate-500 pt-1">
+                        <div>
+                          📅 <strong className="text-slate-700">Removida em:</strong> {deactDateStr}
+                        </div>
+                        <div>
+                          👤 <strong className="text-slate-700">Solicitante/Técnico:</strong>{' '}
+                          <span className="font-bold text-indigo-700">{eq.deactivatedBy || 'Setor Administrativo'}</span>
+                        </div>
+                      </div>
+
+                      {eq.deactivatedReason && (
+                        <div className="text-xs bg-red-50/60 border border-red-100 p-2.5 rounded-xl text-red-800 font-medium">
+                          ⚠️ <strong className="font-black">Motivo da Remoção:</strong> {eq.deactivatedReason}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Botão de Ação: Voltar a Habilitar */}
+                    <div className="flex md:flex-col items-center justify-end gap-2 border-t md:border-t-0 md:border-l border-slate-100 pt-3 md:pt-0 md:pl-5">
+                      <button
+                        onClick={() => setReactivateModalEq(eq)}
+                        className="w-full md:w-auto px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold text-xs shadow-md shadow-emerald-200 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                        Voltar a Habilitar
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* MODAL DE CONFIRMAÇÃO DE REABILITAÇÃO */}
+      {reactivateModalEq && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4 animate-scale-in">
+            <div className="flex items-center gap-3 border-b border-slate-100 pb-3">
+              <div className="bg-emerald-100 text-emerald-600 p-3 rounded-2xl">
+                <RotateCcw className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-lg font-black text-slate-800">Rehabilitar Máquina</h3>
+                <p className="text-xs text-slate-500 font-medium">Restaurar equipamento desabilitado no sistema</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-2 text-xs font-medium text-slate-700">
+              <div>
+                <strong className="text-slate-900">Código:</strong> #{reactivateModalEq.id}
+              </div>
+              <div>
+                <strong className="text-slate-900">Equipamento:</strong> {reactivateModalEq.name} {reactivateModalEq.btus ? `(${reactivateModalEq.btus} BTUs)` : ''}
+              </div>
+              <div>
+                <strong className="text-slate-900">Setor/Ambiente:</strong> {reactivateModalEq.sector || 'N/A'}
+              </div>
+              <div>
+                <strong className="text-slate-900">Cliente:</strong> {reactivateModalEq.deactivatedClientName || 'N/A'}
+              </div>
+              <div>
+                <strong className="text-slate-900">Endereço:</strong> {reactivateModalEq.deactivatedAddressName || 'N/A'}
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-600 bg-emerald-50 border border-emerald-200 p-3 rounded-2xl">
+              💡 <strong>O que acontecerá:</strong> Ao reabilitar, este equipamento voltará a constar como ativo no endereço do cliente. Ele reaparecerá na Folha de Atendimento PMOC de manutenção preventiva e nas opções para abertura de Ordens de Serviço.
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                onClick={() => setReactivateModalEq(null)}
+                disabled={isReactivating}
+                className="px-5 py-2.5 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-2xl transition-all disabled:opacity-50 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => handleReactivateEquipment(reactivateModalEq)}
+                disabled={isReactivating}
+                className="px-5 py-2.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-2xl shadow-md shadow-emerald-200 transition-all flex items-center gap-2 disabled:opacity-50 cursor-pointer"
+              >
+                {isReactivating ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" /> Reabilitando...
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4" /> Sim, Voltar a Habilitar
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
