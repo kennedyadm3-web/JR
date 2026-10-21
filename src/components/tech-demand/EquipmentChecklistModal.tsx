@@ -396,6 +396,10 @@ export function EquipmentChecklistModal({
       modalChecklistRef.current = nextChecklist;
 
       const executedCount = nextChecklist.filter(it => it && it.checked && !it.skipped && !it.requestedRemoval).length;
+      const targetEquips = equipments.filter(eq => eq && eq.addressId === activeChecklistRecord.addressId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+      const totalMachinesNeeded = targetEquips.length > 0 ? targetEquips.length : nextChecklist.length;
+      const isFullyProcessed = totalMachinesNeeded > 0 && executedCount >= totalMachinesNeeded;
+
       const updates: Partial<MaintenanceRecord> = {
         checklist: nextChecklist,
         executedQuantity: executedCount,
@@ -406,6 +410,12 @@ export function EquipmentChecklistModal({
         clientSigneeName: clientSigneeNameRef.current,
         clientSigneeRegistration: clientSigneeRegistrationRef.current
       };
+
+      if (!isFullyProcessed && (activeChecklistRecord.status === MaintenanceStatus.PRE_COMPLETED || activeChecklistRecord.status === MaintenanceStatus.COMPLETED)) {
+        updates.status = MaintenanceStatus.PENDING;
+        updates.routeStatus = MaintenanceStatus.PENDING;
+        updates.completionDate = undefined;
+      }
 
       await dataService.upsertRecord({
         ...activeChecklistRecord,
@@ -437,13 +447,13 @@ export function EquipmentChecklistModal({
     currentAnswers[task] = newVal;
 
     // Se todas as tarefas do checklist forem marcadas como 'true', marca a máquina como Atendida
-    const allChecked = clientChecklist.every(t => !!currentAnswers[t]);
+    const allChecked = clientChecklist.length > 0 && clientChecklist.every(t => !!currentAnswers[t]);
     // Se pelo menos uma for marcada, considera em andamento / atendida
     const hasAnyChecked = clientChecklist.some(t => !!currentAnswers[t]);
 
     const updated: EquipmentChecklistItem = {
       equipmentId: eqId,
-      checked: allChecked || hasAnyChecked,
+      checked: hasAnyChecked || allChecked,
       notes: existing?.notes || '',
       skipped: false,
       justification: '',
@@ -748,20 +758,47 @@ export function EquipmentChecklistModal({
       missingIdentification.push("Assinatura Digital do Representante do Cliente é obrigatória");
     }
 
+    // Garantir a busca completa de equipamentos ativos do endereço para validação rigorosa
+    let validationEquips = addressEquips;
+    if (activeChecklistRecord.addressId) {
+      try {
+        const fetched = await dataService.getEquipments(activeChecklistRecord.addressId);
+        if (fetched && fetched.length > 0) {
+          const map = new Map<string, Equipment>();
+          equipments.forEach(eq => { if (eq?.id) map.set(eq.id, eq); });
+          internalEquips.forEach(eq => { if (eq?.id) map.set(eq.id, eq); });
+          fetched.forEach(eq => { if (eq?.id) map.set(eq.id, eq); });
+          validationEquips = Array.from(map.values())
+            .filter(eq => eq && eq.addressId === activeChecklistRecord.addressId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated)
+            .sort((a, b) => (a.label || '').localeCompare(b.label || '', undefined, { numeric: true, sensitivity: 'base' }));
+        }
+      } catch (e) {
+        console.warn('Erro ao verificar equipamentos no banco de dados para validação:', e);
+      }
+    }
+
+    if (validationEquips.length === 0 && modalAddress?.totalMachines && modalAddress.totalMachines > 0) {
+      setChecklistValidationError('BLOQUEIO DE FINALIZAÇÃO:\n\nNão foi possível carregar a lista de máquinas deste endereço para conferência. Por favor, verifique sua conexão com a internet e tente novamente.');
+      setIsFinalizing(false);
+      return;
+    }
+
     const invalidEquips: string[] = [];
-    addressEquips.forEach(eq => {
+    validationEquips.forEach(eq => {
       if (!eq) return;
       const item = modalChecklistRef.current.find(m => m && m.equipmentId === eq.id);
+      const eqDisplay = `${eq.label ? `[Tag ${eq.label}] ` : ''}${eq.name} (${eq.sector || 'Sem Setor'})`;
+
       if (!item) {
-        invalidEquips.push(`${eq.name} (${eq.sector || 'Sem Setor'}) - Sem informações`);
+        invalidEquips.push(`${eqDisplay} - Máquina desmarcada / em branco`);
         return;
       }
       if (item.requestedRemoval) return; // Máquinas com solicitação de remoção são isentas
 
       if (!item.checked && !item.skipped) {
-        invalidEquips.push(`${eq.name} (${eq.sector || 'Sem Setor'}) - Pendente de checklist ou atendimento`);
+        invalidEquips.push(`${eqDisplay} - Máquina desmarcada / em branco`);
       } else if (item.skipped && (!item.justification || item.justification.trim().length < 3)) {
-        invalidEquips.push(`${eq.name} (${eq.sector || 'Sem Setor'}) - Justificativa obrigatória ausente`);
+        invalidEquips.push(`${eqDisplay} - Máquina pulada sem justificativa obrigatória`);
       }
     });
 
@@ -778,8 +815,8 @@ export function EquipmentChecklistModal({
 
       if (invalidEquips.length > 0) {
         errorSections.push(
-          "MÁQUINAS PENDENTES:\n" +
-          "Você precisa atender ou justificar individualmente todas as máquinas listadas (máquinas marcadas para remoção são isentas):\n" +
+          "MÁQUINAS PENDENTES / EM BRANCO:\n" +
+          "É PROIBIDO finalizar o atendimento com máquinas desmarcadas. Você precisa obrigatoriamente marcar como realizada, justificar com motivo ou solicitar remoção para cada uma das máquinas abaixo:\n" +
           invalidEquips.map(err => `• ${err}`).join('\n')
         );
       }

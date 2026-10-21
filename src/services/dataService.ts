@@ -61,7 +61,7 @@ const getDoc = async (docRef: any): Promise<any> => {
 };
 import { db } from '../lib/firebase';
 import { handleFirestoreError } from '../lib/firestore-utils';
-import { Client, Address, MaintenanceRecord, MaintenanceStatus, OperationType, Technician, ServiceCall, RouteConfiguration, RouteType, Adjustment, UserProfile, NotificationItem, Task, TaskStatus, TaskPriority, MuralPost, Inspection, TravelCard, ContractPerformance, Equipment, DeviceSettings, UserRole, JettingControl, RouteMonthlyPlanning, ServiceOrder, ServiceOrderItem, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, RouteExpense, RouteExpenseStatus, isOSRecord } from '../types';
+import { Client, Address, MaintenanceRecord, MaintenanceStatus, OperationType, Technician, ServiceCall, ServiceCallStatus, RouteConfiguration, RouteType, Adjustment, UserProfile, NotificationItem, Task, TaskStatus, TaskPriority, MuralPost, Inspection, TravelCard, ContractPerformance, Equipment, DeviceSettings, UserRole, JettingControl, RouteMonthlyPlanning, ServiceOrder, ServiceOrderItem, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, RouteExpense, RouteExpenseStatus, isOSRecord } from '../types';
 import { historyService } from './historyService';
 import { format } from 'date-fns';
 import { sortOrdersByCreationDateDesc } from '../lib/utils';
@@ -194,10 +194,16 @@ export const deduplicateRecordsList = (records: MaintenanceRecord[]): { deduplic
       const hasRegEx = Boolean(normExisting.clientSigneeRegistration && typeof normExisting.clientSigneeRegistration === 'string' && normExisting.clientSigneeRegistration.trim().length >= 3);
       const isFieldFinalizedEx = hasSigEx && hasNameEx && hasRegEx;
 
-      const rAwaitingApproval = (normR.status === MaintenanceStatus.PRE_COMPLETED && isFieldFinalizedR && isRecentR) || (isFieldFinalizedR && !isRApproved && isRecentR);
-      const existingAwaitingApproval = (normExisting.status === MaintenanceStatus.PRE_COMPLETED && isFieldFinalizedEx && isRecentExisting) || (isFieldFinalizedEx && !isExistingApproved && isRecentExisting);
+      // Se algum dos registros foi devolvido para rascunho pelo administrativo (status === PENDING), ele DEVE permanecer PENDING
+      const isReturnedDraft = (normR.status === MaintenanceStatus.PENDING || normExisting.status === MaintenanceStatus.PENDING) && !isRApproved && !isExistingApproved;
 
-      if ((rAwaitingApproval && !isExistingApproved) || (existingAwaitingApproval && !isRApproved)) {
+      const rAwaitingApproval = normR.status === MaintenanceStatus.PRE_COMPLETED && isFieldFinalizedR && !isRApproved && isRecentR;
+      const existingAwaitingApproval = normExisting.status === MaintenanceStatus.PRE_COMPLETED && isFieldFinalizedEx && !isExistingApproved && isRecentExisting;
+
+      if (isReturnedDraft) {
+        existing.status = MaintenanceStatus.PENDING;
+        existing.routeStatus = MaintenanceStatus.PENDING;
+      } else if (rAwaitingApproval || existingAwaitingApproval) {
         existing.status = MaintenanceStatus.PRE_COMPLETED;
         existing.routeStatus = MaintenanceStatus.PRE_COMPLETED;
       } else {
@@ -357,14 +363,30 @@ const clearCache = (prefix?: string) => {
 // ela deve ser imediatamente tratada com status 'aberta' (Em aberto), preservando techFinalized: true.
 function normalizeServiceOrderStatus(order: ServiceOrder): ServiceOrder {
   if (!order) return order;
-  if (!order.adminFinalized && order.status === 'finalizada') {
-    return {
-      ...order,
+  let normalized = { ...order };
+
+  if (!normalized.adminFinalized && normalized.status === 'finalizada') {
+    normalized = {
+      ...normalized,
       status: 'aberta',
       techFinalized: true
     };
   }
-  return order;
+
+  // Garantia de integridade do técnico titular (technicianId):
+  // Se a O.S. não tem technicianId, infere automaticamente a partir de openedBy ou equipe autenticada
+  if (!normalized.technicianId) {
+    if (normalized.openedBy && normalized.openedBy !== 'ADMIN' && normalized.openedBy !== 'Administrativo') {
+      normalized.technicianId = normalized.openedBy;
+    } else if (normalized.authenticatedTeam) {
+      const match = normalized.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
+      if (match && match[1]) {
+        normalized.technicianId = match[1].trim();
+      }
+    }
+  }
+
+  return normalized;
 }
 
 // REGRA ABSOLUTA DE NEGÓCIOS DA LE FRIO (PREVENTIVAS):
@@ -376,12 +398,25 @@ export function normalizeMaintenanceRecordStatus(record: MaintenanceRecord): Mai
   const hasSignature = Boolean(record.clientSignature && typeof record.clientSignature === 'string' && record.clientSignature.trim().length > 10);
   const hasSignee = Boolean(record.clientSigneeName && typeof record.clientSigneeName === 'string' && record.clientSigneeName.trim().length >= 3);
   const hasRegistration = Boolean(record.clientSigneeRegistration && typeof record.clientSigneeRegistration === 'string' && record.clientSigneeRegistration.trim().length >= 3);
-  const isFieldFinalized = hasSignature && hasSignee && hasRegistration;
+
+  // REGRA ABSOLUTA DE NEGÓCIOS DA LE FRIO (PREVENTIVAS):
+  // NENHUM atendimento preventivo pode ser finalizado ou enviado com status PRE_COMPLETED ou COMPLETED se houver qualquer máquina em branco/desmarcada.
+  // Todas as máquinas ativas precisam estar 100% marcadas (checked: true), justificadas (skipped: true com motivo >= 3 caracteres) ou com solicitação de remoção (requestedRemoval: true).
+  const checklist = Array.isArray(record.checklist) ? record.checklist : [];
+  const hasUnprocessedMachines = checklist.length === 0 || checklist.some(item => {
+    if (!item) return true;
+    if (item.requestedRemoval) return false; // Isento
+    if (item.checked) return false; // Atendido e marcado
+    if (item.skipped && item.justification && item.justification.trim().length >= 3) return false; // Justificado
+    return true; // Máquina em branco / desmarcada!
+  });
+
+  const isFieldFinalized = hasSignature && hasSignee && hasRegistration && !hasUnprocessedMachines;
 
   const isFormallyApproved = Boolean(record.adminApproved || record.approvedAt || record.approvedBy);
 
-  // Se um registro está com status PRE_COMPLETED mas NÃO foi homologado pelo ADM e NÃO tem assinatura completa,
-  // ele foi marcado indevidamente ou é um rascunho em andamento. Deve permanecer como PENDING!
+  // Se um registro está com status PRE_COMPLETED mas NÃO foi homologado pelo ADM e NÃO atende os requisitos completos,
+  // permanece ou retorna para PENDING!
   if (!isFormallyApproved && record.status === MaintenanceStatus.PRE_COMPLETED && !isFieldFinalized) {
     return {
       ...record,
@@ -866,6 +901,42 @@ export const dataService = {
     }
   },
 
+  async startContractCycleFromNow(clientId: string, updates: Partial<Client>, targetMonth?: string) {
+    try {
+      // 1. Atualizar o cliente no Firestore
+      await dataService.updateClient(clientId, updates);
+
+      // 2. Se houver mês especificado (ou cycleMonth configurado), atualiza os registros do cronograma desse cliente
+      const monthToSync = targetMonth || updates.cycleMonth;
+      if (monthToSync) {
+        const addresses = await dataService.getAddresses(clientId, true);
+        const addressIds = new Set(addresses.map(a => a.id));
+        const records = await dataService.getRecords(monthToSync);
+        const matchingRecords = records.filter(r => addressIds.has(r.addressId));
+
+        if (matchingRecords.length > 0) {
+          const batch = writeBatch(db);
+          matchingRecords.forEach(rec => {
+            const recRef = doc(db, COLLECTIONS.RECORDS, rec.id);
+            const recUpdates: any = {};
+            if (updates.contractCycle !== undefined) {
+              recUpdates.cycle = updates.contractCycle;
+            }
+            if (updates.billingMonth !== undefined) {
+              recUpdates.billingMonth = updates.billingMonth;
+            }
+            batch.update(recRef, clean(recUpdates));
+          });
+          await batch.commit();
+          clearCache(`records_${monthToSync}`);
+        }
+      }
+    } catch (e) {
+      console.error('Error in startContractCycleFromNow:', e);
+      throw e;
+    }
+  },
+
   async deleteClient(id: string) {
     try {
       await updateDoc(doc(db, COLLECTIONS.CLIENTS, id), {
@@ -1167,23 +1238,34 @@ export const dataService = {
   },
 
   async getRecordsByPlannedDate(plannedDate: string): Promise<MaintenanceRecord[]> {
-    const cacheKey = `records_plannedDate_${plannedDate}`;
+    const targetDate = plannedDate.split('T')[0];
+    const monthStr = targetDate.slice(0, 7);
+    const cacheKey = `records_plannedDate_${targetDate}`;
     return getCachedData(cacheKey, async () => {
       try {
-        const snap = await getDocs(query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', plannedDate)));
+        const [snapExact, snapMonth] = await Promise.all([
+          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', targetDate))),
+          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', monthStr)))
+        ]);
         const map = new Map<string, any>();
-        snap.docs.forEach((doc: any) => {
-          if (!map.has(doc.id)) {
-            const data = doc.data() as any;
-            if (Array.isArray(data.checklist)) {
-              data.checklist = data.checklist.map((item: any) => ({
-                ...item,
-                photos: [] // Higieniza fotos para tráfego leve no roteiro diário do técnico
-              }));
+        const processDoc = (docSnap: any) => {
+          if (!map.has(docSnap.id)) {
+            const data = docSnap.data() as any;
+            const docDate = (data.plannedDate || '').split('T')[0];
+            if (docDate === targetDate) {
+              if (Array.isArray(data.checklist)) {
+                data.checklist = data.checklist.map((item: any) => ({
+                  ...item,
+                  photos: [] // Higieniza fotos para tráfego leve no roteiro diário do técnico
+                }));
+              }
+              map.set(docSnap.id, { id: docSnap.id, ...data });
             }
-            map.set(doc.id, { id: doc.id, ...data });
           }
-        });
+        };
+        snapExact.docs.forEach(processDoc);
+        snapMonth.docs.forEach(processDoc);
+
         const rawList = Array.from(map.values()) as MaintenanceRecord[];
         const { deduplicated, duplicateIds } = deduplicateRecordsList(rawList);
         if (duplicateIds.length > 0) {
@@ -1199,19 +1281,26 @@ export const dataService = {
 
   subscribeRecordsByPlannedDate(plannedDate: string, callback: (records: MaintenanceRecord[]) => void): () => void {
     if (!plannedDate) return () => {};
+    const targetDate = plannedDate.split('T')[0];
+    const monthStr = targetDate.slice(0, 7);
     try {
-      const q = query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', plannedDate));
+      const q = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', monthStr));
       return onSnapshot(q, (snapshot) => {
-        const list = snapshot.docs.map(doc => {
-          const data = doc.data() as any;
-          if (Array.isArray(data.checklist)) {
-            data.checklist = data.checklist.map((item: any) => ({
-              ...item,
-              photos: []
-            }));
-          }
-          return { id: doc.id, ...data } as MaintenanceRecord;
-        });
+        const list = snapshot.docs
+          .map(docSnap => {
+            const data = docSnap.data() as any;
+            return { id: docSnap.id, ...data } as MaintenanceRecord;
+          })
+          .filter(r => (r.plannedDate || '').split('T')[0] === targetDate)
+          .map(r => {
+            if (Array.isArray(r.checklist)) {
+              r.checklist = r.checklist.map((item: any) => ({
+                ...item,
+                photos: []
+              }));
+            }
+            return r;
+          });
         const { deduplicated } = deduplicateRecordsList(list);
         callback(deduplicated);
       }, (err) => {
@@ -1262,7 +1351,11 @@ export const dataService = {
         // Sem assinatura completa, NUNCA entra na fila de aprovação
         if (!isFieldFinalized) return false;
 
-        return r.status === MaintenanceStatus.PRE_COMPLETED || isFieldFinalized;
+        // Somente registros com status PRE_COMPLETED entram na fila de aprovação.
+        // Se o registro foi devolvido para rascunho (status === PENDING), ele NÃO deve estar na fila.
+        if (r.status !== MaintenanceStatus.PRE_COMPLETED) return false;
+
+        return true;
       });
     } catch (e) {
       handleFirestoreError(e, OperationType.LIST, COLLECTIONS.RECORDS);
@@ -1465,24 +1558,35 @@ export const dataService = {
 
       // REGRA ABSOLUTA DE NEGÓCIOS DA LE FRIO:
       // Somente o sistema administrativo tem autonomia para aprovar e finalizar formalmente um atendimento preventivo.
-      // É IMPOSSÍVEL ter uma folha de atendimento finalizada pelo técnico sem assinatura.
-      // O sistema só aceita finalizar o atendimento se tiver preenchido nome do cliente, matrícula e assinatura.
+      // É IMPOSSÍVEL ter uma folha de atendimento finalizada pelo técnico sem assinatura e sem marcar 100% das máquinas do endereço.
+      // O sistema só aceita finalizar se tiver preenchido nome do cliente, matrícula, assinatura E todas as máquinas estiverem atendidas/justificadas/remoção.
       const hasSignature = Boolean(cleanedData.clientSignature && typeof cleanedData.clientSignature === 'string' && cleanedData.clientSignature.trim().length > 10);
       const hasSignee = Boolean(cleanedData.clientSigneeName && typeof cleanedData.clientSigneeName === 'string' && cleanedData.clientSigneeName.trim().length >= 3);
       const hasRegistration = Boolean(cleanedData.clientSigneeRegistration && typeof cleanedData.clientSigneeRegistration === 'string' && cleanedData.clientSigneeRegistration.trim().length >= 3);
-      const isFieldFinalized = hasSignature && hasSignee && hasRegistration;
+
+      const checklist = Array.isArray(cleanedData.checklist) ? cleanedData.checklist : [];
+      const hasUnprocessedMachines = checklist.length === 0 || checklist.some(item => {
+        if (!item) return true;
+        if (item.requestedRemoval) return false; // Isento
+        if (item.checked) return false; // Atendido
+        if (item.skipped && item.justification && item.justification.trim().length >= 3) return false; // Justificado
+        return true; // Máquina em branco / desmarcada!
+      });
+
+      const isFieldFinalized = hasSignature && hasSignee && hasRegistration && !hasUnprocessedMachines;
 
       const isFormallyApproved = Boolean(cleanedData.adminApproved || cleanedData.approvedAt || cleanedData.approvedBy);
       const recordDate = cleanedData.completionDate || cleanedData.clientSignatureDate || cleanedData.executionDate || cleanedData.plannedDate || '';
       const dateStr = typeof recordDate === 'string' ? recordDate.slice(0, 10) : '';
       const isRecentOrFuture = !dateStr || dateStr >= '2026-09-28';
 
-      // Proteção de Integridade: Um atendimento sem assinatura, nome e matrícula NUNCA pode ter status PRE_COMPLETED ou COMPLETED
-      // (a menos que já tenha sido formalmente aprovado e homologado pelo administrativo).
-      if (!isFormallyApproved && !isFieldFinalized && (cleanedData.status === MaintenanceStatus.PRE_COMPLETED || (cleanedData.status === MaintenanceStatus.COMPLETED && isRecentOrFuture))) {
-        cleanedData.status = MaintenanceStatus.PENDING;
-        cleanedData.routeStatus = MaintenanceStatus.PENDING;
-        delete cleanedData.completionDate;
+      // Se o atendimento está com status PENDING (devolvido para rascunho pelo admin ou pendente pelo técnico),
+      // limpa a data/horário de finalização do banco para reabrir a planilha no PWA do técnico mantendo os checklists e assinaturas intactos.
+      if (cleanedData.status === MaintenanceStatus.PENDING) {
+        cleanedData.completionDate = deleteField();
+        cleanedData.adminApproved = false;
+        cleanedData.approvedAt = deleteField();
+        cleanedData.approvedBy = deleteField();
       }
 
       if (isFieldFinalized && !isFormallyApproved && cleanedData.status === MaintenanceStatus.COMPLETED && isRecentOrFuture) {
@@ -1566,27 +1670,37 @@ export const dataService = {
     });
   },
 
-  async addTechnician(name: string, pin?: string) {
+  async addTechnician(name: string, pin?: string, details?: { fullName?: string; phone?: string; cpf?: string; role?: string }) {
     try {
-      const docRef = await addDoc(collection(db, COLLECTIONS.TECHNICIANS), { 
+      const payload = clean({ 
          name, 
+         fullName: details?.fullName || '',
+         phone: details?.phone || '',
+         cpf: details?.cpf || '',
+         role: details?.role || '',
          pin: pin || '', 
          createdAt: serverTimestamp() 
       });
-      await historyService.log(docRef.id, 'Technician', 'Create', { name, pin });
+      const docRef = await addDoc(collection(db, COLLECTIONS.TECHNICIANS), payload);
+      await historyService.log(docRef.id, 'Technician', 'Create', { name, pin, ...details });
       clearCache('technicians');
     } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, COLLECTIONS.TECHNICIANS);
     }
   },
 
-  async updateTechnician(id: string, name: string, pin?: string) {
+  async updateTechnician(id: string, name: string, pin?: string, details?: { fullName?: string; phone?: string; cpf?: string; role?: string }) {
     try {
-      await updateDoc(doc(db, COLLECTIONS.TECHNICIANS, id), { 
+      const payload = clean({ 
         name,
+        fullName: details?.fullName || '',
+        phone: details?.phone || '',
+        cpf: details?.cpf || '',
+        role: details?.role || '',
         pin: pin || ''
       });
-      await historyService.log(id, 'Technician', 'Update', { name, pin });
+      await updateDoc(doc(db, COLLECTIONS.TECHNICIANS, id), payload);
+      await historyService.log(id, 'Technician', 'Update', { name, pin, ...details });
       clearCache('technicians');
     } catch (e) {
       handleFirestoreError(e, OperationType.UPDATE, `${COLLECTIONS.TECHNICIANS}/${id}`);
@@ -1722,9 +1836,10 @@ export const dataService = {
 
       for (const src of sourceRecords) {
         if (!src.addressId) continue;
-        // Endereços manuais avulsos da rota temporária NUNCA são duplicados para o novo mês!
+        // Endereços manuais avulsos que NÃO estão em rota alguma são ignorados.
+        // Se estiverem atribuídos a uma rota (assignedRoute / temporaryRouteName / isTemporaryRoute), SÃO PRESERVADOS no novo mês para blindagem total das rotas!
         const isDummyTemp = String(src.addressId).startsWith('TEMP_ADDR_');
-        if (isDummyTemp) continue;
+        if (isDummyTemp && !src.assignedRoute && !src.temporaryRouteName && !src.isTemporaryRoute) continue;
         if (existingAddressIds.has(src.addressId) || seenSourceAddressIds.has(src.addressId)) continue;
         seenSourceAddressIds.add(src.addressId);
         recordsToCreate.push(src);
@@ -1758,14 +1873,16 @@ export const dataService = {
         const batch = writeBatch(db);
 
         chunk.forEach(src => {
+          const isDummyTemp = String(src.addressId).startsWith('TEMP_ADDR_');
           const addr = addresses.find(a => a.id === src.addressId);
-          if (!addr || addr.status === 'inactive' || addr.active === false || addr.isInactive === true) {
+          
+          if (!isDummyTemp && (!addr || addr.status === 'inactive' || addr.active === false || addr.isInactive === true)) {
             return;
           }
           
-          const docId = `${toMonth}_${src.addressId}`;
+          const docId = isDummyTemp ? `${toMonth}_${src.id || src.addressId}` : `${toMonth}_${src.addressId}`;
           const newRecordRef = doc(db, COLLECTIONS.RECORDS, docId);
-          const client = activeClients.find(c => c.id === addr.clientId);
+          const client = addr ? activeClients.find(c => c.id === addr.clientId) : undefined;
           // O ciclo para o novo mês duplicado será o ciclo atual + 1
           const clientCycle = client ? (client.contractCycle || 1) + 1 : 1;
 
@@ -1785,16 +1902,46 @@ export const dataService = {
             attachmentUrl: '',
             notes: addr?.notes || (src.notes && src.notes !== 'PRIORIDADE: Pendente do mês anterior' ? src.notes : ''),
             cycle: clientCycle,
-            assignedRoute: null,
-            temporaryRouteName: null,
-            isTemporaryRoute: false,
-            originalRoute: null
+            // BLINDAGEM DAS ROTAS DE VIAGEM: Preserva todas as atribuições de rotas e ordenações do mês anterior
+            assignedRoute: src.assignedRoute || null,
+            temporaryRouteName: src.temporaryRouteName || null,
+            isTemporaryRoute: src.isTemporaryRoute || false,
+            originalRoute: src.originalRoute || null,
+            itineraryOrder: src.itineraryOrder !== undefined ? src.itineraryOrder : null,
+            temporaryClient: src.temporaryClient || null,
+            temporaryStreet: src.temporaryStreet || null,
+            temporaryMachines: src.temporaryMachines || null,
+            routeCardId: src.routeCardId || null,
+            routeColor: src.routeColor || null,
+            routeNotes: src.routeNotes || null
           };
           batch.set(newRecordRef, clean(newRecord), { merge: true });
         });
 
         await batch.commit();
         totalCreated += chunk.length;
+      }
+
+      // Preserva e replica também os planejamentos de rotas mensais (RouteMonthlyPlanning)
+      try {
+        const [srcPlannings, tgtPlannings] = await Promise.all([
+          dataService.getRoutePlannings(fromMonth),
+          dataService.getRoutePlannings(toMonth)
+        ]);
+        const tgtRouteSet = new Set(tgtPlannings.map(p => p.routeName));
+        for (const plan of srcPlannings) {
+          if (plan.routeName && !tgtRouteSet.has(plan.routeName)) {
+            await dataService.upsertRoutePlanning({
+              ...plan,
+              month: toMonth,
+              plannedDate: undefined,
+              returnDate: undefined,
+              routeStatus: MaintenanceStatus.PENDING
+            });
+          }
+        }
+      } catch (pErr) {
+        console.error('Error duplicating route monthly plannings:', pErr);
       }
 
       // Increment contract cycle and update cycle dates for all active clients
@@ -1859,6 +2006,21 @@ export const dataService = {
               }
             }
 
+            if (client.billingMonth) {
+              try {
+                const parts = client.billingMonth.split('-');
+                if (parts.length === 2) {
+                  const d = new Date(Number(parts[0]), Number(parts[1]) - 1, 1);
+                  d.setMonth(d.getMonth() + monthsToAdd);
+                  const y = d.getFullYear();
+                  const m = String(d.getMonth() + 1).padStart(2, '0');
+                  updates.billingMonth = `${y}-${m}`;
+                }
+              } catch (e) {
+                console.error('Error auto-incrementing billingMonth:', e);
+              }
+            }
+
             clientBatch.update(clientRef, updates);
           });
           await clientBatch.commit();
@@ -1884,23 +2046,66 @@ export const dataService = {
     const cacheKey = clientId ? `service_calls_client_${clientId}` : 'service_calls_all';
     return getCachedData(cacheKey, async () => {
       try {
-        let q;
+        let snapshot;
         if (clientId) {
-          q = query(
+          const q = query(
             collection(db, COLLECTIONS.SERVICE_CALLS),
-            where('clientId', '==', clientId),
-            orderBy('createdAt', 'desc')
+            where('clientId', '==', clientId)
           );
+          snapshot = await getDocs(q);
         } else {
-          q = query(collection(db, COLLECTIONS.SERVICE_CALLS), orderBy('createdAt', 'desc'));
+          snapshot = await getDocs(collection(db, COLLECTIONS.SERVICE_CALLS));
         }
-        const snapshot = await getDocs(q);
-        return snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as ServiceCall));
+        const items = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as ServiceCall));
+        return items.sort((a, b) => {
+          const getTime = (val: any) => {
+            if (!val) return 0;
+            if (typeof val === 'number') return val;
+            if (val.seconds) return val.seconds * 1000;
+            if (val instanceof Date) return val.getTime();
+            if (typeof val === 'string') return new Date(val).getTime();
+            return 0;
+          };
+          return getTime(b.createdAt) - getTime(a.createdAt);
+        });
       } catch (e) {
         handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_CALLS);
         return [];
       }
     });
+  },
+
+  subscribeServiceCalls(callback: (calls: ServiceCall[]) => void, clientId?: string): () => void {
+    try {
+      let q;
+      if (clientId) {
+        q = query(collection(db, COLLECTIONS.SERVICE_CALLS), where('clientId', '==', clientId));
+      } else {
+        q = query(collection(db, COLLECTIONS.SERVICE_CALLS));
+      }
+
+      return onSnapshot(q, (snapshot) => {
+        const items = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as ServiceCall));
+        items.sort((a, b) => {
+          const getTime = (val: any) => {
+            if (!val) return 0;
+            if (typeof val === 'number') return val;
+            if (val.seconds) return val.seconds * 1000;
+            if (val instanceof Date) return val.getTime();
+            if (typeof val === 'string') return new Date(val).getTime();
+            return 0;
+          };
+          return getTime(b.createdAt) - getTime(a.createdAt);
+        });
+        clearCache('service_calls_');
+        callback(items);
+      }, (error) => {
+        console.warn('Erro na assinatura em tempo real de chamados:', error);
+      });
+    } catch (err) {
+      console.error('Falha ao inicializar listener de chamados:', err);
+      return () => {};
+    }
   },
 
   async addServiceCall(call: Omit<ServiceCall, 'id'>) {
@@ -1938,6 +2143,31 @@ export const dataService = {
       clearCache('service_calls_');
     } catch (e) {
       handleFirestoreError(e, OperationType.DELETE, `${COLLECTIONS.SERVICE_CALLS}/${id}`);
+    }
+  },
+
+  async clearOpenServiceCalls(): Promise<{ deleted: number }> {
+    try {
+      const q = query(collection(db, COLLECTIONS.SERVICE_CALLS));
+      const snapshot = await getDocs(q);
+      let deleted = 0;
+      const deletePromises: Promise<void>[] = [];
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data();
+        if (data.status !== 'resolved' && data.status !== ServiceCallStatus.RESOLVED) {
+          deletePromises.push(
+            deleteDoc(doc(db, COLLECTIONS.SERVICE_CALLS, docSnap.id)).then(() => {
+              deleted++;
+            })
+          );
+        }
+      }
+      await Promise.all(deletePromises);
+      clearCache('service_calls_');
+      return { deleted };
+    } catch (e) {
+      handleFirestoreError(e, OperationType.DELETE, COLLECTIONS.SERVICE_CALLS);
+      return { deleted: 0 };
     }
   },
 
@@ -2074,6 +2304,76 @@ export const dataService = {
       await Promise.all(promises);
     } catch (e) {
       console.error('Error sending device notification:', e);
+    }
+  },
+
+  async sendOSAttendedNotification(order: ServiceOrder) {
+    try {
+      let techName = order.openedBy || '';
+      if (!techName || techName === 'ADMIN' || techName === 'Administrativo') {
+        if (order.authenticatedTeam) {
+          const match = order.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
+          if (match && match[1]) techName = match[1].trim();
+        }
+      }
+      if (!techName || techName === 'ADMIN' || techName === 'Administrativo') {
+        techName = 'Técnico';
+      }
+
+      let addressStr = '';
+      let clientName = '';
+      if (order.addressId) {
+        try {
+          const addrSnap = await getDoc(doc(db, COLLECTIONS.ADDRESSES, order.addressId));
+          if (addrSnap.exists()) {
+            const addrData = addrSnap.data();
+            addressStr = `${addrData.street || ''}, ${addrData.number || 'S/N'}`.trim();
+            if (addrData.clientId) {
+              const clientSnap = await getDoc(doc(db, COLLECTIONS.CLIENTS, addrData.clientId));
+              if (clientSnap.exists()) {
+                clientName = clientSnap.data().name || '';
+              }
+            }
+          }
+        } catch {
+          // fallback
+        }
+      }
+
+      const osCode = order.osNumber || order.id || '';
+      const title = `Atendimento de Ordem de Serviço`;
+      const detailInfo = clientName ? ` no cliente ${clientName}` : (addressStr ? ` (${addressStr})` : '');
+      const content = `O técnico ${techName} acabou de atender uma nova ordem de serviço #${osCode}${detailInfo}.`;
+
+      const usersSnapshot = await getDocs(collection(db, COLLECTIONS.USERS));
+      const users = usersSnapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile));
+
+      const adminUsers = users.filter(u => 
+        u.role === UserRole.ADMIN || 
+        u.role === UserRole.SUPPORT || 
+        u.role === UserRole.ASSISTANT ||
+        u.role === UserRole.MANAGER
+      );
+
+      const promises = adminUsers.map(async (u) => {
+        const prefs = u.notificationPreferences || {};
+        if (prefs.notifyOSAttended !== false) {
+          await addDoc(collection(db, COLLECTIONS.NOTIFICATIONS), {
+            userId: u.uid,
+            title,
+            content,
+            type: 'os_attended',
+            callId: order.id,
+            recordId: order.id,
+            read: false,
+            createdAt: serverTimestamp()
+          });
+        }
+      });
+
+      await Promise.all(promises);
+    } catch (e) {
+      console.error('Error sending OS attended notification:', e);
     }
   },
 
@@ -2794,13 +3094,37 @@ export const dataService = {
         }
       }
 
+      // Tenta obter o nome do técnico do atendimento caso um recordId tenha sido fornecido
+      let resolvedTech = deactivatedBy || '';
+      const isGeneric = !resolvedTech || resolvedTech.startsWith('Setor Administrativo') || resolvedTech.startsWith('Administrador');
+
+      if (recordId) {
+        try {
+          const recDoc = await getDoc(doc(db, COLLECTIONS.RECORDS, recordId));
+          if (recDoc.exists()) {
+            const recData = recDoc.data();
+            const recordTech = [recData?.technician1, recData?.technician2].filter(Boolean).join(' / ') || recData?.technician1 || recData?.technician2;
+            if (recordTech && recordTech.trim().length > 0) {
+              resolvedTech = recordTech.trim();
+            }
+          }
+        } catch (recErr) {
+          console.warn('Erro ao resolver técnico do atendimento para inativação:', recErr);
+        }
+      }
+
+      // Se ainda for genérico ou vazio após verificação, define como Setor Administrativo
+      if (!resolvedTech || resolvedTech.includes('Homologação') || resolvedTech.includes('Aprovação')) {
+        resolvedTech = 'Setor Administrativo';
+      }
+
       const deactivationData: Partial<Equipment> = {
         status: 'deactivated',
         active: false,
         isDeactivated: true,
         deactivatedAt: new Date().toISOString(),
         deactivatedReason: reason || 'Máquina descontinuada / removida no atendimento',
-        deactivatedBy: deactivatedBy || 'Setor Administrativo',
+        deactivatedBy: resolvedTech,
         deactivatedFromRecordId: recordId || undefined,
         deactivatedAddressName: addressStreet || undefined,
         deactivatedClientName: clientName || undefined
@@ -3291,18 +3615,21 @@ export const dataService = {
 
   async addServiceOrder(order: ServiceOrder) {
     try {
-      // PRESERVAÇÃO RIGOROSA DA DATA DE CRIAÇÃO ORIGINAL:
+      // PRESERVAÇÃO RIGOROSA DA DATA DE CRIAÇÃO ORIGINAL E IDENTIDADE DO TÉCNICO:
       // O único critério de ordenamento da O.S. é a data de criação.
       // Edições posteriores (updatedAt) NUNCA podem alterar ou sobrescrever a data de criação original.
       let finalCreatedAt = order.createdAt;
+      let existingDocData: any = null;
 
-      // Se não veio no objeto ou se for edição de documento existente, recupera a criação original
-      if (!finalCreatedAt && order.id) {
+      // Se não veio no objeto ou se for edição de documento existente, recupera a criação original e dados prévios
+      if (order.id) {
         try {
           const existingSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id));
           if (existingSnap.exists()) {
-            const exData = existingSnap.data();
-            finalCreatedAt = exData?.createdAt || exData?.openedAt;
+            existingDocData = existingSnap.data();
+            if (!finalCreatedAt) {
+              finalCreatedAt = existingDocData?.createdAt || existingDocData?.openedAt;
+            }
           }
         } catch {
           // fallback silencioso
@@ -3314,9 +3641,27 @@ export const dataService = {
         finalCreatedAt = order.openedAt || serverTimestamp();
       }
 
+      // Garante recuperação do técnico executor titular (technicianId) caso venha em branco
+      let finalTechId = order.technicianId || existingDocData?.technicianId;
+      if (!finalTechId) {
+        const openerCandidate = order.openedBy || existingDocData?.openedBy;
+        if (openerCandidate && openerCandidate !== 'ADMIN' && openerCandidate !== 'Administrativo') {
+          finalTechId = openerCandidate;
+        } else if (order.authenticatedTeam || existingDocData?.authenticatedTeam) {
+          const teamStr = order.authenticatedTeam || existingDocData?.authenticatedTeam || '';
+          const match = teamStr.match(/Técnico:\s*([^/]+)/i);
+          if (match && match[1]) {
+            finalTechId = match[1].trim();
+          }
+        }
+      }
+
       // REGRA: Somente o sistema administrativo tem autonomia para finalizar uma O.S.
       // Caso uma O.S. venha como 'finalizada' sem adminFinalized: true, força 'aberta' e techFinalized: true
-      const normalizedInput = normalizeServiceOrderStatus(order);
+      const normalizedInput = normalizeServiceOrderStatus({
+        ...order,
+        technicianId: finalTechId || undefined
+      });
 
       const cleanOrder = clean({
         ...normalizedInput,
@@ -3326,6 +3671,15 @@ export const dataService = {
       await setDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), cleanOrder, { merge: true });
       await historyService.log(order.id, 'ServiceOrder', 'Upsert', order);
       clearCache('service_orders_');
+
+      // Dispara notificação para o sistema administrativo quando a O.S. for atendida/finalizada por técnico
+      const wasTechFinalizedBefore = Boolean(existingDocData?.techFinalized);
+      const isTechFinalizedNow = Boolean(normalizedInput.techFinalized);
+      const isNewTechOrder = !existingDocData && normalizedInput.openedBy && normalizedInput.openedBy !== 'ADMIN' && normalizedInput.openedBy !== 'Administrativo';
+
+      if ((isTechFinalizedNow && !wasTechFinalizedBefore) || (isNewTechOrder && isTechFinalizedNow)) {
+        this.sendOSAttendedNotification(normalizedInput).catch(console.error);
+      }
     } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, COLLECTIONS.SERVICE_ORDERS);
     }
@@ -3489,12 +3843,14 @@ export const dataService = {
           const seededItems: ServiceCatalogItem[] = [];
           for (const item of defaultItems) {
             try {
-              const docRef = await addDoc(collection(db, COLLECTIONS.SERVICE_CATALOG), {
+              const safeId = `catalog_${item.code}`;
+              const docRef = doc(db, COLLECTIONS.SERVICE_CATALOG, safeId);
+              await setDoc(docRef, {
                 ...clean(item),
                 createdAt: serverTimestamp(),
                 updatedAt: serverTimestamp()
-              });
-              seededItems.push({ id: docRef.id, ...item });
+              }, { merge: true });
+              seededItems.push({ id: safeId, ...item });
             } catch (seedErr) {
               console.warn('Erro ao semear item padrão:', seedErr);
             }
@@ -3503,37 +3859,152 @@ export const dataService = {
             return seededItems;
           }
         }
-        const items = snapshot.docs.map(doc => {
-          const data = doc.data() as any;
+
+        // Mapeamento e agrupamento por código para detectar e eliminar duplicidades
+        const itemsByCode = new Map<string, Array<{ id: string; data: any }>>();
+        const duplicateIdsToDelete: string[] = [];
+        const canonicalItemsToSave: ServiceCatalogItem[] = [];
+
+        snapshot.docs.forEach(docSnap => {
+          const rawData = docSnap.data() as any;
+          const codeClean = String(rawData.code ?? '').trim().toUpperCase();
+          if (!codeClean) return;
+
           // Corrige bug legado onde o item 336 (Gás R410) estava com desconto indevido de 74.61%
-          if (data.code === '336' && (data.defaultDiscountPercent === 74.61 || (data.clientPrices && Object.values(data.clientPrices).some((cp: any) => cp?.discountPercent === 74.61)))) {
-            const updatedClientPrices = { ...(data.clientPrices || {}) };
-            let hasPriceChange = false;
+          let defaultDiscount = rawData.defaultDiscountPercent;
+          const updatedClientPrices = { ...(rawData.clientPrices || {}) };
+          let hasPriceChange = false;
+          if (codeClean === '336' && (rawData.defaultDiscountPercent === 74.61 || Object.values(updatedClientPrices).some((cp: any) => cp?.discountPercent === 74.61))) {
             Object.keys(updatedClientPrices).forEach(cId => {
               if (updatedClientPrices[cId]?.discountPercent === 74.61) {
                 updatedClientPrices[cId] = { ...updatedClientPrices[cId], discountPercent: 0 };
                 hasPriceChange = true;
               }
             });
-            const newDiscount = data.defaultDiscountPercent === 74.61 ? 0 : data.defaultDiscountPercent;
-            updateDoc(doc.ref, { 
-              defaultDiscountPercent: newDiscount,
+            defaultDiscount = rawData.defaultDiscountPercent === 74.61 ? 0 : rawData.defaultDiscountPercent;
+            updateDoc(docSnap.ref, { 
+              defaultDiscountPercent: defaultDiscount,
               ...(hasPriceChange ? { clientPrices: updatedClientPrices } : {})
             }).catch(console.error);
-            return { 
-              id: doc.id, 
-              ...data, 
-              defaultDiscountPercent: newDiscount,
-              clientPrices: updatedClientPrices 
-            } as ServiceCatalogItem;
           }
-          return { id: doc.id, ...data } as ServiceCatalogItem;
+
+          const catalogItem = {
+            id: docSnap.id,
+            ...rawData,
+            code: codeClean,
+            defaultDiscountPercent: defaultDiscount,
+            clientPrices: updatedClientPrices
+          };
+
+          if (!itemsByCode.has(codeClean)) {
+            itemsByCode.set(codeClean, []);
+          }
+          itemsByCode.get(codeClean)!.push({ id: docSnap.id, data: catalogItem });
         });
-        return items.sort((a, b) => {
+
+        const deduplicatedItems: ServiceCatalogItem[] = [];
+
+        itemsByCode.forEach((group, code) => {
+          const targetSafeId = `catalog_${code.replace(/[^A-Z0-9_-]/g, '_')}`;
+
+          if (group.length === 1) {
+            const single = group[0];
+            const itemObj: ServiceCatalogItem = {
+              ...single.data,
+              id: targetSafeId,
+              code
+            };
+            deduplicatedItems.push(itemObj);
+
+            // Se o ID original do documento não era o ID canônico determinístico, agenda migração
+            if (single.id !== targetSafeId) {
+              duplicateIdsToDelete.push(single.id);
+              canonicalItemsToSave.push(itemObj);
+            }
+          } else {
+            // Mais de um item com o mesmo código encontrado! Unifica dados e escolhe a versão canônica:
+            // 1. Quem tem mais preços diferenciados por cliente configurados
+            // 2. Quem tem categoria ou descrição mais longa
+            // 3. Quem foi atualizado mais recentemente
+            group.sort((a, b) => {
+              const cpA = Object.keys(a.data.clientPrices || {}).length;
+              const cpB = Object.keys(b.data.clientPrices || {}).length;
+              if (cpA !== cpB) return cpB - cpA;
+
+              const descA = (a.data.description || '').length;
+              const descB = (b.data.description || '').length;
+              if (descA !== descB) return descB - descA;
+
+              const timeA = a.data.updatedAt?.toMillis?.() || a.data.createdAt?.toMillis?.() || 0;
+              const timeB = b.data.updatedAt?.toMillis?.() || b.data.createdAt?.toMillis?.() || 0;
+              return timeB - timeA;
+            });
+
+            // Mesclar todos os preços por contrato de todas as cópias duplicadas para não perder nada
+            const mergedClientPrices: Record<string, ClientPriceOverride> = {};
+            for (let i = group.length - 1; i >= 0; i--) {
+              Object.assign(mergedClientPrices, group[i].data.clientPrices || {});
+            }
+
+            const canonicalBase = group[0].data;
+            const unifiedCanonical: ServiceCatalogItem = {
+              ...canonicalBase,
+              id: targetSafeId,
+              code,
+              clientPrices: mergedClientPrices
+            };
+
+            deduplicatedItems.push(unifiedCanonical);
+            canonicalItemsToSave.push(unifiedCanonical);
+
+            // Todos os IDs de documentos duplicados são marcados para exclusão definitiva
+            group.forEach(gItem => {
+              if (gItem.id !== targetSafeId) {
+                duplicateIdsToDelete.push(gItem.id);
+              }
+            });
+          }
+        });
+
+        // Limpeza assíncrona garantida no Firestore das duplicatas encontradas
+        if (duplicateIdsToDelete.length > 0 || canonicalItemsToSave.length > 0) {
+          (async () => {
+            try {
+              // 1. Grava os itens canônicos com ID determinístico
+              for (let i = 0; i < canonicalItemsToSave.length; i += 400) {
+                const chunk = canonicalItemsToSave.slice(i, i + 400);
+                const batch = writeBatch(db);
+                chunk.forEach(item => {
+                  const docRef = doc(db, COLLECTIONS.SERVICE_CATALOG, item.id);
+                  batch.set(docRef, clean({
+                    ...item,
+                    updatedAt: serverTimestamp()
+                  }), { merge: true });
+                });
+                await batch.commit();
+              }
+
+              // 2. Remove todos os documentos duplicados com IDs antigos/redundantes
+              for (let i = 0; i < duplicateIdsToDelete.length; i += 400) {
+                const chunk = duplicateIdsToDelete.slice(i, i + 400);
+                const batch = writeBatch(db);
+                chunk.forEach(dupId => {
+                  batch.delete(doc(db, COLLECTIONS.SERVICE_CATALOG, dupId));
+                });
+                await batch.commit();
+              }
+              console.log(`[getServiceCatalogItems] Unificados ${duplicateIdsToDelete.length} itens duplicados no Firestore com sucesso.`);
+            } catch (cleanupErr) {
+              console.error('Erro na limpeza/unificação de duplicatas do catálogo:', cleanupErr);
+            }
+          })();
+        }
+
+        return deduplicatedItems.sort((a, b) => {
           const orderA = a.order !== undefined && a.order !== null ? a.order : 999999;
           const orderB = b.order !== undefined && b.order !== null ? b.order : 999999;
           if (orderA !== orderB) return orderA - orderB;
-          return (a.code || '').localeCompare(b.code || '', undefined, { numeric: true });
+          return String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true });
         });
       } catch (e) {
         console.error('Error fetching service catalog items:', e);
@@ -3542,11 +4013,121 @@ export const dataService = {
     });
   },
 
+  async deduplicateServiceCatalogItems(): Promise<{ removedCount: number; remainingCount: number }> {
+    try {
+      const q = query(collection(db, COLLECTIONS.SERVICE_CATALOG));
+      const snapshot = await getDocs(q);
+      const itemsByCode = new Map<string, Array<{ id: string; data: any }>>();
+      const duplicateIds: string[] = [];
+      const canonicalItemsToSave: ServiceCatalogItem[] = [];
+
+      snapshot.docs.forEach(docSnap => {
+        const data = docSnap.data();
+        const code = String(data.code ?? '').trim().toUpperCase();
+        if (!code) return;
+        if (!itemsByCode.has(code)) itemsByCode.set(code, []);
+        itemsByCode.get(code)!.push({ id: docSnap.id, data: { id: docSnap.id, ...data, code } });
+      });
+
+      itemsByCode.forEach((group, code) => {
+        const targetSafeId = `catalog_${code.replace(/[^A-Z0-9_-]/g, '_')}`;
+
+        if (group.length > 1) {
+          group.sort((a, b) => {
+            const cpA = Object.keys(a.data.clientPrices || {}).length;
+            const cpB = Object.keys(b.data.clientPrices || {}).length;
+            if (cpA !== cpB) return cpB - cpA;
+            return (b.data.description || '').length - (a.data.description || '').length;
+          });
+
+          // Unifica clientPrices de todas as instâncias
+          const mergedPrices: Record<string, ClientPriceOverride> = {};
+          for (let i = group.length - 1; i >= 0; i--) {
+            Object.assign(mergedPrices, group[i].data.clientPrices || {});
+          }
+
+          const canonical = {
+            ...group[0].data,
+            id: targetSafeId,
+            code,
+            clientPrices: mergedPrices
+          };
+          canonicalItemsToSave.push(canonical);
+
+          group.forEach(gItem => {
+            if (gItem.id !== targetSafeId) {
+              duplicateIds.push(gItem.id);
+            }
+          });
+        } else {
+          const single = group[0];
+          if (single.id !== targetSafeId) {
+            duplicateIds.push(single.id);
+            canonicalItemsToSave.push({ ...single.data, id: targetSafeId, code });
+          }
+        }
+      });
+
+      // Salva os canônicos primeiro
+      if (canonicalItemsToSave.length > 0) {
+        for (let i = 0; i < canonicalItemsToSave.length; i += 400) {
+          const chunk = canonicalItemsToSave.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach(item => {
+            batch.set(doc(db, COLLECTIONS.SERVICE_CATALOG, item.id), clean({
+              ...item,
+              updatedAt: serverTimestamp()
+            }), { merge: true });
+          });
+          await batch.commit();
+        }
+      }
+
+      // Exclui duplicatas antigas
+      if (duplicateIds.length > 0) {
+        for (let i = 0; i < duplicateIds.length; i += 400) {
+          const chunk = duplicateIds.slice(i, i + 400);
+          const batch = writeBatch(db);
+          chunk.forEach(id => {
+            batch.delete(doc(db, COLLECTIONS.SERVICE_CATALOG, id));
+          });
+          await batch.commit();
+        }
+      }
+
+      clearCache('service_catalog_items');
+      return { removedCount: duplicateIds.length, remainingCount: itemsByCode.size };
+    } catch (e) {
+      console.error('Error deduplicating service catalog:', e);
+      throw e;
+    }
+  },
+
   async addServiceCatalogItem(item: Omit<ServiceCatalogItem, 'id'> & { id?: string }) {
     try {
+      const codeClean = String(item.code ?? '').trim().toUpperCase();
+      if (!codeClean) {
+        throw new Error('O código do item é obrigatório.');
+      }
+
+      const safeId = `catalog_${codeClean.replace(/[^A-Z0-9_-]/g, '_')}`;
+
+      // Validação estrita: Consulta catálogo em busca de qualquer item com o mesmo código
+      const q = query(collection(db, COLLECTIONS.SERVICE_CATALOG));
+      const existingSnap = await getDocs(q);
+      const conflictDoc = existingSnap.docs.find(d => {
+        const dCode = String(d.data().code ?? '').trim().toUpperCase();
+        return dCode === codeClean && d.id !== safeId && (!item.id || d.id !== item.id);
+      });
+
+      if (conflictDoc) {
+        const conflictData = conflictDoc.data();
+        throw new Error(`Já existe um produto ou serviço cadastrado com o código #${codeClean} ("${conflictData.description || ''}"). Cada item deve ter um código único.`);
+      }
+
       const cleanData = clean({
         ...item,
-        code: (item.code || '').trim().toUpperCase(),
+        code: codeClean,
         description: (item.description || '').trim().toUpperCase(),
         unit: (item.unit || 'UN').trim().toUpperCase(),
         type: item.type || 'service',
@@ -3560,16 +4141,11 @@ export const dataService = {
         updatedAt: serverTimestamp()
       });
       
-      let id = item.id;
-      if (id) {
-        await setDoc(doc(db, COLLECTIONS.SERVICE_CATALOG, id), cleanData, { merge: true });
-      } else {
-        const docRef = await addDoc(collection(db, COLLECTIONS.SERVICE_CATALOG), cleanData);
-        id = docRef.id;
-      }
-      await historyService.log(id, 'ServiceCatalogItem', 'Create', { code: item.code, description: item.description });
+      // Utiliza ID determinístico baseado no código para blindagem contra criação de múltiplos documentos
+      await setDoc(doc(db, COLLECTIONS.SERVICE_CATALOG, safeId), cleanData, { merge: true });
+      await historyService.log(safeId, 'ServiceCatalogItem', 'Create', { code: item.code, description: item.description });
       clearCache('service_catalog_items');
-      return id;
+      return safeId;
     } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, COLLECTIONS.SERVICE_CATALOG);
     }
@@ -3577,9 +4153,53 @@ export const dataService = {
 
   async updateServiceCatalogItem(id: string, data: Partial<ServiceCatalogItem>) {
     try {
+      let targetId = id;
+      if (data.code) {
+        const codeClean = String(data.code).trim().toUpperCase();
+        const newSafeId = `catalog_${codeClean.replace(/[^A-Z0-9_-]/g, '_')}`;
+
+        // Validação estrita contra outros itens usando o mesmo código
+        const q = query(collection(db, COLLECTIONS.SERVICE_CATALOG));
+        const existingSnap = await getDocs(q);
+        const conflictingDoc = existingSnap.docs.find(d => {
+          const dCode = String(d.data().code ?? '').trim().toUpperCase();
+          return dCode === codeClean && d.id !== id && d.id !== newSafeId;
+        });
+
+        if (conflictingDoc) {
+          const conflictingData = conflictingDoc.data();
+          throw new Error(`O código #${codeClean} já está cadastrado para outro item ("${conflictingData.description || ''}"). Cada produto ou serviço deve ter um código único.`);
+        }
+
+        // Se o código mudou e o ID atual era o safeId antigo, migra para o novo safeId
+        if (id !== newSafeId) {
+          const oldDocSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_CATALOG, id));
+          const oldData = oldDocSnap.exists() ? oldDocSnap.data() : {};
+          
+          const cleanData = clean({
+            ...oldData,
+            ...data,
+            code: codeClean,
+            ...(data.description ? { description: data.description.trim().toUpperCase() } : {}),
+            ...(data.unit ? { unit: data.unit.trim().toUpperCase() } : {}),
+            ...(data.category !== undefined ? { category: data.category ? data.category.trim().toUpperCase() : '' } : {}),
+            ...(data.defaultPrice !== undefined ? { defaultPrice: Number(data.defaultPrice) || 0 } : {}),
+            ...(data.defaultDiscountPercent !== undefined ? { defaultDiscountPercent: Number(data.defaultDiscountPercent) || 0 } : {}),
+            ...(data.order !== undefined ? { order: Number(data.order) } : {}),
+            updatedAt: serverTimestamp()
+          });
+
+          await setDoc(doc(db, COLLECTIONS.SERVICE_CATALOG, newSafeId), cleanData, { merge: true });
+          await deleteDoc(doc(db, COLLECTIONS.SERVICE_CATALOG, id));
+          await historyService.log(newSafeId, 'ServiceCatalogItem', 'Update', { ...data, oldId: id });
+          clearCache('service_catalog_items');
+          return;
+        }
+      }
+
       const cleanData = clean({
         ...data,
-        ...(data.code ? { code: data.code.trim().toUpperCase() } : {}),
+        ...(data.code ? { code: String(data.code).trim().toUpperCase() } : {}),
         ...(data.description ? { description: data.description.trim().toUpperCase() } : {}),
         ...(data.unit ? { unit: data.unit.trim().toUpperCase() } : {}),
         ...(data.category !== undefined ? { category: data.category ? data.category.trim().toUpperCase() : '' } : {}),

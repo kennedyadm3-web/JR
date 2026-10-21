@@ -49,10 +49,13 @@ export interface ServiceCall {
   attachmentUrl?: string; // Legacy
   attachmentUrl1?: string;
   attachmentUrl2?: string;
+  attachmentUrl3?: string;
+  attachmentUrl4?: string;
   linkUrl?: string;
   attachments?: Attachment[];
   forecastDate?: string;
   comments?: ServiceCallComment[];
+  isWorkshop?: boolean; // Indica se o equipamento/máquina se encontra na oficina da empresa
   // Denormalized for reports
   clientName?: string;
   addressLabel?: string;
@@ -89,6 +92,7 @@ export interface NotificationPreferences {
   notifyTaskAssigned?: boolean;
   notifyTaskComment?: boolean;
   notifyTaskAttachment?: boolean;
+  notifyOSAttended?: boolean;
   notifyShowPopups?: boolean;
   notifySoundEnabled?: boolean;
   notificationSoundVolume?: number;
@@ -99,7 +103,7 @@ export interface NotificationItem {
   userId: string;
   title: string;
   content: string;
-  type: 'new_call' | 'new_comment' | 'call_resolved' | 'task_assigned' | 'task_comment' | 'task_attachment' | 'tech_start' | 'tech_finish';
+  type: 'new_call' | 'new_comment' | 'call_resolved' | 'task_assigned' | 'task_comment' | 'task_attachment' | 'tech_start' | 'tech_finish' | 'os_attended' | 'tech_os_attended';
   callId?: string;
   taskId?: string;
   recordId?: string;
@@ -119,6 +123,10 @@ export interface UserProfile {
   notificationPreferences?: NotificationPreferences;
   lastLogin?: any;
   lastActive?: any;
+  isApproved?: boolean;
+  approvedBy?: string;
+  approvedAt?: any;
+  status?: string;
 }
 export interface Client {
   id: string;
@@ -146,6 +154,7 @@ export interface Client {
   cycleEndDate?: string;
   cyclePeriod?: 'monthly' | 'bimonthly' | 'quarterly' | 'custom';
   cycleRefFormat?: 'number_only' | 'full_period' | 'number_month' | 'period_only';
+  billingMonth?: string; // Mês da cobrança / competência cobrada na folha de atendimento (ex: "2026-09" exibido como "SET/2026")
   sharepointFolderLink?: string;
   sharepointFolderId?: string;
   email?: string;
@@ -247,6 +256,7 @@ export interface MaintenanceRecord {
   clientSigneeName?: string;
   clientSigneeRegistration?: string;
   cycle?: number;
+  billingMonth?: string; // Mês da cobrança / competência cobrada na folha de atendimento (ex: "2026-09" exibido como "SET/2026")
   completionLatitude?: number;
   completionLongitude?: number;
   completionAccuracy?: number;
@@ -333,7 +343,11 @@ export interface RouteExpense {
 
 export interface Technician {
   id: string;
-  name: string;
+  name: string; // Nome curto/exibição no cronograma (ex: "JAILSON")
+  fullName?: string; // Nome completo do técnico (ex: "Jailson Silva dos Santos")
+  phone?: string; // Telefone / WhatsApp (ex: "(82) 99999-8888")
+  cpf?: string; // CPF (ex: "000.000.000-00")
+  role?: string; // Cargo / Função (ex: "Técnico de Refrigeração")
   createdAt?: any;
   pricePerMachine?: number;
   serviceOrderPrices?: Record<string, number>;

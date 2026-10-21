@@ -32,7 +32,10 @@ import {
   Receipt,
   Route as RouteIcon,
   ListPlus,
-  Check
+  Check,
+  ListOrdered,
+  Wrench,
+  Flame
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { MaintenanceRecord, Address, Client, MaintenanceStatus, RouteConfiguration, RouteType, Technician, UserRole, RouteCostItem, MuralPost, UserProfile, ServiceCall, TravelCard, RouteMonthlyPlanning } from '../types';
@@ -948,17 +951,37 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       });
     }
     
+    const getAddressEffectiveOrder = (addrId: string, rec?: MaintenanceRecord | null) => {
+      const customVal = orderValueMap[addrId];
+      if (customVal !== undefined && customVal !== null && customVal !== '') {
+        const n = parseInt(String(customVal), 10);
+        if (!isNaN(n)) return n;
+      }
+      if (rec?.itineraryOrder !== undefined && rec?.itineraryOrder !== null) {
+        const n = parseInt(String(rec.itineraryOrder), 10);
+        if (!isNaN(n)) return n;
+      }
+      return 999999;
+    };
+
+    const isRecordInRoute = (r: MaintenanceRecord | undefined, addr: Address) => {
+      if (!r || r.month !== month || r.addressId !== addr.id) return false;
+      if (r.assignedRoute === currentRouteName || r.temporaryRouteName === currentRouteName) return true;
+      if (currentConfig) {
+        if (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName || (currentConfig.routeNumber && r.assignedRoute === currentConfig.routeNumber)) return true;
+        if (r.temporaryRouteName === currentConfig.id || r.temporaryRouteName === currentConfig.routeName) return true;
+      }
+      if (!r.assignedRoute && !r.isTemporaryRoute) {
+        const baseRoute = addr.route || 'Sem Rota';
+        if (baseRoute === currentRouteName) return true;
+        if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName || (currentConfig.routeNumber && baseRoute.trim() === currentConfig.routeNumber.trim()))) return true;
+      }
+      return false;
+    };
+
     return [...baseAddresses].sort((a, b) => {
-      const recA = records.find(r => 
-        r.addressId === a.id && 
-        r.month === month && 
-        (r.assignedRoute || (r.isTemporaryRoute ? r.temporaryRouteName : (a.route || 'Sem Rota'))) === currentRouteName
-      );
-      const recB = records.find(r => 
-        r.addressId === b.id && 
-        r.month === month && 
-        (r.assignedRoute || (r.isTemporaryRoute ? r.temporaryRouteName : (b.route || 'Sem Rota'))) === currentRouteName
-      );
+      const recA = records.find(r => isRecordInRoute(r, a));
+      const recB = records.find(r => isRecordInRoute(r, b));
       
       const isIncA = !!recA;
       const isIncB = !!recB;
@@ -969,9 +992,9 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       }
       
       if (isIncA && isIncB) {
-        // If both are included, sort by itineraryOrder
-        const orderA = recA?.itineraryOrder !== undefined && recA?.itineraryOrder !== null ? recA.itineraryOrder : 999999;
-        const orderB = recB?.itineraryOrder !== undefined && recB?.itineraryOrder !== null ? recB.itineraryOrder : 999999;
+        // Ordenamento numérico estrito de acordo com o número digitado pelo usuário
+        const orderA = getAddressEffectiveOrder(a.id, recA);
+        const orderB = getAddressEffectiveOrder(b.id, recB);
         
         if (orderA !== orderB) {
           return orderA - orderB;
@@ -983,7 +1006,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       const clientB = clients.find(c => c.id === b.clientId)?.name || '';
       return clientA.localeCompare(clientB, 'pt-BR');
     });
-  }, [addresses, addressSelectionModal.isOpen, addressSelectionModal.routeName, records, month, clients, showOtherRoutes, addressSearchQuery, routeConfigs]);
+  }, [addresses, addressSelectionModal.isOpen, addressSelectionModal.routeName, records, month, clients, showOtherRoutes, addressSearchQuery, routeConfigs, orderValueMap]);
 
   // Validação em tempo real de ID/Número único exclusivo para rotas
   const routeNumberConflict = useMemo(() => {
@@ -1678,10 +1701,25 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
             setRecords(prev => [...prev.filter(r => !(r.addressId === addressId && r.month === month)), { id, ...recordToCreate } as MaintenanceRecord]);
         }
       } else {
-        const record = routeStats[routeName].records.find(r => r.addressId === addressId);
-        if (record && record.id) {
-          await dataService.deleteRecord(record.id);
-          setRecords(prev => prev.filter(r => r.id !== record.id));
+        // Busca direta no estado de registros por qualquer vínculo para este endereço e mês
+        const targetRecords = records.filter(r => 
+          r.addressId === addressId && 
+          r.month === month
+        );
+
+        if (targetRecords.length > 0) {
+          const idsToDelete = new Set(targetRecords.map(r => r.id).filter(Boolean));
+          for (const rec of targetRecords) {
+            if (rec.id) {
+              await dataService.deleteRecord(rec.id);
+            }
+          }
+          setRecords(prev => prev.filter(r => !idsToDelete.has(r.id)));
+        } else {
+          // Contingência: remove documento determinístico e limpa do estado local
+          const canonicalId = `${month}_${addressId}`;
+          await dataService.deleteRecord(canonicalId);
+          setRecords(prev => prev.filter(r => r.id !== canonicalId && !(r.addressId === addressId && r.month === month)));
         }
       }
     } catch (error) {
@@ -1689,29 +1727,160 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
     }
   };
 
-  const handleUpdateAddressOrder = async (routeName: string, addressId: string, orderVal: string) => {
+  const handleUpdateAddressOrder = async (routeName: string, addressId: string, orderVal: string | number) => {
     try {
-      const parsed = orderVal === '' ? null : parseInt(orderVal, 10);
-      const record = records.find(r => 
-        r.addressId === addressId && 
-        r.month === month && 
-        (r.assignedRoute || (r.isTemporaryRoute ? r.temporaryRouteName : (addresses.find(a => a.id === addressId)?.route || 'Sem Rota'))) === routeName
-      );
+      const parsed = (orderVal === '' || orderVal === null || orderVal === undefined) ? null : parseInt(String(orderVal), 10);
+      const numOrder = (parsed === null || isNaN(parsed)) ? null : parsed;
+
+      // Atualiza o mapa local de valores imediatamente para resposta visual instantânea
+      setOrderValueMap(prev => ({ ...prev, [addressId]: numOrder !== null ? numOrder : '' }));
+
+      const currentConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
+
+      // Localiza o registro do endereço para este mês com correspondência abrangente
+      const record = records.find(r => {
+        if (r.addressId !== addressId || r.month !== month) return false;
+        if (r.assignedRoute === routeName || r.temporaryRouteName === routeName) return true;
+        if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName)) return true;
+        const addr = addresses.find(a => a.id === addressId);
+        const baseRoute = addr?.route || 'Sem Rota';
+        if (!r.assignedRoute && !r.isTemporaryRoute) {
+          if (baseRoute === routeName) return true;
+          if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName)) return true;
+        }
+        return true;
+      });
       
       if (record && record.id) {
         const { address, client, ...pureRecord } = record as any;
         const updatedRecord = {
           ...pureRecord,
-          itineraryOrder: parsed === null ? null : parsed
+          itineraryOrder: numOrder
         };
         
         // Optimistic update of local state
-        setRecords(prev => prev.map(r => r.id === record.id ? { ...r, itineraryOrder: parsed === null ? undefined : parsed } : r));
+        setRecords(prev => prev.map(r => r.id === record.id ? { ...r, itineraryOrder: numOrder === null ? undefined : numOrder } : r));
         
         await dataService.upsertRecord(updatedRecord as MaintenanceRecord);
+      } else if (numOrder !== null) {
+        const addressObj = addresses.find(a => a.id === addressId);
+        const isFromOtherRoute = addressObj && (addressObj.route || 'Sem Rota') !== routeName;
+        const existingRouteData = routeStats[routeName];
+
+        const recordToCreate: Partial<MaintenanceRecord> = {
+          month: month,
+          addressId: addressId,
+          scheduledWeek: 1,
+          status: MaintenanceStatus.PENDING,
+          technician1: currentConfig?.technician1 || '',
+          technician2: currentConfig?.technician2 || '',
+          itineraryOrder: numOrder,
+          ...(isFromOtherRoute ? { assignedRoute: routeName } : {}),
+          ...(existingRouteData ? {
+            plannedDate: existingRouteData.plannedDate,
+            routeColor: existingRouteData.routeColor,
+            routeNotes: existingRouteData.routeNotes
+          } : {})
+        };
+        const newId = await dataService.upsertRecord(recordToCreate as any);
+        if (newId) {
+          setRecords(prev => [...prev.filter(r => !(r.addressId === addressId && r.month === month)), { id: newId, ...recordToCreate } as MaintenanceRecord]);
+        }
       }
     } catch (e) {
       console.error("Erro ao atualizar ordem do endereço:", e);
+    }
+  };
+
+  const handleRenumberSequentially = async (routeName: string) => {
+    try {
+      const currentConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
+      const isRecordInThisRoute = (r: MaintenanceRecord | undefined, addr: Address) => {
+        if (!r || r.month !== month || r.addressId !== addr.id) return false;
+        if (r.assignedRoute === routeName || r.temporaryRouteName === routeName) return true;
+        if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName)) return true;
+        if (!r.assignedRoute && !r.isTemporaryRoute) {
+          const baseRoute = addr.route || 'Sem Rota';
+          if (baseRoute === routeName) return true;
+          if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName)) return true;
+        }
+        return false;
+      };
+
+      const includedAddresses = sortedAddresses.filter(addr => {
+        const rec = records.find(r => isRecordInThisRoute(r, addr));
+        return !!rec;
+      });
+
+      const newMap: Record<string, number> = {};
+      includedAddresses.forEach((addr, idx) => {
+        newMap[addr.id] = idx + 1;
+      });
+
+      setOrderValueMap(prev => ({ ...prev, ...newMap }));
+
+      for (let i = 0; i < includedAddresses.length; i++) {
+        const addr = includedAddresses[i];
+        await handleUpdateAddressOrder(routeName, addr.id, i + 1);
+      }
+    } catch (e) {
+      console.error("Erro ao renumerar sequencialmente:", e);
+    }
+  };
+
+  const handleMoveAddressOrder = async (routeName: string, addressId: string, direction: 'up' | 'down') => {
+    try {
+      const currentConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
+      const isRecordInThisRoute = (r: MaintenanceRecord | undefined, addr: Address) => {
+        if (!r || r.month !== month || r.addressId !== addr.id) return false;
+        if (r.assignedRoute === routeName || r.temporaryRouteName === routeName) return true;
+        if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName)) return true;
+        if (!r.assignedRoute && !r.isTemporaryRoute) {
+          const baseRoute = addr.route || 'Sem Rota';
+          if (baseRoute === routeName) return true;
+          if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName)) return true;
+        }
+        return false;
+      };
+
+      const includedAddresses = sortedAddresses.filter(addr => {
+        const rec = records.find(r => isRecordInThisRoute(r, addr));
+        return !!rec;
+      });
+
+      const currentIndex = includedAddresses.findIndex(a => a.id === addressId);
+      if (currentIndex === -1) return;
+
+      const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+      if (targetIndex < 0 || targetIndex >= includedAddresses.length) return;
+
+      const targetAddr = includedAddresses[targetIndex];
+
+      const currentRec = records.find(r => r.addressId === addressId && r.month === month);
+      const targetRec = records.find(r => r.addressId === targetAddr.id && r.month === month);
+
+      const currentOrder = orderValueMap[addressId] !== undefined && orderValueMap[addressId] !== ''
+        ? Number(orderValueMap[addressId])
+        : (currentRec?.itineraryOrder ?? (currentIndex + 1));
+
+      const targetOrder = orderValueMap[targetAddr.id] !== undefined && orderValueMap[targetAddr.id] !== ''
+        ? Number(orderValueMap[targetAddr.id])
+        : (targetRec?.itineraryOrder ?? (targetIndex + 1));
+
+      // Se os valores de ordem forem iguais, separa com um offset
+      const newCurrentOrder = currentOrder === targetOrder ? (direction === 'up' ? targetOrder - 1 : targetOrder + 1) : targetOrder;
+      const newTargetOrder = currentOrder;
+
+      setOrderValueMap(prev => ({
+        ...prev,
+        [addressId]: newCurrentOrder,
+        [targetAddr.id]: newTargetOrder
+      }));
+
+      await handleUpdateAddressOrder(routeName, addressId, newCurrentOrder);
+      await handleUpdateAddressOrder(routeName, targetAddr.id, newTargetOrder);
+    } catch (e) {
+      console.error("Erro ao mover ordem do endereço:", e);
     }
   };
 
@@ -1787,15 +1956,29 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
           setRecords(prev => [...prev.filter(r => !(newAddressIds.has(r.addressId) && r.month === month)), ...newRecords as MaintenanceRecord[]]);
         }
       } else {
-        const recordsToDelete = routeStats[routeName].records;
-        const promises = recordsToDelete.map(async record => {
-          if (record.id) {
-            await dataService.deleteRecord(record.id);
-          }
-        });
-        await Promise.all(promises);
-        const deletedIds = recordsToDelete.map(r => r.id);
-        setRecords(prev => prev.filter(r => !deletedIds.includes(r.id)));
+        const routeConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
+        const routeAddressIds = new Set(addresses.filter(a => 
+          (a.route || 'Sem Rota') === routeName || 
+          (routeConfig && (a.route === routeConfig.id || a.route === routeConfig.routeName))
+        ).map(a => a.id));
+
+        const recordsToDelete = records.filter(r => 
+          r.month === month && (
+            r.assignedRoute === routeName ||
+            r.temporaryRouteName === routeName ||
+            (routeAddressIds.has(r.addressId) && (!r.assignedRoute || r.assignedRoute === routeName))
+          )
+        );
+
+        if (recordsToDelete.length > 0) {
+          const deletedIds = new Set(recordsToDelete.map(r => r.id).filter(Boolean));
+          await Promise.all(recordsToDelete.map(async record => {
+            if (record.id) {
+              await dataService.deleteRecord(record.id);
+            }
+          }));
+          setRecords(prev => prev.filter(r => !deletedIds.has(r.id)));
+        }
       }
     } catch (error) {
       console.error(error);
@@ -1867,7 +2050,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
           )}
         >
           <CreditCard className="w-4 h-4" />
-          <span>Prestação de Contas (Cartão)</span>
+          <span>Previsão de gastos</span>
         </button>
       </div>
 
@@ -3263,17 +3446,28 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                   </div>
                   <div className="flex flex-col md:flex-row items-stretch md:items-center gap-4 shrink-0 w-full lg:w-auto">
                     <div className="flex flex-col gap-1 w-full md:w-auto">
+                      <div className="flex items-center gap-1.5 w-full">
+                        <button
+                          onClick={() => handleToggleAllAddressesInRoute(addressSelectionModal.routeName, true)}
+                          className="flex-1 text-[10px] font-bold uppercase tracking-widest text-emerald-600 hover:text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg transition-colors text-center"
+                        >
+                          Selecionar Todos
+                        </button>
+                        <button
+                          onClick={() => handleToggleAllAddressesInRoute(addressSelectionModal.routeName, false)}
+                          className="flex-1 text-[10px] font-bold uppercase tracking-widest text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg transition-colors text-center"
+                        >
+                          Desmarcar Todos
+                        </button>
+                      </div>
                       <button
-                        onClick={() => handleToggleAllAddressesInRoute(addressSelectionModal.routeName, true)}
-                        className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 hover:text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-1.5 rounded-lg transition-colors text-center w-full md:w-auto"
+                        type="button"
+                        onClick={() => handleRenumberSequentially(addressSelectionModal.routeName)}
+                        title="Reorganiza as ordens de 1 em 1 seguindo rigorosamente a lista ordenada atual"
+                        className="text-[10px] font-black uppercase tracking-wider text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-3 py-1.5 rounded-lg transition-all text-center flex items-center justify-center gap-1.5 shadow-sm"
                       >
-                        Selecionar Todos
-                      </button>
-                      <button
-                        onClick={() => handleToggleAllAddressesInRoute(addressSelectionModal.routeName, false)}
-                        className="text-[10px] font-bold uppercase tracking-widest text-red-600 hover:text-red-700 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg transition-colors text-center w-full md:w-auto"
-                      >
-                        Desmarcar Todos
+                        <ListOrdered className="w-3.5 h-3.5 text-blue-600" />
+                        Renumerar Ordem (1, 2, 3...)
                       </button>
                     </div>
                     <div className="flex flex-row md:flex-col gap-4 md:gap-1.5 items-center md:items-start pt-2 md:pt-0 border-t md:border-t-0 md:border-l border-gray-200 md:pl-4 justify-around w-full md:w-auto">
@@ -3325,11 +3519,19 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                 {sortedAddresses.map(addr => {
                   const client = clients.find(c => c.id === addr.clientId);
                   const currentRouteName = addressSelectionModal.routeName;
-                  const record = records.find(r => 
-                    r.addressId === addr.id && 
-                    r.month === month && 
-                    (r.assignedRoute || (r.isTemporaryRoute ? r.temporaryRouteName : (addr.route || 'Sem Rota'))) === currentRouteName
-                  );
+                  const currentConfig = routeConfigs.find(c => c.id === currentRouteName || c.routeName === currentRouteName);
+                  const record = records.find(r => {
+                    if (!r || r.month !== month || r.addressId !== addr.id) return false;
+                    if (r.assignedRoute === currentRouteName || r.temporaryRouteName === currentRouteName) return true;
+                    if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName || (currentConfig.routeNumber && r.assignedRoute === currentConfig.routeNumber))) return true;
+                    if (r.temporaryRouteName === currentConfig?.id || r.temporaryRouteName === currentConfig?.routeName) return true;
+                    if (!r.assignedRoute && !r.isTemporaryRoute) {
+                      const baseRoute = addr.route || 'Sem Rota';
+                      if (baseRoute === currentRouteName) return true;
+                      if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName || (currentConfig.routeNumber && baseRoute.trim() === currentConfig.routeNumber.trim()))) return true;
+                    }
+                    return false;
+                  });
                   const isIncluded = !!record;
                   const tempAssignedRecord = records.find(r => 
                     r.addressId === addr.id && 
@@ -3338,7 +3540,8 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                     (r.assignedRoute || r.temporaryRouteName) &&
                     (r.assignedRoute || r.temporaryRouteName) !== currentRouteName
                   );
-                  const hasOpenCall = serviceCalls.some(c => c.addressId === addr.id && c.status !== 'resolved');
+                  const openCall = serviceCalls.find(c => c.addressId === addr.id && c.status !== 'resolved');
+                  const hasOpenCall = !!openCall;
                   return (
                     <div 
                       key={addr.id} 
@@ -3357,39 +3560,69 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                       />
 
                       {/* Coluna de Ordenamento para Impressão */}
-                      <div className="flex flex-col items-center gap-0.5 shrink-0 min-w-[36px]">
+                      <div className="flex flex-col items-center gap-0.5 shrink-0 min-w-[48px]">
                         <span className="text-[8px] font-black uppercase tracking-wider text-gray-400 print:hidden leading-none mb-1">Ordem</span>
                         
-                        {/* Screen mode: Interactive Input */}
-                        <input 
-                          type="number"
-                          min="1"
-                          disabled={!isIncluded}
-                          placeholder="-"
-                          value={orderValueMap[addr.id] !== undefined ? orderValueMap[addr.id] : (record?.itineraryOrder !== undefined && record?.itineraryOrder !== null ? record.itineraryOrder : '')}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setOrderValueMap(prev => ({ ...prev, [addr.id]: val }));
-                          }}
-                          onBlur={() => {
-                            const val = orderValueMap[addr.id] !== undefined ? orderValueMap[addr.id] : (record?.itineraryOrder !== undefined && record?.itineraryOrder !== null ? record.itineraryOrder : '');
-                            handleUpdateAddressOrder(addressSelectionModal.routeName, addr.id, String(val));
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
+                        {/* Screen mode: Interactive Input with Up/Down buttons */}
+                        <div className="print:hidden flex items-center gap-1">
+                          <input 
+                            type="number"
+                            min="1"
+                            disabled={!isIncluded}
+                            placeholder="-"
+                            value={orderValueMap[addr.id] !== undefined ? orderValueMap[addr.id] : (record?.itineraryOrder !== undefined && record?.itineraryOrder !== null ? record.itineraryOrder : '')}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setOrderValueMap(prev => ({ ...prev, [addr.id]: val }));
+                            }}
+                            onBlur={() => {
                               const val = orderValueMap[addr.id] !== undefined ? orderValueMap[addr.id] : (record?.itineraryOrder !== undefined && record?.itineraryOrder !== null ? record.itineraryOrder : '');
                               handleUpdateAddressOrder(addressSelectionModal.routeName, addr.id, String(val));
-                              (e.target as HTMLInputElement).blur();
-                            }
-                          }}
-                          className={cn(
-                            "print:hidden w-10 h-8 text-center text-xs font-black bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none transition-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none",
-                            isIncluded 
-                              ? "border-emerald-200 text-emerald-950 bg-emerald-50/20" 
-                              : "border-gray-200 text-gray-400 bg-gray-50/50 cursor-not-allowed opacity-40"
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                const val = orderValueMap[addr.id] !== undefined ? orderValueMap[addr.id] : (record?.itineraryOrder !== undefined && record?.itineraryOrder !== null ? record.itineraryOrder : '');
+                                handleUpdateAddressOrder(addressSelectionModal.routeName, addr.id, String(val));
+                                (e.target as HTMLInputElement).blur();
+                              }
+                            }}
+                            className={cn(
+                              "w-11 h-8 text-center text-xs font-black bg-white border rounded-lg focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 outline-none transition-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none",
+                              isIncluded 
+                                ? "border-emerald-200 text-emerald-950 bg-emerald-50/20" 
+                                : "border-gray-200 text-gray-400 bg-gray-50/50 cursor-not-allowed opacity-40"
+                            )}
+                            title={isIncluded ? "Defina a ordem de atendimento na rota (a lista ordena automaticamente de acordo com o número digitado)" : "Selecione o local primeiro para definir a ordem"}
+                          />
+                          {isIncluded && (
+                            <div className="flex flex-col -space-y-0.5">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleMoveAddressOrder(addressSelectionModal.routeName, addr.id, 'up');
+                                }}
+                                title="Subir ordem (trocar com o item de cima)"
+                                className="p-0.5 text-gray-400 hover:text-emerald-700 hover:bg-emerald-100 rounded transition-colors"
+                              >
+                                <ChevronUp className="w-3 h-3" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  handleMoveAddressOrder(addressSelectionModal.routeName, addr.id, 'down');
+                                }}
+                                title="Descer ordem (trocar com o item de baixo)"
+                                className="p-0.5 text-gray-400 hover:text-emerald-700 hover:bg-emerald-100 rounded transition-colors"
+                              >
+                                <ChevronDown className="w-3 h-3" />
+                              </button>
+                            </div>
                           )}
-                          title={isIncluded ? "Defina a ordem de atendimento na folha de impressão" : "Selecione o local primeiro para definir a ordem"}
-                        />
+                        </div>
 
                         {/* Print mode: Static elegant badge for printed document */}
                         {isIncluded && record?.itineraryOrder ? (
@@ -3403,52 +3636,149 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                         ) : null}
                       </div>
 
-                      <label htmlFor={`chk-${addr.id}`} className="flex-1 min-w-0 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 cursor-pointer">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <h4 className={cn("text-sm font-bold print:text-black", isIncluded ? "text-emerald-900 font-extrabold" : "text-gray-900")}>
-                              {client?.name || 'Cliente desconhecido'}
-                            </h4>
-                            {addr.route && addr.route !== addressSelectionModal.routeName && (
-                              <span className="inline-flex items-center text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-md leading-none select-none shrink-0 print:hidden">
-                                Rota Original: {addr.route}
+                      <label htmlFor={`chk-${addr.id}`} className="flex-1 min-w-0 flex flex-col cursor-pointer gap-2">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className={cn("text-sm font-bold print:text-black print:font-extrabold print:text-[15px]", isIncluded ? "text-emerald-900 font-extrabold" : "text-gray-900")}>
+                                {client?.name || 'Cliente desconhecido'}
+                              </h4>
+                              {addr.route && addr.route !== addressSelectionModal.routeName && (
+                                <span className="inline-flex items-center text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-md leading-none select-none shrink-0 print:hidden">
+                                  Rota Original: {addr.route}
+                                </span>
+                              )}
+                              {tempAssignedRecord && (
+                                <span className="inline-flex items-center text-[10px] font-extrabold uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-200 px-2 py-0.5 rounded-md leading-none select-none shrink-0 print:hidden">
+                                  Em Viagem Temporária: {tempAssignedRecord.assignedRoute || tempAssignedRecord.temporaryRouteName}
+                                </span>
+                              )}
+                              {hasOpenCall && (
+                                <span className={cn(
+                                  "inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-md leading-none select-none shrink-0",
+                                  openCall?.priority === 'high' 
+                                    ? "bg-red-600 text-white border border-red-700 print:bg-red-50 print:text-red-800 print:border-red-200 print:font-medium" 
+                                    : openCall?.isWorkshop
+                                      ? "bg-purple-100 text-purple-900 border border-purple-300 print:bg-purple-50 print:text-purple-800 print:border-purple-200 print:font-medium"
+                                      : "bg-amber-100 text-amber-800 border border-amber-300 print:bg-amber-50 print:text-amber-800 print:border-amber-200 print:font-medium"
+                                )}>
+                                  {openCall?.priority === 'high' ? <Flame className="w-3 h-3 text-white print:text-red-700" /> : <AlertCircle className="w-3.5 h-3.5 text-amber-600 print:text-amber-700" />}
+                                  {openCall?.priority === 'high' ? 'Chamado Alta Prioridade' : 'Chamado em Aberto'}
+                                </span>
+                              )}
+                              {openCall?.isWorkshop && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider bg-purple-100 text-purple-900 border border-purple-300 px-2 py-0.5 rounded-md leading-none select-none shrink-0 print:bg-purple-50 print:text-purple-800 print:border-purple-200 print:font-medium">
+                                  <Wrench className="w-3 h-3 text-purple-700 print:text-purple-700" />
+                                  Máquina na Oficina
+                                </span>
+                              )}
+                            </div>
+                            <p className={cn("text-xs mt-1 print:text-black print:font-semibold print:text-[13px]", isIncluded ? "text-emerald-700/80" : "text-gray-500")}>
+                              {addr.street}, {addr.number} {addr.complement ? `- ${addr.complement}` : ''} - {addr.neighborhood}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-4 shrink-0 sm:ml-4">
+                            {/* Coluna Total de Máquinas */}
+                            <div className="text-left sm:text-right sm:min-w-[120px] print:text-black">
+                              <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block">Total de Máquinas</span>
+                              <span className={cn("text-xs font-black font-mono", isIncluded ? "text-emerald-850" : "text-gray-700")}>
+                                {addr.totalMachines || 0} máq.
                               </span>
-                            )}
-                            {tempAssignedRecord && (
-                              <span className="inline-flex items-center text-[10px] font-extrabold uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-200 px-2 py-0.5 rounded-md leading-none select-none shrink-0 print:hidden">
-                                Em Viagem Temporária: {tempAssignedRecord.assignedRoute || tempAssignedRecord.temporaryRouteName}
-                              </span>
-                            )}
-                            {hasOpenCall && (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-extrabold uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 rounded-md leading-none select-none shrink-0">
-                                <AlertCircle className="w-3.5 h-3.5 text-amber-600" />
-                                Chamado em Aberto
-                              </span>
+                            </div>
+
+                            {/* Cidade/Estado */}
+                            {(addr.city || addr.state) && (
+                              <div className="text-right sm:min-w-[100px]">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 bg-gray-100 px-2.5 py-1 rounded-md print:bg-transparent print:border print:border-gray-300">
+                                  {[addr.city, addr.state].filter(Boolean).join('/')}
+                                </span>
+                              </div>
                             )}
                           </div>
-                          <p className={cn("text-xs mt-1 print:text-gray-700", isIncluded ? "text-emerald-700/80" : "text-gray-500")}>
-                            {addr.street}, {addr.number} {addr.complement ? `- ${addr.complement}` : ''} - {addr.neighborhood}
-                          </p>
                         </div>
 
-                        <div className="flex items-center gap-4 shrink-0 sm:ml-4">
-                          {/* Coluna Total de Máquinas */}
-                          <div className="text-left sm:text-right sm:min-w-[120px] print:text-black">
-                            <span className="text-[9px] text-gray-400 font-bold uppercase tracking-wider block">Total de Máquinas</span>
-                            <span className={cn("text-xs font-black font-mono", isIncluded ? "text-emerald-850" : "text-gray-700")}>
-                              {addr.totalMachines || 0} máq.
-                            </span>
-                          </div>
+                        {/* Bloco de Descrição do Chamado Técnico Ativo (Legível e Suave na Impressão) */}
+                        {openCall && (
+                          <div className={cn(
+                            "mt-1.5 p-2.5 rounded-lg text-xs print:p-2 print:mt-1 border transition-all",
+                            openCall.priority === 'high'
+                              ? "bg-red-50/90 border-red-300 print:bg-red-50/20 print:border-red-200/70"
+                              : openCall.isWorkshop
+                                ? "bg-purple-50/90 border-purple-300 print:bg-purple-50/20 print:border-purple-200/70"
+                                : "bg-amber-50/90 border-amber-300 print:bg-amber-50/20 print:border-amber-200/70"
+                          )}>
+                            <div className="flex items-center justify-between gap-1.5 font-bold text-[11px] uppercase tracking-wide mb-1 print:font-semibold">
+                              <div className="flex items-center gap-1.5">
+                                {openCall.isWorkshop ? (
+                                  <Wrench className="w-3.5 h-3.5 text-purple-700 print:text-purple-600 shrink-0" />
+                                ) : openCall.priority === 'high' ? (
+                                  <Flame className="w-3.5 h-3.5 text-red-600 print:text-red-600 shrink-0" />
+                                ) : (
+                                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 print:text-amber-600 shrink-0" />
+                                )}
+                                <span className={cn(
+                                  "print:font-semibold print:text-gray-700",
+                                  openCall.priority === 'high' ? "text-red-900" : openCall.isWorkshop ? "text-purple-950" : "text-amber-900"
+                                )}>
+                                  Descrição do Chamado Técnico em Aberto:
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                {openCall.isWorkshop && (
+                                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-200 text-purple-900 font-bold uppercase print:bg-purple-50 print:text-purple-800 print:border print:border-purple-200 print:font-normal">
+                                    🔧 Oficina
+                                  </span>
+                                )}
+                                {openCall.priority && (
+                                  <span className={cn(
+                                    "text-[9px] px-1.5 py-0.5 rounded font-bold uppercase print:border print:font-normal",
+                                    openCall.priority === 'high' 
+                                      ? "bg-red-600 text-white print:bg-red-50 print:text-red-800 print:border-red-200" 
+                                      : "bg-amber-200/80 text-amber-900 print:bg-amber-50 print:text-amber-800 print:border-amber-200"
+                                  )}>
+                                    Prioridade: {openCall.priority === 'high' ? 'Alta' : openCall.priority === 'medium' ? 'Média' : 'Baixa'}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <p className="text-xs text-gray-800 print:text-gray-800 font-normal print:font-normal leading-relaxed whitespace-pre-wrap">
+                              {openCall.description || 'Sem descrição informada.'}
+                            </p>
 
-                          {/* Cidade/Estado */}
-                          <div className="text-right sm:min-w-[100px]">
-                            <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400 bg-gray-100 px-2.5 py-1 rounded-md print:bg-transparent print:border print:border-gray-300">
-                              {addr.city}/{addr.state}
-                            </span>
+                            {/* Miniaturas das Fotos do Chamado para Impressão */}
+                            {(() => {
+                              const callPhotos = [
+                                openCall.attachmentUrl1,
+                                openCall.attachmentUrl2,
+                                openCall.attachmentUrl3,
+                                openCall.attachmentUrl4,
+                                (openCall.attachmentUrl && openCall.attachmentUrl.startsWith('data:image') && ![openCall.attachmentUrl1, openCall.attachmentUrl2, openCall.attachmentUrl3, openCall.attachmentUrl4].includes(openCall.attachmentUrl)) ? openCall.attachmentUrl : null
+                              ].filter((url): url is string => Boolean(url && url.trim().length > 0));
+
+                              if (callPhotos.length === 0) return null;
+
+                              return (
+                                <div className="mt-2 pt-1.5 border-t border-gray-200/60 print:mt-1 print:pt-1 flex items-center gap-2 flex-wrap">
+                                  <span className="text-[10px] font-semibold text-gray-500 print:text-gray-600 shrink-0">
+                                    Fotos ({callPhotos.length}):
+                                  </span>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {callPhotos.map((imgUrl, idx) => (
+                                      <img
+                                        key={idx}
+                                        src={imgUrl}
+                                        alt={`Miniatura ${idx + 1}`}
+                                        className="w-10 h-10 print:w-9 print:h-9 object-cover rounded border border-gray-300 print:border-gray-400 shrink-0 bg-white shadow-2xs"
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })()}
                           </div>
-                        </div>
+                        )}
                       </label>
-                      <div className="hidden print:block w-32 border-b border-gray-400 mt-4 h-4"></div>
                     </div>
                   );
                 })}
@@ -3615,7 +3945,13 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
             </div>
             <div className="p-4 bg-gray-50 border-t flex items-center justify-between shrink-0 print:hidden">
                <button
-                 onClick={() => {
+                 onClick={async () => {
+                   const routeName = addressSelectionModal.routeName;
+                   for (const [aId, val] of Object.entries(orderValueMap)) {
+                     if (val !== undefined && val !== '') {
+                       await handleUpdateAddressOrder(routeName, aId, val);
+                     }
+                   }
                    setShowOnlySelected(true);
                    setTimeout(() => window.print(), 100);
                  }}
@@ -3625,7 +3961,15 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                  Imprimir PDF
                </button>
                <button 
-                onClick={() => setAddressSelectionModal({ isOpen: false, routeName: '' })}
+                onClick={async () => {
+                  const routeName = addressSelectionModal.routeName;
+                  for (const [aId, val] of Object.entries(orderValueMap)) {
+                    if (val !== undefined && val !== '') {
+                      await handleUpdateAddressOrder(routeName, aId, val);
+                    }
+                  }
+                  setAddressSelectionModal({ isOpen: false, routeName: '' });
+                }}
                 className="px-6 py-2 bg-gray-800 hover:bg-gray-900 text-white text-sm font-bold rounded-xl transition-all shadow-md"
               >
                 Concluir

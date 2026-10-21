@@ -62,6 +62,7 @@ import ContractsView from './components/ContractsView';
 import SettingsView from './components/SettingsView';
 import TechProductionView from './components/TechProductionView';
 import TechMobileExpenseView from './components/TechMobileExpenseView';
+import PendingApprovalScreen from './components/PendingApprovalScreen';
 
 const menuItems = [
   { id: 'demand', label: 'Demanda Técnica', icon: Users, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.TECHNICIAN] },
@@ -69,7 +70,7 @@ const menuItems = [
   { id: 'production', label: 'Minha Produção', icon: TrendingUp, roles: [UserRole.TECHNICIAN] },
   { id: 'expenses', label: 'Lançar Despesa', icon: Receipt, roles: [UserRole.TECHNICIAN] },
   { id: 'schedule', label: 'Cronograma', icon: Calendar, roles: [UserRole.ADMIN, UserRole.ASSISTANT] },
-  { id: 'calls', label: 'Chamados / Reparos', icon: AlertCircle, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT] },
+  { id: 'calls', label: 'Chamados / Reparos', icon: AlertCircle, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT, UserRole.TECHNICIAN] },
   { id: 'routes', label: 'Rotas de Viagem', icon: Route, roles: [UserRole.ADMIN, UserRole.ASSISTANT] },
   { id: 'reports', label: 'Relatórios', icon: BarChart3, roles: [UserRole.ADMIN, UserRole.SUPPORT, UserRole.ASSISTANT] },
   { id: 'finance', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT] },
@@ -574,11 +575,33 @@ export default function App() {
             return;
           }
 
-          // 4. Update local state with the synced profile and update login audit timestamps
+          // 4. Determine approval status for 1st access security barrier
+          const normalizedEmail = (u.email || "").trim().toLowerCase();
+          const isAdminUser = ['kennedy.adm3@gmail.com', 'kennedy2026@lefrio.com', 'admin@preventivas.com', 'admin@lefrio.com'].includes(normalizedEmail) || syncedProfile.role === UserRole.ADMIN;
+
+          let isApprovedStatus = syncedProfile.isApproved;
+          if (isAdminUser) {
+            isApprovedStatus = true;
+          } else if (isApprovedStatus === undefined) {
+            // Existing established users who have already logged in prior to this feature
+            if (syncedProfile.lastLogin && syncedProfile.status !== 'pending') {
+              isApprovedStatus = true;
+            } else {
+              isApprovedStatus = false;
+            }
+          }
+
+          syncedProfile = {
+            ...syncedProfile,
+            isApproved: Boolean(isApprovedStatus)
+          };
+
+          // Update local state with the synced profile and update login audit timestamps
           try {
             await updateDoc(doc(firestoreDb, 'users', syncedProfile.uid), {
               lastLogin: new Date(),
-              lastActive: new Date()
+              lastActive: new Date(),
+              isApproved: Boolean(isApprovedStatus)
             });
             syncedProfile = {
               ...syncedProfile,
@@ -785,6 +808,24 @@ export default function App() {
           )}
         </motion.div>
       </div>
+    );
+  }
+
+  if (user && profile && profile.role !== UserRole.ADMIN && profile.isApproved !== true) {
+    return (
+      <PendingApprovalScreen
+        profile={profile}
+        onApproved={(updatedProfile) => {
+          setProfile(updatedProfile);
+        }}
+        onLogout={async () => {
+          try {
+            await auth.signOut();
+          } catch (e) {}
+          setUser(null);
+          setProfile(null);
+        }}
+      />
     );
   }
 
@@ -1003,9 +1044,13 @@ export default function App() {
                             onClick={async () => {
                               await handleMarkAsRead(notif.id);
                               setShowNotifications(false);
-                              if (notif.callId) {
+                              if (notif.type === 'os_attended' || notif.type === 'tech_os_attended') {
+                                setActiveView('orders');
+                              } else if (notif.callId) {
                                 setSelectedCallId(notif.callId);
                                 setActiveView('calls');
+                              } else if (notif.type === 'tech_start' || notif.type === 'tech_finish') {
+                                setActiveView('demand');
                               }
                             }}
                             className={cn(
@@ -1145,7 +1190,7 @@ export default function App() {
               )}
               {activeView === 'calls' && hasAccess('calls') && (
                 <ServiceCallsView 
-                  managerClientId={profile?.clientId} 
+                  managerClientId={profile?.role === UserRole.MANAGER ? profile?.clientId : undefined} 
                   userRole={profile?.role} 
                   userProfile={profile || undefined} 
                   initialSelectedCallId={selectedCallId}
@@ -1220,7 +1265,22 @@ export default function App() {
                 >
                   Descartar
                 </button>
-                {activePopup.callId && (
+                {(activePopup.type === 'os_attended' || activePopup.type === 'tech_os_attended') && (
+                  <button
+                    onClick={async () => {
+                      const id = activePopup.id;
+                      setActivePopup(null);
+                      await handleMarkAsRead(id);
+                      setActiveView('orders');
+                    }}
+                    className="px-4 py-1.5 text-[10px] font-black uppercase tracking-wider text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-md shadow-blue-100 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer"
+                    style={{ minHeight: 32 }}
+                  >
+                    <span>Ver Ordens de Serviço</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </button>
+                )}
+                {activePopup.callId && activePopup.type !== 'os_attended' && activePopup.type !== 'tech_os_attended' && (
                   <button
                     onClick={async () => {
                       const id = activePopup.id;
@@ -1230,7 +1290,7 @@ export default function App() {
                       setSelectedCallId(callId);
                       setActiveView('calls');
                     }}
-                    className="px-4 py-1.5 text-[10px] font-black uppercase tracking-wider text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-md shadow-blue-100 transition-all text-center flex items-center justify-center gap-1.5"
+                    className="px-4 py-1.5 text-[10px] font-black uppercase tracking-wider text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-md shadow-blue-100 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer"
                     style={{ minHeight: 32 }}
                   >
                     <span>Ver Chamado</span>
@@ -1245,7 +1305,7 @@ export default function App() {
                       await handleMarkAsRead(id);
                       setActiveView('demand');
                     }}
-                    className="px-4 py-1.5 text-[10px] font-black uppercase tracking-wider text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-md shadow-emerald-100 transition-all text-center flex items-center justify-center gap-1.5"
+                    className="px-4 py-1.5 text-[10px] font-black uppercase tracking-wider text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl shadow-md shadow-emerald-100 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer"
                     style={{ minHeight: 32 }}
                   >
                     <span>Ver Demanda</span>

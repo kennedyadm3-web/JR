@@ -95,6 +95,10 @@ export function PMOCDocumentViewerModal({
     return dateStr;
   };
 
+  // Mês da cobrança (definido no contrato do cliente ou no registro; fallback para o mês de referência do cronograma)
+  const effectiveBillingMonthRaw = client?.billingMonth || record.billingMonth || record.month || '';
+  const displayBillingMonth = effectiveBillingMonthRaw ? getMonthAbbr(effectiveBillingMonthRaw) : '-';
+
   const getFormattedCycleStr = () => {
     const rawCycle = client?.contractCycle || record.cycle || 1;
     const num = String(rawCycle).padStart(3, '0');
@@ -102,7 +106,7 @@ export function PMOCDocumentViewerModal({
     
     const start = formatDateBRL(client?.cycleStartDate);
     const end = formatDateBRL(client?.cycleEndDate);
-    const abbr = getMonthAbbr(record.month || '');
+    const abbr = displayBillingMonth;
     
     if (formatType === 'full_period' && start && end) {
       return `${num} - ${start} a ${end} (${abbr})`;
@@ -206,7 +210,7 @@ export function PMOCDocumentViewerModal({
               <h3 className="text-sm font-black tracking-wide text-white uppercase flex items-center gap-2">
                 Folha de Atendimento (Pré-visualização)
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                  {record.month || 'Mês'}
+                  {displayBillingMonth}
                 </span>
               </h3>
               <p className="text-[11px] text-slate-400 font-medium truncate max-w-md">
@@ -312,7 +316,7 @@ export function PMOCDocumentViewerModal({
 
               <div className="text-right flex flex-col items-end">
                 <p className="text-[9px]">Página: 1 de 1</p>
-                <p className="text-[9px]">Mês: {record.month}</p>
+                <p className="text-[9px] font-bold">Mês: {displayBillingMonth}</p>
               </div>
             </div>
 

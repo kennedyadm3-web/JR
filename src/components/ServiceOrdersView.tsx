@@ -1739,15 +1739,48 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     });
     setFormProducts(sanitizedProducts);
     
-    // Encontra o técnico correspondente com base no texto de autenticação
+    // Encontra o técnico correspondente (por ID, Nome, Resp. Abertura ou Equipe Autenticada)
+    let resolvedTech1Id = '';
     if (order.technicianId) {
-      setFormTechnicianId(order.technicianId);
-    } else {
-      const techName = order.authenticatedTeam?.split('AILTON')[1]?.trim() || '';
-      const matchTech = technicians.find(t => t.name === techName);
-      setFormTechnicianId(matchTech?.id || '');
+      const matchTech = technicians.find(t => 
+        t.id === order.technicianId || 
+        t.name.trim().toLowerCase() === order.technicianId.trim().toLowerCase()
+      );
+      resolvedTech1Id = matchTech ? matchTech.id : order.technicianId;
     }
-    setFormTechnician2Id(order.technician2Id || '');
+
+    if (!resolvedTech1Id && order.openedBy && order.openedBy !== 'ADMIN' && order.openedBy !== 'Administrativo') {
+      const matchOpener = technicians.find(t => 
+        t.id === order.openedBy || 
+        t.name.trim().toLowerCase() === order.openedBy.trim().toLowerCase()
+      );
+      if (matchOpener) {
+        resolvedTech1Id = matchOpener.id;
+      } else {
+        resolvedTech1Id = order.openedBy;
+      }
+    }
+
+    if (!resolvedTech1Id && order.authenticatedTeam) {
+      const teamLower = order.authenticatedTeam.toLowerCase();
+      const matchTeamTech = technicians.find(t => t.name && teamLower.includes(t.name.trim().toLowerCase()));
+      if (matchTeamTech) {
+        resolvedTech1Id = matchTeamTech.id;
+      }
+    }
+
+    setFormTechnicianId(resolvedTech1Id);
+
+    // Resolve o técnico 2 (auxiliar)
+    let resolvedTech2Id = order.technician2Id || '';
+    if (resolvedTech2Id) {
+      const matchTech2 = technicians.find(t => 
+        t.id === resolvedTech2Id || 
+        t.name.trim().toLowerCase() === resolvedTech2Id.trim().toLowerCase()
+      );
+      if (matchTech2) resolvedTech2Id = matchTech2.id;
+    }
+    setFormTechnician2Id(resolvedTech2Id);
     
     setFormRepresentative(order.clientRepresentative || '');
     setFormRepresentativeMatricula(order.clientRepresentativeMatricula || '');
@@ -1985,7 +2018,25 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       })),
       totalValue,
       
-      technicianId: formTechnicianId || undefined,
+      technicianId: (() => {
+        if (formTechnicianId) return formTechnicianId;
+        if (formOpenedBy && formOpenedBy !== 'ADMIN' && formOpenedBy !== 'Administrativo') {
+          const matchOpener = technicians.find(t => 
+            t.id === formOpenedBy || 
+            t.name.trim().toLowerCase() === formOpenedBy.trim().toLowerCase()
+          );
+          if (matchOpener) return matchOpener.id;
+          return formOpenedBy;
+        }
+        if (userRole === UserRole.TECHNICIAN && userProfile?.name) {
+          const matchProfile = technicians.find(t => 
+            t.id === userProfile.uid || 
+            t.name.trim().toLowerCase() === userProfile.name.trim().toLowerCase()
+          );
+          if (matchProfile) return matchProfile.id;
+        }
+        return undefined;
+      })(),
       technician2Id: formTechnician2Id || undefined,
       authenticatedTeam,
       clientRepresentative: formRepresentative ? formRepresentative.trim().toUpperCase() : undefined,

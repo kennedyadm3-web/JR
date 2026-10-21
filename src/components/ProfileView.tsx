@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { UserProfile, NotificationPreferences, UserRole } from '../types';
 import { dataService } from '../services/dataService';
 import { soundService } from '../services/soundService';
-import { User, Phone, Mail, Bell, Shield, Save, Loader2, CheckCircle2, AlertCircle, MessageSquare, CheckSquare, Paperclip, AppWindow, Volume2, VolumeX, Play } from 'lucide-react';
+import { User, Phone, Mail, Bell, Shield, Save, Loader2, CheckCircle2, AlertCircle, MessageSquare, CheckSquare, Paperclip, AppWindow, Volume2, VolumeX, Play, ClipboardList } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface ProfileViewProps {
@@ -19,6 +19,7 @@ export default function ProfileView({ userProfile, onProfileUpdate }: ProfileVie
   const [notifyTaskAssigned, setNotifyTaskAssigned] = useState(userProfile.notificationPreferences?.notifyTaskAssigned ?? true);
   const [notifyTaskComment, setNotifyTaskComment] = useState(userProfile.notificationPreferences?.notifyTaskComment ?? true);
   const [notifyTaskAttachment, setNotifyTaskAttachment] = useState(userProfile.notificationPreferences?.notifyTaskAttachment ?? true);
+  const [notifyOSAttended, setNotifyOSAttended] = useState(userProfile.notificationPreferences?.notifyOSAttended ?? true);
   const [notifyShowPopups, setNotifyShowPopups] = useState(userProfile.notificationPreferences?.notifyShowPopups ?? true);
   const [notifySoundEnabled, setNotifySoundEnabled] = useState<boolean>(() => {
     if (userProfile.notificationPreferences?.notifySoundEnabled !== undefined) {
@@ -73,6 +74,7 @@ export default function ProfileView({ userProfile, onProfileUpdate }: ProfileVie
       notifyTaskAssigned,
       notifyTaskComment,
       notifyTaskAttachment,
+      notifyOSAttended,
       notifyShowPopups,
       notifySoundEnabled
     };
@@ -319,6 +321,23 @@ export default function ProfileView({ userProfile, onProfileUpdate }: ProfileVie
                     <span className="text-sm font-bold text-gray-950">Anexos em Tarefas</span>
                   </div>
                   <p className="text-xs text-gray-500 leading-normal font-medium">Receber alerta quando novos arquivos, links ou documentos importantes forem anexados a tarefas em que participa.</p>
+                </div>
+              </label>
+
+              {/* Option: OS Attended by Technician */}
+              <label className="flex items-start gap-4 p-4 rounded-2xl hover:bg-gray-50/50 border border-gray-100 cursor-pointer transition-colors">
+                <input
+                  type="checkbox"
+                  checked={notifyOSAttended}
+                  onChange={(e) => setNotifyOSAttended(e.target.checked)}
+                  className="mt-1 w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 cursor-pointer"
+                />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5">
+                    <ClipboardList className="w-4 h-4 text-blue-600" />
+                    <span className="text-sm font-bold text-gray-950">Atendimento de O.S. por Técnico Externo</span>
+                  </div>
+                  <p className="text-xs text-gray-500 leading-normal font-medium">Ser notificado em tempo real quando um técnico em atendimento externo atender ou enviar uma nova ordem de serviço para o sistema.</p>
                 </div>
               </label>
 

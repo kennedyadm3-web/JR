@@ -104,7 +104,7 @@ service cloud.firestore {
       allow read: if isSignedIn() && (isStaff() || (isManager() && getUserData().clientId == resource.data.clientId));
       allow create: if isSignedIn();
       allow update: if isSignedIn() && (isStaff() || (isManager() && getUserData().clientId == resource.data.clientId));
-      allow delete: if isSignedIn() && isAdmin();
+      allow delete: if isSignedIn() && (isAdmin() || isAssistant());
     }
 
     // 8. Route Configurations

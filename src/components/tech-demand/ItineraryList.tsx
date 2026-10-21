@@ -321,7 +321,7 @@ export function ItineraryList({
           if (periodStartDate && rExecDate < periodStartDate) return;
           if (periodEndDate && rExecDate > periodEndDate) return;
           matchesFilter = true;
-          isCompleted = r.status === MaintenanceStatus.COMPLETED || r.status === MaintenanceStatus.PRE_COMPLETED || Boolean(r.completionDate);
+          isCompleted = r.status === MaintenanceStatus.COMPLETED || r.status === MaintenanceStatus.PRE_COMPLETED;
         }
 
         if (!matchesFilter) return;
@@ -448,7 +448,7 @@ export function ItineraryList({
         if (periodStartDate && rExecDate < periodStartDate) return;
         if (periodEndDate && rExecDate > periodEndDate) return;
         matchesFilter = true;
-        isCompleted = r.status === MaintenanceStatus.COMPLETED || r.status === MaintenanceStatus.PRE_COMPLETED || Boolean(r.completionDate);
+        isCompleted = r.status === MaintenanceStatus.COMPLETED || r.status === MaintenanceStatus.PRE_COMPLETED;
         serviceDateFormatted = rExecDate ? format(parseISO(rExecDate + 'T12:00:00'), 'dd/MM/yyyy') : undefined;
         serviceDateRaw = rExecDate;
       }
@@ -1231,8 +1231,26 @@ export function ItineraryList({
                       <th className={cn("text-center w-14 bg-slate-100", density === 'ultra' ? "py-1.5 px-1.5" : "py-2 px-2")}>Tipo</th>
                       <th className={cn("text-center w-20 bg-slate-100 font-mono", density === 'ultra' ? "py-1.5 px-1.5" : "py-2 px-2")}>Cód</th>
                       <th className={cn("bg-slate-100 min-w-[140px] max-w-[200px]", density === 'ultra' ? "py-1.5 px-2" : "py-2 px-3")}>Cliente</th>
-                      <th className={cn("bg-slate-100 min-w-[260px]", density === 'ultra' ? "py-1.5 px-2" : "py-2 px-3")}>Endereço Completo (Rua e Nº)</th>
-                      <th className={cn("bg-slate-100 min-w-[120px]", density === 'ultra' ? "py-1.5 px-2" : "py-2 px-3")}>Bairro / Cidade</th>
+                      <th className={cn(
+                        "bg-slate-100", 
+                        density === 'ultra' 
+                          ? "py-1.5 px-2 w-[320px] min-w-[320px] max-w-[320px]" 
+                          : "py-2 px-3 w-[360px] min-w-[360px] max-w-[360px]"
+                      )}>
+                        <div className={cn("truncate", density === 'ultra' ? "max-w-[300px]" : "max-w-[340px]")} title="Endereço Completo (Rua e Nº)">
+                          Endereço Completo (Rua e Nº)
+                        </div>
+                      </th>
+                      <th className={cn(
+                        "bg-slate-100", 
+                        density === 'ultra' 
+                          ? "py-1.5 px-2 w-[160px] min-w-[160px] max-w-[160px]" 
+                          : "py-2 px-3 w-[180px] min-w-[180px] max-w-[180px]"
+                      )}>
+                        <div className={cn("truncate", density === 'ultra' ? "max-w-[145px]" : "max-w-[165px]")} title="Bairro / Cidade">
+                          Bairro / Cidade
+                        </div>
+                      </th>
                       <th className={cn("bg-slate-100 min-w-[120px]", density === 'ultra' ? "py-1.5 px-2" : "py-2 px-3")}>Técnico 1 (Titular)</th>
                       <th className={cn("bg-slate-100 min-w-[100px]", density === 'ultra' ? "py-1.5 px-2" : "py-2 px-3")}>Ajudante (Téc 2)</th>
                       <th className={cn("text-center w-12 bg-slate-100", density === 'ultra' ? "py-1.5 px-1.5" : "py-2 px-2")}>Máq</th>
@@ -1320,12 +1338,17 @@ export function ItineraryList({
                           </td>
 
                           {/* 5. Endereço Completo (Rua e Número) */}
-                          <td className={cn("text-slate-800", density === 'ultra' ? "py-1 px-2 text-[11px]" : "py-1.5 px-3 text-xs")}>
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-bold text-slate-900">{demand.street}</span>
+                          <td className={cn(
+                            "text-slate-800", 
+                            density === 'ultra' 
+                              ? "py-1 px-2 text-[11px] w-[320px] min-w-[320px] max-w-[320px]" 
+                              : "py-1.5 px-3 text-xs w-[360px] min-w-[360px] max-w-[360px]"
+                          )}>
+                            <div className={cn("flex items-center gap-1.5 min-w-0", density === 'ultra' ? "max-w-[300px]" : "max-w-[340px]")}>
+                              <span className="font-bold text-slate-900 truncate" title={demand.street}>{demand.street}</span>
                               {demand.notes && (
                                 <span 
-                                  className="text-[9px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-1 py-0.2 rounded truncate max-w-[160px] inline-block"
+                                  className="text-[9px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-1 py-0.2 rounded truncate max-w-[90px] inline-block shrink-0"
                                   title={`Obs: ${demand.notes}`}
                                 >
                                   📝 {demand.notes}
@@ -1335,10 +1358,17 @@ export function ItineraryList({
                           </td>
 
                           {/* 6. Bairro / Cidade */}
-                          <td className={cn("text-slate-600", density === 'ultra' ? "py-1 px-2 text-[11px]" : "py-1.5 px-3 text-xs")}>
-                            <span className="truncate block">
-                              {demand.neighborhood ? `${demand.neighborhood}, ` : ''}{demand.city}
-                            </span>
+                          <td className={cn(
+                            "text-slate-600", 
+                            density === 'ultra' 
+                              ? "py-1 px-2 text-[11px] w-[160px] min-w-[160px] max-w-[160px]" 
+                              : "py-1.5 px-3 text-xs w-[180px] min-w-[180px] max-w-[180px]"
+                          )}>
+                            <div className={cn("truncate", density === 'ultra' ? "max-w-[145px]" : "max-w-[165px]")}>
+                              <span className="truncate block" title={`${demand.neighborhood ? `${demand.neighborhood}, ` : ''}${demand.city}`}>
+                                {demand.neighborhood ? `${demand.neighborhood}, ` : ''}{demand.city}
+                              </span>
+                            </div>
                           </td>
 
                           {/* 7. Técnico Titular (Técnico 1) */}

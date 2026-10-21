@@ -16,7 +16,7 @@ import {
   VerticalAlign
 } from 'docx';
 import { MaintenanceRecord, Address, Client, Equipment, Technician, MaintenanceStatus, UserRole } from '../types';
-import { FileText, Search, MapPin, CheckCircle, Printer, Filter, Settings, History, Info, ChevronRight, X, Briefcase, FileSignature, BookOpen, Trash2, ChevronDown, ChevronUp, CheckSquare, Square, Calendar, UserCheck, Save, Check, RotateCcw, RefreshCw } from 'lucide-react';
+import { FileText, Search, MapPin, CheckCircle, Printer, Filter, Settings, History, Info, ChevronRight, X, Briefcase, FileSignature, BookOpen, Trash2, ChevronDown, ChevronUp, CheckSquare, Square, Calendar, UserCheck, Save, Check, RotateCcw, RefreshCw, Table as TableIcon } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -56,6 +56,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
   const [removedClientId, setRemovedClientId] = useState<string>('');
   const [removedAddressId, setRemovedAddressId] = useState<string>('');
   const [removedTechFilter, setRemovedTechFilter] = useState<string>('');
+  const [removedViewMode, setRemovedViewMode] = useState<'table' | 'cards'>('table');
 
   // Modal de Reabilitação
   const [reactivateModalEq, setReactivateModalEq] = useState<Equipment | null>(null);
@@ -98,6 +99,22 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
     }
   };
 
+  const getDeactivatedTechName = (eq: Equipment) => {
+    if (eq.deactivatedFromRecordId) {
+      const rec = records.find(r => r.id === eq.deactivatedFromRecordId);
+      if (rec) {
+        const recTech = [rec.technician1, rec.technician2].filter(Boolean).join(' / ') || rec.technician1 || rec.technician2;
+        if (recTech && recTech.trim().length > 0) {
+          return recTech.trim();
+        }
+      }
+    }
+    if (eq.deactivatedBy && !eq.deactivatedBy.startsWith('Setor Administrativo') && !eq.deactivatedBy.startsWith('Administrador')) {
+      return eq.deactivatedBy;
+    }
+    return 'Setor Administrativo';
+  };
+
   const filteredDeactivatedEquipments = useMemo(() => {
     return deactivatedEquipments.filter(eq => {
       // Filtro por Cliente
@@ -111,12 +128,14 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
       }
       // Filtro por Técnico Solicitante
       if (removedTechFilter) {
-        const techMatch = (eq.deactivatedBy || '').toLowerCase().includes(removedTechFilter.toLowerCase());
+        const techName = getDeactivatedTechName(eq);
+        const techMatch = techName.toLowerCase().includes(removedTechFilter.toLowerCase());
         if (!techMatch) return false;
       }
       // Filtro de Busca Geral
       if (removedSearchTerm) {
         const term = removedSearchTerm.toLowerCase();
+        const techName = getDeactivatedTechName(eq);
         const match =
           (eq.id || '').toLowerCase().includes(term) ||
           (eq.name || '').toLowerCase().includes(term) ||
@@ -125,6 +144,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
           (eq.sector || '').toLowerCase().includes(term) ||
           (eq.patrimony || '').toLowerCase().includes(term) ||
           (eq.deactivatedReason || '').toLowerCase().includes(term) ||
+          techName.toLowerCase().includes(term) ||
           (eq.deactivatedBy || '').toLowerCase().includes(term) ||
           (eq.deactivatedClientName || '').toLowerCase().includes(term) ||
           (eq.deactivatedAddressName || '').toLowerCase().includes(term);
@@ -132,7 +152,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
       }
       return true;
     });
-  }, [deactivatedEquipments, removedClientId, removedAddressId, removedTechFilter, removedSearchTerm, addresses]);
+  }, [deactivatedEquipments, removedClientId, removedAddressId, removedTechFilter, removedSearchTerm, addresses, records]);
 
   // Group addresses by Client
   const activeClients = useMemo(() => {
@@ -542,8 +562,33 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                 </div>
               </div>
 
-              {/* Indicadores / Métricas */}
-              <div className="flex items-center gap-3">
+              {/* Indicadores / Métricas & Seletor de Modo */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="bg-slate-100 p-1 rounded-2xl flex items-center gap-1 border border-slate-200">
+                  <button
+                    onClick={() => setRemovedViewMode('table')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      removedViewMode === 'table'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-900'
+                    }`}
+                  >
+                    <TableIcon className="w-3.5 h-3.5" />
+                    Tabela
+                  </button>
+                  <button
+                    onClick={() => setRemovedViewMode('cards')}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      removedViewMode === 'cards'
+                        ? 'bg-white text-slate-900 shadow-sm'
+                        : 'text-slate-500 hover:text-slate-900'
+                    }`}
+                  >
+                    <BookOpen className="w-3.5 h-3.5" />
+                    Cards
+                  </button>
+                </div>
+
                 <div className="bg-slate-50 border border-slate-200 px-4 py-2 rounded-2xl text-center">
                   <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Total Removidas</div>
                   <div className="text-lg font-black text-slate-800">{deactivatedEquipments.length}</div>
@@ -652,7 +697,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                   : "Nenhuma máquina desativada corresponde aos filtros selecionados."}
               </p>
             </div>
-          ) : (
+          ) : removedViewMode === 'cards' ? (
             <div className="grid grid-cols-1 gap-4">
               {filteredDeactivatedEquipments.map(eq => {
                 const addr = addresses.find(a => a.id === eq.addressId);
@@ -709,7 +754,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                         </div>
                         <div>
                           👤 <strong className="text-slate-700">Solicitante/Técnico:</strong>{' '}
-                          <span className="font-bold text-indigo-700">{eq.deactivatedBy || 'Setor Administrativo'}</span>
+                          <span className="font-bold text-indigo-700">{getDeactivatedTechName(eq)}</span>
                         </div>
                       </div>
 
@@ -733,6 +778,112 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                   </div>
                 );
               })}
+            </div>
+          ) : (
+            /* Visualização em Tabela Ampla e Compacta */
+            <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse min-w-[950px]">
+                  <thead>
+                    <tr className="bg-slate-900 text-white text-[11px] font-black uppercase tracking-wider border-b border-slate-800">
+                      <th className="py-3.5 px-4 text-center">Código / Tag</th>
+                      <th className="py-3.5 px-4">Equipamento</th>
+                      <th className="py-3.5 px-4">Cliente & Endereço</th>
+                      <th className="py-3.5 px-4">Setor / Patrimônio</th>
+                      <th className="py-3.5 px-4">Data Remoção</th>
+                      <th className="py-3.5 px-4">Técnico / Solicitante</th>
+                      <th className="py-3.5 px-4">Motivo da Remoção</th>
+                      <th className="py-3.5 px-4 text-center">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 text-xs text-slate-700">
+                    {filteredDeactivatedEquipments.map(eq => {
+                      const addr = addresses.find(a => a.id === eq.addressId);
+                      const client = addr ? clients.find(c => c.id === addr.clientId) : null;
+                      const clientName = eq.deactivatedClientName || client?.name || 'Cliente Não Identificado';
+                      const addressStreet = eq.deactivatedAddressName || (addr ? `${addr.street}, ${addr.number || 'S/N'} - ${addr.neighborhood || ''}` : 'Endereço Não Identificado');
+                      const deactDate = eq.deactivatedAt ? new Date(eq.deactivatedAt) : null;
+                      const deactDateStr = deactDate && !isNaN(deactDate.getTime())
+                        ? format(deactDate, "dd/MM/yyyy HH:mm", { locale: ptBR })
+                        : 'Data N/I';
+
+                      return (
+                        <tr key={eq.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="py-3 px-4 text-center whitespace-nowrap">
+                            <div className="inline-flex flex-col items-center gap-1">
+                              <span className="bg-slate-900 text-white text-[10px] font-black px-2 py-0.5 rounded-md">
+                                #{eq.id}
+                              </span>
+                              {eq.label && (
+                                <span className="bg-indigo-50 text-indigo-700 text-[10px] font-bold px-2 py-0.5 rounded-md">
+                                  Tag: {eq.label}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-900 text-xs">
+                              {eq.name}
+                            </div>
+                            <div className="text-[11px] text-slate-500 font-medium">
+                              {[
+                                eq.btus ? `${eq.btus} BTUs` : null,
+                                eq.brand
+                              ].filter(Boolean).join(' • ')}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 max-w-[260px]">
+                            <div className="font-bold text-slate-800 truncate" title={clientName}>
+                              {clientName}
+                            </div>
+                            <div className="text-[11px] text-slate-500 truncate" title={addressStreet}>
+                              {addressStreet}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <div className="font-medium text-slate-800">
+                              {eq.sector || 'N/A'}
+                            </div>
+                            {eq.patrimony && (
+                              <div className="text-[11px] text-slate-500">
+                                Pat: {eq.patrimony}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap text-slate-600 font-medium text-[11px]">
+                            {deactDateStr}
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1 font-bold text-indigo-700 text-xs bg-indigo-50 px-2.5 py-1 rounded-lg">
+                              <UserCheck className="w-3.5 h-3.5 text-indigo-500" />
+                              {getDeactivatedTechName(eq)}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 max-w-[220px]">
+                            {eq.deactivatedReason ? (
+                              <div className="text-[11px] text-red-700 bg-red-50/80 border border-red-100 p-1.5 rounded-lg font-medium line-clamp-2" title={eq.deactivatedReason}>
+                                {eq.deactivatedReason}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 text-[11px] italic">Não informado</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-center whitespace-nowrap">
+                            <button
+                              onClick={() => setReactivateModalEq(eq)}
+                              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-[11px] shadow-sm shadow-emerald-200 transition-all inline-flex items-center gap-1.5 cursor-pointer"
+                              title="Reabilitar esta máquina no sistema"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              Voltar a Habilitar
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -2772,21 +2923,22 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
 
     const confirmMsg = "Deseja realmente REABRIR esta planilha de atendimento?\n\n" +
       "Isso fará o seguinte:\n" +
-      "- O status mudará de 'Concluído' de volta para 'Pendente'.\n" +
-      "- Os campos de Nome do cliente, Assinatura e Matrícula serão limpos.\n" +
-      "- Todos os checklists preenchidos, observações e fotos de cada máquina permanecerão 100% INTACTOS e preservados com segurança.\n\n" +
-      "Confirma a reabertura?";
+      "- O status mudará de volta para 'Pendente / Em Aberto'.\n" +
+      "- Todos os dados já preenchidos (checklists das máquinas, nome do cliente, matrícula e assinaturas digitais) permanecerão 100% INTACTOS e preservados com segurança.\n" +
+      "- A planilha ficará liberada para nova edição e finalização no sistema do técnico.\n\n" +
+      "Confirma a devolução para rascunho/reabertura?";
 
     if (window.confirm(confirmMsg)) {
       try {
         const updates: Partial<MaintenanceRecord> = {
           status: MaintenanceStatus.PENDING,
-          clientSignature: "",
-          clientSigneeName: "",
-          clientSigneeRegistration: "",
+          routeStatus: MaintenanceStatus.PENDING,
+          adminApproved: false,
+          approvedAt: undefined,
+          approvedBy: undefined,
         };
         await onUpdateRecord(record, updates);
-        alert("Planilha de atendimento reaberta com sucesso!");
+        alert("Planilha de atendimento devolvida para rascunho com sucesso! Todos os dados preenchidos foram totalmente preservados.");
       } catch (err) {
         console.error("Erro ao reabrir planilha:", err);
         alert("Ocorreu um erro ao tentar reabrir a planilha de atendimento.");

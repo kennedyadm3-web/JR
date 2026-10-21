@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   Building2, 
   MapPin, 
@@ -25,7 +25,9 @@ import {
   Power,
   PowerOff,
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  Phone,
+  ChevronDown
 } from 'lucide-react';
 import { dataService, normalizeAddressText } from '../services/dataService';
 import { Client, Address, Technician, RouteConfiguration, TravelCard, Equipment, RouteType } from '../types';
@@ -79,6 +81,10 @@ export default function RegistrationView() {
   const [newAddrStatus, setNewAddrStatus] = useState<'active' | 'inactive'>('active');
 
   const [newTechName, setNewTechName] = useState('');
+  const [newTechFullName, setNewTechFullName] = useState('');
+  const [newTechPhone, setNewTechPhone] = useState('');
+  const [newTechCpf, setNewTechCpf] = useState('');
+  const [newTechRole, setNewTechRole] = useState('');
   const [newTechPin, setNewTechPin] = useState('');
 
   const [newCardLastFourDigits, setNewCardLastFourDigits] = useState('');
@@ -94,6 +100,231 @@ export default function RegistrationView() {
   const [newEquipLabel, setNewEquipLabel] = useState('');
   const [newEquipBrand, setNewEquipBrand] = useState('');
   const [newEquipBTUs, setNewEquipBTUs] = useState('');
+
+  // Autocomplete states for Equipment Address Selection
+  const [equipAddressSearchTerm, setEquipAddressSearchTerm] = useState('');
+  const [isEquipAddressDropdownOpen, setIsEquipAddressDropdownOpen] = useState(false);
+  const equipAddressDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on click outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (equipAddressDropdownRef.current && !equipAddressDropdownRef.current.contains(event.target as Node)) {
+        setIsEquipAddressDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Sync addressSearchTerm when selectedAddressForEquip or addresses change
+  useEffect(() => {
+    if (selectedAddressForEquip) {
+      const addr = addresses.find(a => a.id === selectedAddressForEquip);
+      if (addr) {
+        setEquipAddressSearchTerm(`${addr.street}, ${addr.number || 'S/N'}`);
+      }
+    } else {
+      setEquipAddressSearchTerm('');
+    }
+  }, [selectedAddressForEquip, addresses]);
+
+  // Filtered addresses for Equipment tab autocomplete
+  const filteredEquipAddresses = useMemo(() => {
+    if (!selectedClientForEquip) return [];
+    const clientAddresses = addresses.filter(a => a.clientId === selectedClientForEquip);
+    if (!equipAddressSearchTerm.trim()) return clientAddresses;
+
+    const normalizeStr = (str: string) => 
+      (str || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+
+    const queryTerms = normalizeStr(equipAddressSearchTerm).split(/\s+/).filter(Boolean);
+
+    return clientAddresses.filter(a => {
+      const street = normalizeStr(a.street);
+      const name = normalizeStr(a.name || '');
+      const neighborhood = normalizeStr(a.neighborhood || '');
+      const complement = normalizeStr(a.complement || '');
+      const route = normalizeStr(a.route || '');
+      const number = (a.number || '').toLowerCase();
+      const fullCombined = `${street} ${name} ${neighborhood} ${complement} ${route} ${number}`;
+
+      return queryTerms.every(term => fullCombined.includes(term));
+    });
+  }, [addresses, selectedClientForEquip, equipAddressSearchTerm]);
+
+  const renderAddressAutocomplete = (isCompactFilter: boolean = false) => {
+    const clientAddresses = addresses.filter(a => a.clientId === selectedClientForEquip);
+    
+    return (
+      <div className="relative" ref={equipAddressDropdownRef}>
+        <div className="relative flex items-center">
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
+          <input
+            type="text"
+            value={equipAddressSearchTerm}
+            disabled={!selectedClientForEquip}
+            placeholder={
+              !selectedClientForEquip
+                ? "Selecione o cliente primeiro..."
+                : selectedAddressForEquip
+                  ? "Clique para buscar ou alterar endereço..."
+                  : "Digite parte do endereço, escola ou bairro..."
+            }
+            onFocus={() => {
+              if (selectedClientForEquip) {
+                setIsEquipAddressDropdownOpen(true);
+              }
+            }}
+            onClick={() => {
+              if (selectedClientForEquip) {
+                setIsEquipAddressDropdownOpen(true);
+              }
+            }}
+            onChange={(e) => {
+              setEquipAddressSearchTerm(e.target.value);
+              setIsEquipAddressDropdownOpen(true);
+              if (!e.target.value.trim() && selectedAddressForEquip) {
+                setSelectedAddressForEquip('');
+              }
+            }}
+            className={cn(
+              "w-full bg-white border rounded-xl pl-8 pr-12 text-xs font-semibold text-slate-700 outline-none transition-all",
+              isCompactFilter ? "py-2" : "py-2.5",
+              !selectedClientForEquip
+                ? "bg-slate-50 border-slate-200 text-slate-400 cursor-not-allowed"
+                : selectedAddressForEquip
+                  ? "border-emerald-300 ring-2 ring-emerald-500/10 bg-emerald-50/20"
+                  : "border-slate-200 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+            )}
+          />
+          <div className="absolute right-1.5 flex items-center gap-0.5">
+            {selectedAddressForEquip && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedAddressForEquip('');
+                  setEquipAddressSearchTerm('');
+                  setIsEquipAddressDropdownOpen(true);
+                }}
+                title="Limpar endereço selecionado"
+                className="p-1 text-slate-400 hover:text-red-500 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={!selectedClientForEquip}
+              onClick={() => {
+                if (selectedClientForEquip) {
+                  setIsEquipAddressDropdownOpen(prev => !prev);
+                }
+              }}
+              className="p-1 text-slate-400 hover:text-slate-600 rounded-md transition-colors cursor-pointer"
+            >
+              <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", isEquipAddressDropdownOpen ? "rotate-180" : "")} />
+            </button>
+          </div>
+        </div>
+
+        {/* Dropdown com a lista de endereços filtrados */}
+        {isEquipAddressDropdownOpen && selectedClientForEquip && (
+          <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-2xl overflow-hidden max-h-64 flex flex-col">
+            <div className="px-3 py-1.5 bg-slate-50 border-b border-slate-100 flex items-center justify-between text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+              <span>Endereços ({filteredEquipAddresses.length} de {clientAddresses.length})</span>
+              {equipAddressSearchTerm && (
+                <span className="text-blue-600 font-normal normal-case truncate max-w-[140px]">
+                  Busca: "{equipAddressSearchTerm}"
+                </span>
+              )}
+            </div>
+            
+            <div className="overflow-y-auto divide-y divide-slate-100 flex-1">
+              {selectedAddressForEquip && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedAddressForEquip('');
+                    setEquipAddressSearchTerm('');
+                    setIsEquipAddressDropdownOpen(false);
+                  }}
+                  className="w-full text-left p-2.5 text-xs text-slate-500 hover:bg-slate-50 font-bold flex items-center gap-1.5 border-b border-slate-100 cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5 text-slate-400" />
+                  <span>Todos os Endereços / Nenhum Selecionado</span>
+                </button>
+              )}
+
+              {filteredEquipAddresses.length === 0 ? (
+                <div className="p-4 text-center text-xs text-slate-400">
+                  Nenhum endereço encontrado para os termos digitados.
+                </div>
+              ) : (
+                filteredEquipAddresses.map((addr) => {
+                  const isSelected = selectedAddressForEquip === addr.id;
+                  const fullText = `${addr.street}, ${addr.number || 'S/N'}`;
+                  return (
+                    <button
+                      key={addr.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedAddressForEquip(addr.id);
+                        setEquipAddressSearchTerm(fullText);
+                        setIsEquipAddressDropdownOpen(false);
+                      }}
+                      className={cn(
+                        "w-full text-left p-2.5 transition-colors flex items-start justify-between gap-2 group cursor-pointer",
+                        isSelected ? "bg-blue-50/90 text-blue-900 font-semibold" : "hover:bg-slate-50 text-slate-700"
+                      )}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-start gap-1.5">
+                          <MapPin className={cn("w-3.5 h-3.5 flex-shrink-0 mt-0.5", isSelected ? "text-blue-600" : "text-slate-400 group-hover:text-blue-500")} />
+                          <span className="text-xs font-bold leading-tight">{fullText}</span>
+                        </div>
+                        
+                        {addr.name && (
+                          <div className="text-[11px] text-blue-700 font-semibold ml-5 mt-0.5">
+                            {addr.name}
+                          </div>
+                        )}
+                        
+                        <div className="flex flex-wrap items-center gap-1.5 ml-5 mt-1 text-[10px] text-slate-500">
+                          {addr.neighborhood && (
+                            <span className="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">
+                              {addr.neighborhood}
+                            </span>
+                          )}
+                          {addr.route && (
+                            <span className="bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded font-medium">
+                              Rota: {addr.route}
+                            </span>
+                          )}
+                          {addr.totalMachines !== undefined && addr.totalMachines > 0 && (
+                            <span className="text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded">
+                              {addr.totalMachines} máq.
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {isSelected && (
+                        <span className="flex-shrink-0 text-blue-600 font-bold text-xs mt-1">
+                          <CheckCircle2 className="w-4 h-4" />
+                        </span>
+                      )}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const [message, setMessage] = useState<{ text: string, type: 'success' | 'error' } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -582,6 +813,10 @@ export default function RegistrationView() {
     setNewAddrCep('');
     setNewAddrStatus('active');
     setNewTechName('');
+    setNewTechFullName('');
+    setNewTechPhone('');
+    setNewTechCpf('');
+    setNewTechRole('');
     setNewTechPin('');
     setNewCardLastFourDigits('');
     setNewCardBank('');
@@ -910,11 +1145,17 @@ export default function RegistrationView() {
     }
     setIsSubmitting(true);
     try {
+      const details = {
+        fullName: newTechFullName.trim(),
+        phone: newTechPhone.trim(),
+        cpf: newTechCpf.trim(),
+        role: newTechRole.trim()
+      };
       if (editingId) {
-        await dataService.updateTechnician(editingId, newTechName, newTechPin);
-        setMessage({ text: 'Técnico atualizado!', type: 'success' });
+        await dataService.updateTechnician(editingId, newTechName.trim(), newTechPin.trim(), details);
+        setMessage({ text: 'Técnico atualizado com sucesso!', type: 'success' });
       } else {
-        await dataService.addTechnician(newTechName, newTechPin);
+        await dataService.addTechnician(newTechName.trim(), newTechPin.trim(), details);
         setMessage({ text: 'Técnico adicionado com sucesso!', type: 'success' });
       }
       handleCancelEdit();
@@ -1017,7 +1258,11 @@ export default function RegistrationView() {
   const startEditTech = (tech: Technician) => {
     setEditingId(tech.id);
     setActiveTab('techs');
-    setNewTechName(tech.name);
+    setNewTechName(tech.name || '');
+    setNewTechFullName(tech.fullName || '');
+    setNewTechPhone(tech.phone || '');
+    setNewTechCpf(tech.cpf || '');
+    setNewTechRole(tech.role || '');
     setNewTechPin(tech.pin || '');
   };
 
@@ -1066,7 +1311,15 @@ export default function RegistrationView() {
     })
     .slice()
     .sort((a, b) => (a.street || '').localeCompare(b.street || ''));
-  const filteredTechs = techs.filter(t => t.name.toLowerCase().includes(searchTerm.toLowerCase()));
+  const filteredTechs = techs.filter(t => {
+    const q = searchTerm.toLowerCase();
+    return (t.name || '').toLowerCase().includes(q) ||
+           (t.fullName || '').toLowerCase().includes(q) ||
+           (t.phone || '').toLowerCase().includes(q) ||
+           (t.cpf || '').toLowerCase().includes(q) ||
+           (t.role || '').toLowerCase().includes(q) ||
+           (t.pin || '').includes(q);
+  });
   const filteredCards = cards.filter(card => 
     card.bank.toLowerCase().includes(searchTerm.toLowerCase()) || 
     card.holderName.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -1462,33 +1715,96 @@ export default function RegistrationView() {
           {activeTab === 'techs' && (
             <div className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Nome do Técnico</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                  Nome do Técnico (Listagem / Cronograma) <span className="text-red-500">*</span>
+                </label>
                 <input 
                   type="text"
+                  placeholder="Ex: JAILSON"
                   value={newTechName}
-                  onChange={(e) => setNewTechName(e.target.value)}
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500"
+                  onChange={(e) => setNewTechName(e.target.value.toUpperCase())}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-bold transition-all uppercase"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">Nome curto de exibição que aparece no cronograma, roteiro diário e relatórios.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                  Nome Completo
+                </label>
+                <input 
+                  type="text"
+                  placeholder="Ex: Jailson Silva dos Santos"
+                  value={newTechFullName}
+                  onChange={(e) => setNewTechFullName(e.target.value)}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-medium transition-all"
+                />
+                <p className="text-[10px] text-gray-400 mt-1">Nome completo oficial para cadastros, documentos formais e auditorias.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                  Número de Telefone / WhatsApp
+                </label>
+                <input 
+                  type="text"
+                  placeholder="Ex: (82) 99999-8888"
+                  value={newTechPhone}
+                  onChange={(e) => setNewTechPhone(e.target.value)}
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-medium transition-all"
                 />
               </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                    CPF
+                  </label>
+                  <input 
+                    type="text"
+                    placeholder="Ex: 000.000.000-00"
+                    value={newTechCpf}
+                    onChange={(e) => setNewTechCpf(e.target.value)}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-medium transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                    Cargo / Função
+                  </label>
+                  <input 
+                    type="text"
+                    placeholder="Ex: Técnico de Refrigeração"
+                    value={newTechRole}
+                    onChange={(e) => setNewTechRole(e.target.value)}
+                    className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-medium transition-all"
+                  />
+                </div>
+              </div>
+
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">PIN de Acesso (4 dígitos)</label>
+                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-1.5">
+                  PIN de Acesso (4 dígitos)
+                </label>
                 <input 
                   type="text"
                   maxLength={4}
                   placeholder="Ex: 1234"
                   value={newTechPin}
                   onChange={(e) => setNewTechPin(e.target.value.replace(/\D/g, ''))}
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 font-mono tracking-widest text-center text-lg"
+                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 focus:bg-white font-mono tracking-widest text-center text-lg transition-all"
                 />
                 <p className="text-[10px] text-gray-400 mt-1">Este PIN servirá como senha para o técnico acessar seu roteiro diário no tablet de rua.</p>
               </div>
+
               <button 
                 onClick={handleAddTech}
-                disabled={isSubmitting}
+                disabled={isSubmitting || !newTechName.trim()}
                 className={cn(
-                    "w-full disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all shadow-lg mt-2 flex items-center justify-center gap-2",
-                    editingId ? "bg-amber-600 hover:bg-amber-700 shadow-amber-200" : "bg-blue-600 hover:bg-blue-700 shadow-blue-200"
-                  )}
+                  "w-full disabled:opacity-50 text-white font-bold py-3 rounded-xl transition-all shadow-lg mt-2 flex items-center justify-center gap-2 cursor-pointer",
+                  editingId ? "bg-amber-600 hover:bg-amber-700 shadow-amber-200" : "bg-blue-600 hover:bg-blue-700 shadow-blue-200"
+                )}
               >
                 {isSubmitting ? (editingId ? 'Atualizando...' : 'Adicionando...') : (editingId ? 'Salvar Alterações' : 'Adicionar Técnico')}
               </button>
@@ -1564,22 +1880,15 @@ export default function RegistrationView() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Endereço</label>
-                <select 
-                  value={selectedAddressForEquip}
-                  disabled={!selectedClientForEquip}
-                  onChange={(e) => setSelectedAddressForEquip(e.target.value)}
-                  className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 disabled:opacity-50 font-medium text-gray-800 text-sm"
-                >
-                  <option value="">Selecione um endereço</option>
-                  {addresses
-                    .filter(a => a.clientId === selectedClientForEquip)
-                    .slice()
-                    .sort((a, b) => (a.street || '').localeCompare(b.street || ''))
-                    .map(a => (
-                      <option key={a.id} value={a.id}>{a.street} ({a.route})</option>
-                    ))}
-                </select>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider">Endereço *</label>
+                  {selectedAddressForEquip && (
+                    <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded flex items-center gap-1 border border-emerald-200">
+                      <CheckCircle2 className="w-2.5 h-2.5" /> Selecionado
+                    </span>
+                  )}
+                </div>
+                {renderAddressAutocomplete(false)}
               </div>
 
               <div>
@@ -2063,12 +2372,20 @@ export default function RegistrationView() {
                     <User className="w-5 h-5" />
                   </div>
                   <div>
-                    <h4 className="font-bold text-gray-900">{tech.name}</h4>
-                    {tech.pin ? (
-                      <p className="text-xs text-gray-500 font-mono">PIN: <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{tech.pin}</span></p>
-                    ) : (
-                      <p className="text-xs text-amber-600 italic">Sem PIN (Sem acesso ao tablet)</p>
-                    )}
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-bold text-gray-900">{tech.name}</h4>
+                      {tech.role && <span className="text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">{tech.role}</span>}
+                    </div>
+                    {tech.fullName && <p className="text-xs font-semibold text-gray-700 mt-0.5">{tech.fullName}</p>}
+                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 font-medium mt-1">
+                      {tech.phone && <span className="flex items-center gap-1 text-slate-600">📱 {tech.phone}</span>}
+                      {tech.cpf && <span className="flex items-center gap-1 text-slate-500">📄 CPF: {tech.cpf}</span>}
+                      {tech.pin ? (
+                        <span className="text-xs text-gray-500 font-mono">PIN: <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{tech.pin}</span></span>
+                      ) : (
+                        <span className="text-xs text-amber-600 italic">Sem PIN</span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all">
@@ -2135,22 +2452,15 @@ export default function RegistrationView() {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Filtrar por Endereço</label>
-                    <select
-                      value={selectedAddressForEquip}
-                      disabled={!selectedClientForEquip}
-                      onChange={(e) => setSelectedAddressForEquip(e.target.value)}
-                      className="w-full text-xs px-3 py-2 bg-white border border-gray-200 rounded-xl outline-none focus:border-blue-500 font-medium text-gray-700 disabled:opacity-50"
-                    >
-                      <option value="">Todos os Endereços</option>
-                      {addresses
-                        .filter(a => a.clientId === selectedClientForEquip)
-                        .slice()
-                        .sort((a, b) => (a.street || '').localeCompare(b.street || ''))
-                        .map(a => (
-                          <option key={a.id} value={a.id}>{a.street} ({a.route})</option>
-                        ))}
-                    </select>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">Filtrar por Endereço</label>
+                      {selectedAddressForEquip && (
+                        <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded flex items-center gap-1">
+                          <CheckCircle2 className="w-2.5 h-2.5" /> Selecionado
+                        </span>
+                      )}
+                    </div>
+                    {renderAddressAutocomplete(true)}
                   </div>
                 </div>
 

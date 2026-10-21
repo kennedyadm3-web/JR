@@ -422,6 +422,7 @@ export function WeeklyPlanner({
                 ) : (
                   Object.entries(technicianWeeklyStats)
                     .filter(([techName]) => (technicianGrandTotals[techName] || 0) > 0)
+                    .sort((a, b) => ((technicianGrandTotals[b[0]] || 0) - (technicianGrandTotals[a[0]] || 0)) || a[0].localeCompare(b[0]))
                     .map(([techName, weeks]) => {
                       const grandTotal = technicianGrandTotals[techName] || 0;
                       

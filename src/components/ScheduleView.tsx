@@ -987,8 +987,9 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {recordsList.map(record => {
-                      const isTech1Disabled = isReadOnly || record.status === MaintenanceStatus.COMPLETED || record.status === MaintenanceStatus.PRE_COMPLETED;
-                      const isTech2Disabled = isReadOnly || record.status === MaintenanceStatus.COMPLETED || record.status === MaintenanceStatus.PRE_COMPLETED;
+                      const isCompleted = record.status === MaintenanceStatus.COMPLETED || record.status === MaintenanceStatus.PRE_COMPLETED;
+                      const isTech1Disabled = isReadOnly || isCompleted;
+                      const isTech2Disabled = isReadOnly || isCompleted;
                       
                       return (
                         <tr key={record.id} className="hover:bg-blue-50/30 transition-colors group">
@@ -1085,9 +1086,14 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
                           </td>
                         <td className="px-4 py-4 text-center">
                           <select 
-                            value={record.scheduledWeek} disabled={isReadOnly}
+                            value={record.scheduledWeek} disabled={isReadOnly || isCompleted}
                             onChange={(e) => updateRecord(record, { scheduledWeek: parseInt(e.target.value) })}
-                            className="text-xs font-semibold bg-gray-100 border-none rounded px-2 py-1 focus:ring-0 cursor-pointer"
+                            className={cn(
+                              "text-xs font-semibold rounded px-2 py-1 focus:ring-0 transition-all",
+                              isReadOnly || isCompleted 
+                                ? "bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200" 
+                                : "bg-gray-100 border-none cursor-pointer hover:bg-gray-200/70"
+                            )}
                           >
                             {[1,2,3,4,5].map(w => <option key={w} value={w}>Semana {w}</option>)}
                           </select>
@@ -1095,13 +1101,15 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
                         <td className="px-4 py-4">
                           <input 
                             type="date"
-                            value={record.plannedDate || ''} disabled={isReadOnly}
+                            value={record.plannedDate || ''} disabled={isReadOnly || isCompleted}
                             onChange={(e) => updateRecord(record, { plannedDate: e.target.value })}
                             className={cn(
                               "text-xs border rounded px-2 py-1 outline-none w-full md:w-auto transition-all",
-                              record.plannedDate 
-                                ? "font-bold text-blue-600 bg-blue-50/40 border-blue-200 focus:border-blue-500" 
-                                : "font-semibold text-gray-400 bg-gray-100/40 border-gray-200 focus:text-blue-600"
+                              isReadOnly || isCompleted
+                                ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed font-medium"
+                                : record.plannedDate 
+                                  ? "font-bold text-blue-600 bg-blue-50/40 border-blue-200 focus:border-blue-500" 
+                                  : "font-semibold text-gray-400 bg-gray-100/40 border-gray-200 focus:text-blue-600"
                             )}
                           />
                         </td>
@@ -1109,13 +1117,13 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
                           <div className="relative group/exec">
                             <input 
                               type="date"
-                              disabled={isReadOnly || !record.plannedDate}
+                              disabled={isReadOnly || !record.plannedDate || isCompleted}
                               value={record.executionDate ? record.executionDate.split('T')[0] : ''}
                               onChange={(e) => {
                                 const dateStr = e.target.value;
                                 const qty = record.executedQuantity || 0;
                                 
-                                const isAwaitingApproval = record.status === MaintenanceStatus.PRE_COMPLETED || Boolean(record.clientSignature && !record.adminApproved && !record.approvedAt);
+                                const isAwaitingApproval = record.status === MaintenanceStatus.PRE_COMPLETED;
                                 let nextStatus = isAwaitingApproval ? MaintenanceStatus.PRE_COMPLETED : MaintenanceStatus.PENDING;
                                 if (qty > 0) {
                                   nextStatus = isAwaitingApproval ? MaintenanceStatus.PRE_COMPLETED : MaintenanceStatus.COMPLETED;
@@ -1129,15 +1137,21 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
                                 });
                               }}
                               className={cn(
-                                "text-xs border border-gray-200 rounded px-2 py-1 outline-none w-full md:w-auto",
-                                !record.plannedDate 
+                                "text-xs border border-gray-200 rounded px-2 py-1 outline-none w-full md:w-auto transition-all",
+                                isReadOnly || !record.plannedDate || isCompleted
                                   ? "bg-gray-100 text-gray-400 cursor-not-allowed" 
                                   : "focus:border-blue-500"
                               )}
                             />
-                            {!record.plannedDate && (
+                            {!record.plannedDate && !isCompleted && (
                               <div className="absolute opacity-0 group-hover/exec:opacity-100 bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-gray-800 text-white text-[10px] whitespace-nowrap rounded font-medium pointer-events-none transition-opacity z-10">
                                 Preencha a data prevista primeiro
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
+                              </div>
+                            )}
+                            {isCompleted && (
+                              <div className="absolute opacity-0 group-hover/exec:opacity-100 bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-gray-800 text-white text-[10px] whitespace-nowrap rounded font-medium pointer-events-none transition-opacity z-10 shadow-md">
+                                Atendimento concluído (data blindada)
                                 <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
                               </div>
                             )}
@@ -1157,7 +1171,7 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
                                   const val = parseInt(e.target.value) || 0;
                                   const hasDate = !!record.executionDate;
 
-                                  const isAwaitingApproval = record.status === MaintenanceStatus.PRE_COMPLETED || Boolean(record.clientSignature && !record.adminApproved && !record.approvedAt);
+                                  const isAwaitingApproval = record.status === MaintenanceStatus.PRE_COMPLETED;
                                   let nextStatus = isAwaitingApproval ? MaintenanceStatus.PRE_COMPLETED : MaintenanceStatus.PENDING;
                                   if (val > 0) {
                                     nextStatus = isAwaitingApproval ? MaintenanceStatus.PRE_COMPLETED : MaintenanceStatus.COMPLETED;

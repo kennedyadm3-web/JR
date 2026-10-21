@@ -4,6 +4,7 @@ import {
   Plus, 
   Trash2, 
   Shield, 
+  ShieldCheck,
   X,
   Mail,
   User as UserIcon,
@@ -31,6 +32,10 @@ interface InternalUser {
   createdAt?: any;
   lastActive?: any;
   updatedAt?: any;
+  isApproved?: boolean;
+  approvedBy?: string;
+  approvedAt?: any;
+  status?: string;
 }
 
 export default function UserManagementView() {
@@ -173,6 +178,49 @@ export default function UserManagementView() {
       }
     } catch (error: any) {
       setMessage({ text: 'Erro ao remover: ' + error.message, type: 'error' });
+    }
+  };
+
+  const handleApproveUser = async (targetUser: InternalUser) => {
+    try {
+      await updateDoc(doc(db, 'users', targetUser.uid), {
+        isApproved: true,
+        status: 'active',
+        approvedBy: 'Administrador',
+        approvedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+
+      fetch(`/api/users/${targetUser.uid}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approvedBy: 'Administrador' })
+      }).catch(console.warn);
+
+      setMessage({ text: `Acesso de ${targetUser.displayName || targetUser.email} aprovado com sucesso!`, type: 'success' });
+      loadData();
+    } catch (err: any) {
+      setMessage({ text: 'Erro ao aprovar usuário: ' + err.message, type: 'error' });
+    }
+  };
+
+  const handleApproveAllPending = async () => {
+    const pending = users.filter(u => u.role !== UserRole.ADMIN && u.isApproved !== true);
+    if (pending.length === 0) return;
+    try {
+      for (const targetUser of pending) {
+        await updateDoc(doc(db, 'users', targetUser.uid), {
+          isApproved: true,
+          status: 'active',
+          approvedBy: 'Administrador',
+          approvedAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        });
+      }
+      setMessage({ text: `${pending.length} usuário(s) aprovado(s) com sucesso!`, type: 'success' });
+      loadData();
+    } catch (err: any) {
+      setMessage({ text: 'Erro ao aprovar usuários: ' + err.message, type: 'error' });
     }
   };
 
@@ -333,6 +381,32 @@ export default function UserManagementView() {
         </div>
       </div>
 
+      {/* Banner de Usuários Aguardando Aprovação */}
+      {users.some(u => u.role !== UserRole.ADMIN && u.isApproved !== true) && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 animate-in fade-in">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5 animate-pulse text-amber-600" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-amber-900">
+                {users.filter(u => u.role !== UserRole.ADMIN && u.isApproved !== true).length} novo(s) usuário(s) aguardando aprovação para o 1º acesso
+              </p>
+              <p className="text-xs text-amber-700">
+                O 1º acesso só será liberado após a aprovação de um Administrador.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleApproveAllPending}
+            className="bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold px-4 py-2.5 rounded-xl transition-all shadow-md shrink-0 flex items-center gap-1.5"
+          >
+            <CheckCircle2 className="w-4 h-4" />
+            Aprovar Todos os Pendentes
+          </button>
+        </div>
+      )}
+
       {message && (
         <div className={cn(
           "p-4 rounded-xl border flex items-center gap-3 animate-in fade-in slide-in-from-top-2",
@@ -353,7 +427,7 @@ export default function UserManagementView() {
               <tr className="bg-gray-50 border-b border-gray-100 text-[10px] font-black uppercase tracking-widest text-gray-400">
                 <th className="px-6 py-4">Usuário</th>
                 <th className="px-6 py-4">Cargo</th>
-                <th className="px-6 py-4">Status & Último Login</th>
+                <th className="px-6 py-4">Aprovação & Status</th>
                 <th className="px-6 py-4 text-right">Ações</th>
               </tr>
             </thead>
@@ -416,18 +490,26 @@ export default function UserManagementView() {
                     </span>
                   </td>
                   <td className="px-6 py-4">
-                    <div className="flex flex-col gap-1">
-                      {isUserOnline(user) ? (
-                        <span className="inline-flex items-center gap-1 text-[10px] w-fit font-bold px-2 py-0.5 rounded-full uppercase tracking-wide bg-emerald-50 text-emerald-800 border border-emerald-100 animate-pulse">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                          Online agora
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-[10px] w-fit font-bold px-2 py-0.5 rounded-full uppercase tracking-wide bg-gray-50 text-gray-500 border border-gray-200">
-                          <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
-                          Inativo / Offline
-                        </span>
-                      )}
+                    <div className="flex flex-col gap-1.5">
+                      <div className="flex items-center gap-2">
+                        {user.role === UserRole.ADMIN || user.isApproved === true ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wide bg-emerald-100 text-emerald-800 border border-emerald-200">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                            Acesso Liberado
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wide bg-amber-100 text-amber-900 border border-amber-300 animate-pulse">
+                            <Clock className="w-3 h-3 text-amber-600" />
+                            Aguardando Aprovação (1º Acesso)
+                          </span>
+                        )}
+                        {isUserOnline(user) && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wide bg-emerald-50 text-emerald-700 border border-emerald-200">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" />
+                            Online
+                          </span>
+                        )}
+                      </div>
                       <span className="text-xs text-gray-500 font-medium">
                         Acesso: <b className="text-gray-700">{formatFirestoreDate(user.lastLogin || user.updatedAt || user.createdAt)}</b>
                       </span>
@@ -435,6 +517,19 @@ export default function UserManagementView() {
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex items-center justify-end gap-1">
+                      {user.role !== UserRole.ADMIN && user.isApproved !== true && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleApproveUser(user);
+                          }}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition-all shadow-sm flex items-center gap-1.5 mr-1"
+                          title="Aprovar Acesso Imediatamente"
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                          Aprovar
+                        </button>
+                      )}
                       <button 
                         onClick={(e) => {
                           e.stopPropagation();

@@ -30,7 +30,8 @@ import {
   ListOrdered,
   Info,
   ArrowRight,
-  AlertCircle
+  AlertCircle,
+  Sparkles
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { Client, ServiceCatalogItem, ClientPriceOverride } from '../types';
@@ -70,6 +71,13 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
   const [formActive, setFormActive] = useState<boolean>(true);
   const [formNotes, setFormNotes] = useState<string>('');
   const [formClientPrices, setFormClientPrices] = useState<Record<string, ClientPriceOverride>>({});
+
+  // Conflito de código em tempo real no formulário
+  const codeConflictItem = useMemo(() => {
+    const clean = formCode.trim().toUpperCase();
+    if (!clean) return null;
+    return items.find(i => String(i.code ?? '').trim().toUpperCase() === clean && (!editingItem || i.id !== editingItem.id)) || null;
+  }, [formCode, items, editingItem]);
 
   // Categorias padrão sugeridas para Produtos
   const DEFAULT_PRODUCT_CATEGORIES = [
@@ -250,6 +258,10 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
   const [isSavingOrder, setIsSavingOrder] = useState<boolean>(false);
   const [reorderSuccessToast, setReorderSuccessToast] = useState<boolean>(false);
 
+  // Deduplication States
+  const [isDeduplicating, setIsDeduplicating] = useState<boolean>(false);
+  const [dedupToast, setDedupToast] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
+
   // Load Catalog Items
   const loadCatalog = async () => {
     try {
@@ -260,6 +272,33 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
       console.error('Erro ao carregar catálogo de produtos e serviços:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Executa verificação e unificação manual de duplicatas no Firestore
+  const handleDeduplicateCatalog = async () => {
+    try {
+      setIsDeduplicating(true);
+      const res = await dataService.deduplicateServiceCatalogItems();
+      await loadCatalog();
+      if (res.removedCount > 0) {
+        setDedupToast({
+          message: `${res.removedCount} item(ns) duplicado(s) com mesmo código foram unificados e removidos com sucesso! Catálogo atualizado com ${res.remainingCount} itens únicos.`,
+          type: 'success'
+        });
+      } else {
+        setDedupToast({
+          message: 'Tudo certo! Nenhum produto ou serviço duplicado foi encontrado no catálogo.',
+          type: 'info'
+        });
+      }
+      setTimeout(() => setDedupToast(null), 6000);
+      if (onCatalogUpdated) onCatalogUpdated();
+    } catch (err: any) {
+      console.error('Erro ao deduplicar catálogo:', err);
+      alert('Erro ao verificar/unificar duplicatas: ' + (err.message || 'Erro desconhecido'));
+    } finally {
+      setIsDeduplicating(false);
     }
   };
 
@@ -377,10 +416,18 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
     setIsModalOpen(true);
   };
 
-  // Duplicate item
+  // Duplicate item gerando código único garantido
   const handleDuplicateItem = (item: ServiceCatalogItem) => {
     setEditingItem(null);
-    setFormCode(`${item.code}-COPIA`);
+    const baseCode = item.code.replace(/-COPIA(-\d+)?$/i, '');
+    let candidateCode = `${baseCode}-COPIA`;
+    let counter = 1;
+    while (items.some(i => i.code.trim().toUpperCase() === candidateCode.trim().toUpperCase())) {
+      candidateCode = `${baseCode}-COPIA-${counter}`;
+      counter++;
+    }
+
+    setFormCode(candidateCode);
     setFormDescription(`${item.description} (CÓPIA)`);
     setFormType(item.type);
     setFormCategory(item.category || '');
@@ -432,7 +479,8 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
   // Save Item from Modal
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formCode.trim()) {
+    const cleanCode = formCode.trim().toUpperCase();
+    if (!cleanCode) {
       setErrorMessage('O código do item é obrigatório.');
       return;
     }
@@ -445,13 +493,22 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
       return;
     }
 
+    // Validação de unicidade no catálogo local
+    const existingConflict = items.find(i => 
+      String(i.code ?? '').trim().toUpperCase() === cleanCode && (!editingItem || i.id !== editingItem.id)
+    );
+    if (existingConflict) {
+      setErrorMessage(`O código #${cleanCode} já está em uso pelo item "${existingConflict.description}". Cada produto ou serviço deve possuir um código único!`);
+      return;
+    }
+
     try {
       setIsSaving(true);
       setErrorMessage('');
       setSuccessMessage('');
 
       const itemPayload: Omit<ServiceCatalogItem, 'id'> & { id?: string } = {
-        code: formCode.trim().toUpperCase(),
+        code: cleanCode,
         description: formDescription.trim().toUpperCase(),
         type: formType,
         category: formType === 'product' && formCategory ? formCategory.trim().toUpperCase() : (formCategory ? formCategory.trim().toUpperCase() : undefined),
@@ -477,7 +534,7 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
       }, 700);
     } catch (err: any) {
       console.error('Erro ao salvar item:', err);
-      setErrorMessage('Erro ao salvar item no banco de dados.');
+      setErrorMessage(err.message || 'Erro ao salvar item no banco de dados.');
     } finally {
       setIsSaving(false);
     }
@@ -832,6 +889,17 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
             <div className="flex flex-wrap items-center gap-3">
               <button
                 type="button"
+                onClick={handleDeduplicateCatalog}
+                disabled={isDeduplicating || loading}
+                title="Verifica o catálogo e unifica produtos ou serviços cadastrados com códigos duplicados"
+                className="bg-white/10 hover:bg-white/15 border border-white/10 text-white px-3.5 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                <Sparkles className={cn("w-4 h-4 text-amber-300", isDeduplicating && "animate-spin")} />
+                <span>{isDeduplicating ? 'Unificando...' : 'Unificar Duplicatas'}</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => {
                   setActiveCategoryModalTab(typeFilter === 'product' ? 'product' : 'service');
                   setIsCategoryModalOpen(true);
@@ -862,7 +930,7 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
               <button
                 type="button"
                 onClick={() => handleOpenCreateModal('service')}
-                className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2"
+                className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl text-xs font-bold shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2 cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
                 Novo Serviço / Produto
@@ -891,6 +959,39 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
           </div>
         </div>
       </div>
+
+      {/* Toast de Deduplicação / Unificação de Itens */}
+      <AnimatePresence>
+        {dedupToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className={cn(
+              "p-4 rounded-xl border flex items-center justify-between gap-3 text-xs font-bold shadow-sm",
+              dedupToast.type === 'success'
+                ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                : "bg-blue-50 border-blue-200 text-blue-800"
+            )}
+          >
+            <div className="flex items-center gap-2.5">
+              {dedupToast.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              ) : (
+                <Info className="w-4 h-4 text-blue-600 shrink-0" />
+              )}
+              <span>{dedupToast.message}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDedupToast(null)}
+              className="text-slate-400 hover:text-slate-600 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* FILTROS E BARRA DE CONTROLE */}
       <div className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-sm space-y-4">
@@ -1769,17 +1870,40 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       {/* Código */}
                       <div>
-                        <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
-                          Código do Item *
-                        </label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block">
+                            Código do Item *
+                          </label>
+                          {codeConflictItem ? (
+                            <span className="text-[9px] font-bold text-rose-600 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3" />
+                              Código já em uso!
+                            </span>
+                          ) : formCode.trim() ? (
+                            <span className="text-[9px] font-bold text-emerald-600 flex items-center gap-1">
+                              <Check className="w-3 h-3" />
+                              Código único livre
+                            </span>
+                          ) : null}
+                        </div>
                         <input
                           type="text"
                           placeholder="EX: 61, 336, CARGA-GAS"
                           value={formCode}
                           onChange={(e) => setFormCode(e.target.value)}
-                          className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-bold text-slate-800 uppercase outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-mono"
+                          className={cn(
+                            "w-full rounded-xl p-2.5 text-xs font-bold uppercase outline-none font-mono transition-all",
+                            codeConflictItem
+                              ? "bg-rose-50/70 border-2 border-rose-400 text-rose-900 focus:ring-2 focus:ring-rose-500/20"
+                              : "bg-slate-50 border border-slate-200 text-slate-800 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+                          )}
                           required
                         />
+                        {codeConflictItem && (
+                          <p className="text-[10px] text-rose-600 mt-1 font-semibold leading-tight">
+                            Código já cadastrado para: {codeConflictItem.description.slice(0, 45)}...
+                          </p>
+                        )}
                       </div>
 
                       {/* Unidade */}
@@ -2021,8 +2145,9 @@ export default function ContractItemsCatalog({ clients, canEdit, managerClientId
 
                   <button
                     type="submit"
-                    disabled={isSaving}
-                    className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-xs font-bold shadow-lg shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-50"
+                    disabled={isSaving || Boolean(codeConflictItem)}
+                    title={codeConflictItem ? `Código #${formCode.trim().toUpperCase()} já está em uso por outro produto/serviço!` : undefined}
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-xl text-xs font-bold shadow-lg shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     <Save className="w-4 h-4" />
                     {isSaving ? 'Salvando...' : editingItem ? 'Salvar Alterações' : 'Cadastrar Item'}

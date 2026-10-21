@@ -39,7 +39,8 @@ import {
   ArrowUp,
   ArrowDown,
   Save,
-  Package
+  Package,
+  PlayCircle
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { Client, ContractPerformance, UserRole } from '../types';
@@ -92,6 +93,7 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
   const [mgtCycleEndDate, setMgtCycleEndDate] = useState<string>('');
   const [mgtCyclePeriod, setMgtCyclePeriod] = useState<'monthly' | 'bimonthly' | 'quarterly' | 'custom'>('monthly');
   const [mgtCycleRefFormat, setMgtCycleRefFormat] = useState<'number_only' | 'full_period' | 'number_month' | 'period_only'>('number_only');
+  const [mgtBillingMonth, setMgtBillingMonth] = useState<string>('');
   const [mgtSharepointFolderLink, setMgtSharepointFolderLink] = useState<string>('');
   const [mgtSharepointFolderId, setMgtSharepointFolderId] = useState<string>('');
   const [mgtSuccessMessage, setMgtSuccessMessage] = useState<string>('');
@@ -118,6 +120,7 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
       setMgtCycleEndDate(client.cycleEndDate || '');
       setMgtCyclePeriod(client.cyclePeriod || 'monthly');
       setMgtCycleRefFormat(client.cycleRefFormat || 'number_only');
+      setMgtBillingMonth(client.billingMonth || '');
       setMgtSharepointFolderLink(client.sharepointFolderLink || '');
       setMgtSharepointFolderId(client.sharepointFolderId || '');
       setMgtEmail(client.email || '');
@@ -141,6 +144,7 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
       setMgtCycleEndDate('');
       setMgtCyclePeriod('monthly');
       setMgtCycleRefFormat('number_only');
+      setMgtBillingMonth('');
       setMgtSharepointFolderLink('');
       setMgtSharepointFolderId('');
       setMgtEmail('');
@@ -281,6 +285,7 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
         cycleEndDate: mgtCycleEndDate || undefined,
         cyclePeriod: mgtCyclePeriod || 'monthly',
         cycleRefFormat: mgtCycleRefFormat || 'number_only',
+        billingMonth: mgtBillingMonth || undefined,
         sharepointFolderLink: mgtSharepointFolderLink.trim(),
         sharepointFolderId: mgtSharepointFolderId.trim(),
         email: mgtEmail.trim(),
@@ -311,6 +316,7 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
             cycleEndDate: mgtCycleEndDate,
             cyclePeriod: mgtCyclePeriod,
             cycleRefFormat: mgtCycleRefFormat,
+            billingMonth: mgtBillingMonth,
             sharepointFolderLink: mgtSharepointFolderLink.trim(),
             sharepointFolderId: mgtSharepointFolderId.trim(),
             email: mgtEmail.trim(),
@@ -323,6 +329,58 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
     } catch (err: any) {
       console.error(err);
       setMgtErrorMessage('Erro ao salvar as configurações: ' + (err.message || 'Erro desconhecido'));
+    } finally {
+      setIsSavingMgt(false);
+    }
+  };
+
+  // Iniciar ciclo a partir de agora: implementa as informações imediatamente e replica a partir deste novo marco
+  const handleStartCycleFromNow = async () => {
+    if (!selectedMgtClientId) {
+      alert('Selecione um contrato antes de iniciar o ciclo.');
+      return;
+    }
+    const client = clients.find(c => c.id === selectedMgtClientId);
+    if (!client) return;
+
+    const cycleNum = mgtContractCycle === '' ? 1 : Number(mgtContractCycle);
+    const billingDisplay = mgtBillingMonth || mgtCycleMonth || 'Mês de referência';
+
+    const confirmMsg = `Deseja implementar este ciclo imediatamente para "${client.name}"?\n\n` +
+      `• Ciclo do Contrato: ${cycleNum}\n` +
+      `• Frequência: ${mgtCyclePeriod === 'bimonthly' ? 'Bimestral (+2 Meses)' : mgtCyclePeriod === 'quarterly' ? 'Trimestral (+3 Meses)' : 'Mensal (+1 Mês)'}\n` +
+      `• Mês de Referência (Cronograma): ${mgtCycleMonth || 'Não definido'}\n` +
+      `• Mês da Cobrança (Folha de Atendimento): ${billingDisplay}\n` +
+      `• Período do Ciclo: ${mgtCycleStartDate || 'N/A'} a ${mgtCycleEndDate || 'N/A'}\n\n` +
+      `O sistema aplicará estas informações imediatamente para este contrato, desconsiderando dados anteriores deste ciclo, e passará a replicar automaticamente a partir deste novo marco nos próximos cronogramas.`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsSavingMgt(true);
+    setMgtSuccessMessage('');
+    setMgtErrorMessage('');
+
+    try {
+      const cycleUpdates: Partial<Client> = {
+        contractCycle: cycleNum,
+        cyclePeriod: mgtCyclePeriod || 'monthly',
+        cycleRefFormat: mgtCycleRefFormat || 'number_only',
+        cycleMonth: mgtCycleMonth || undefined,
+        cycleStartDate: mgtCycleStartDate || undefined,
+        cycleEndDate: mgtCycleEndDate || undefined,
+        billingMonth: mgtBillingMonth || undefined,
+      };
+
+      await dataService.startContractCycleFromNow(selectedMgtClientId, cycleUpdates, mgtCycleMonth);
+
+      // Atualiza estado local de clientes
+      setClients(prev => prev.map(c => c.id === selectedMgtClientId ? { ...c, ...cycleUpdates } : c));
+
+      setMgtSuccessMessage('Ciclo iniciado a partir de agora com sucesso! As informações foram aplicadas imediatamente e serão replicadas automaticamente nos próximos meses.');
+      setTimeout(() => setMgtSuccessMessage(''), 5000);
+    } catch (err: any) {
+      console.error('Erro ao iniciar ciclo a partir de agora:', err);
+      setMgtErrorMessage('Erro ao iniciar ciclo: ' + (err.message || 'Erro desconhecido'));
     } finally {
       setIsSavingMgt(false);
     }
@@ -1150,13 +1208,25 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
 
                   {/* Seção Gerenciamento de Ciclos de Contrato */}
                   <div className="md:col-span-2 border-t border-gray-100 pt-5 mt-2 space-y-4">
-                    <div>
-                      <h4 className="text-xs font-black text-blue-700 uppercase tracking-widest">
-                        Gerenciamento de Ciclos de Contrato e Referências
-                      </h4>
-                      <p className="text-[10px] text-gray-400 font-medium">
-                        Configure as datas de início e fim do ciclo e o formato da referência. Ao replicar o mês de cronogramas, estes valores avançarão automaticamente +1 mês.
-                      </p>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h4 className="text-xs font-black text-blue-700 uppercase tracking-widest flex items-center gap-2">
+                          Gerenciamento de Ciclos de Contrato e Referências
+                        </h4>
+                        <p className="text-[10px] text-gray-400 font-medium">
+                          Configure as datas do ciclo, amarração no cronograma e mês de cobrança na folha de atendimento.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleStartCycleFromNow}
+                        disabled={!selectedMgtClientId || isSavingMgt}
+                        title="Iniciar a partir de agora: Aplica as informações deste ciclo imediatamente no contrato e atualiza o cronograma vigente, replicando automaticamente nos próximos meses."
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 hover:text-blue-900 border border-blue-200/90 rounded-xl text-xs font-bold transition-all shadow-2xs hover:shadow-xs cursor-pointer group disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <PlayCircle className="w-3.5 h-3.5 text-blue-600 group-hover:scale-110 transition-transform" />
+                        <span>Iniciar a partir de agora</span>
+                      </button>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -1193,10 +1263,10 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
                         </select>
                       </div>
 
-                      {/* Mês de Referência */}
+                      {/* Mês de Referência (Amarração no Cronograma) */}
                       <div className="space-y-1.5">
                         <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest block">
-                          Mês de Referência
+                          Mês de Referência (Cronograma)
                         </label>
                         <input
                           type="month"
@@ -1210,6 +1280,28 @@ export default function ContractsView({ managerClientId, userRole }: Props) {
                           }}
                           className="w-full bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-4 py-2.5 text-xs font-semibold text-gray-800 outline-none transition font-mono"
                         />
+                        <span className="text-[9px] text-gray-400 block">
+                          Amarração da execução no cronograma (Ex: Outubro/2026)
+                        </span>
+                      </div>
+
+                      {/* Mês da Cobrança (Folha de Atendimento) */}
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-black text-blue-700 uppercase tracking-widest flex items-center justify-between">
+                          <span>Mês da Cobrança (Folha Atend.)</span>
+                          <span className="text-[9px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                            Cabeçalho Impresso
+                          </span>
+                        </label>
+                        <input
+                          type="month"
+                          value={mgtBillingMonth}
+                          onChange={(e) => setMgtBillingMonth(e.target.value)}
+                          className="w-full bg-slate-50 border border-blue-200 focus:border-blue-500 focus:bg-white rounded-xl px-4 py-2.5 text-xs font-semibold text-gray-800 outline-none transition font-mono ring-1 ring-blue-500/20"
+                        />
+                        <span className="text-[9px] text-gray-500 block leading-tight">
+                          Mês cobrado no cabeçalho da folha (Ex: SET/2026 ao invés de OUT/2026)
+                        </span>
                       </div>
 
                       {/* Data de Início */}

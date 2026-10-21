@@ -1351,17 +1351,20 @@ async function startServer() {
       const allTechs = techsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
       const allOS = serviceOrdersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
 
-      // Função auxiliar de correspondência resiliente de técnico (por ID, Nome, Substring e Palavras)
+      // Função auxiliar de correspondência resiliente de técnico (por ID, Nome, FullName, Substring e Palavras)
       const matchesTechResilient = (t1Val: string | undefined | null, t2Val: string | undefined | null): boolean => {
-        if (!rawTargetTech) return true;
+        if (!rawTargetTech || rawTargetTech.toUpperCase() === "TODOS" || rawTargetTech.toUpperCase() === "ALL") return true;
         const targetNorm = rawTargetTech.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
         if (!targetNorm) return true;
 
         const matchedTargetTech = allTechs.find(t => 
           (t.id && t.id.trim().toUpperCase() === targetNorm) ||
           (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === targetNorm) ||
+          (t.fullName && t.fullName.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === targetNorm) ||
           (t.name && targetNorm.includes(t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) ||
-          (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes(targetNorm))
+          (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes(targetNorm)) ||
+          (t.fullName && targetNorm.includes(t.fullName.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""))) ||
+          (t.fullName && t.fullName.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").includes(targetNorm))
         );
 
         const validTargetNames = new Set<string>();
@@ -1371,6 +1374,10 @@ async function startServer() {
           if (matchedTargetTech.name) {
             const cleanName = matchedTargetTech.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
             validTargetNames.add(cleanName);
+          }
+          if (matchedTargetTech.fullName) {
+            const cleanFullName = matchedTargetTech.fullName.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            validTargetNames.add(cleanFullName);
           }
         }
 
@@ -1387,7 +1394,8 @@ async function startServer() {
 
           const matchedFieldTech = allTechs.find(t =>
             (t.id && t.id.trim().toUpperCase() === fNorm) ||
-            (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === fNorm)
+            (t.name && t.name.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === fNorm) ||
+            (t.fullName && t.fullName.trim().toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") === fNorm)
           );
 
           if (matchedFieldTech && matchedTargetTech) {
@@ -1426,11 +1434,13 @@ async function startServer() {
         scheduledList.sort((a, b) => {
           const score = (rec: any) => {
             let pts = 0;
+            const rDate = (rec.plannedDate || "").split("T")[0].trim();
+            if (rDate === targetDate) pts += 100;
             if (rec.month === targetMonth) pts += 50;
-            if (rec.plannedDate === targetDate) pts += 40;
-            if (rec.status === "completed") pts += 30;
+            if (rec.status === "pending" || rec.status === "in_progress") pts += 40;
             if (rec.status === "pre_completed") pts += 20;
-            if (rec.id.startsWith(rec.month + "_")) pts += 10;
+            if (rec.status === "completed") pts += 10;
+            if (rec.id && rec.month && rec.id.startsWith(rec.month + "_")) pts += 5;
             return pts;
           };
           const scoreDiff = score(b) - score(a);
@@ -2163,7 +2173,7 @@ async function startServer() {
   });
 
   app.post("/api/users", async (req, res) => {
-    const { username, email: emailInput, password, displayName, role, clientId, phone } = req.body;
+    const { username, email: emailInput, password, displayName, role, clientId, phone, isApproved: isApprovedInput } = req.body;
     try {
       const email = ensureEmailFormat(username || emailInput);
       
@@ -2202,6 +2212,8 @@ async function startServer() {
         uid = "fs_" + Buffer.from(email).toString('hex').slice(0, 20);
       }
 
+      const isApproved = isApprovedInput !== undefined ? Boolean(isApprovedInput) : (role === 'admin');
+
       let firestoreFailed = false;
       try {
         await robustSetDoc("users", uid, {
@@ -2211,6 +2223,8 @@ async function startServer() {
           role: role || 'technician',
           clientId: clientId || null,
           phone: phone || null,
+          isApproved,
+          status: isApproved ? 'active' : 'pending',
           createdAt: SERVER_TIMESTAMP,
           updatedAt: SERVER_TIMESTAMP,
           authCreated
@@ -2226,6 +2240,7 @@ async function startServer() {
         authCreated,
         firestoreFailed,
         email,
+        isApproved,
         message: authCreated ? "Usuário criado com sucesso!" : "Usuário criado apenas no banco (Login indisponível - API desativada)"
       });
     } catch (error: any) {
@@ -2236,7 +2251,7 @@ async function startServer() {
 
   app.put("/api/users/:uid", async (req, res) => {
     const { uid } = req.params;
-    const { displayName, role, clientId, phone } = req.body;
+    const { displayName, role, clientId, phone, isApproved } = req.body;
     try {
       const userData: any = {
         updatedAt: SERVER_TIMESTAMP
@@ -2245,6 +2260,10 @@ async function startServer() {
       if (role !== undefined) userData.role = role;
       if (clientId !== undefined) userData.clientId = clientId || null;
       if (phone !== undefined) userData.phone = phone || null;
+      if (isApproved !== undefined) {
+        userData.isApproved = Boolean(isApproved);
+        if (Boolean(isApproved)) userData.status = 'active';
+      }
 
       // Try updating Auth display name
       try {
@@ -2266,6 +2285,31 @@ async function startServer() {
       res.json({ success: true, uid, firestoreFailed });
     } catch (error: any) {
       console.error("Update user failed:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/users/:uid/approve", async (req, res) => {
+    const { uid } = req.params;
+    const { approvedBy } = req.body;
+    try {
+      const updateData = {
+        isApproved: true,
+        status: 'active',
+        approvedBy: approvedBy || 'Administrador',
+        approvedAt: SERVER_TIMESTAMP,
+        updatedAt: SERVER_TIMESTAMP
+      };
+
+      let firestoreFailed = false;
+      try {
+        await robustUpdateDoc("users", uid, updateData);
+      } catch (e: any) {
+        firestoreFailed = true;
+      }
+
+      res.json({ success: true, uid, firestoreFailed });
+    } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });

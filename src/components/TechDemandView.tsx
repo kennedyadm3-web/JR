@@ -488,7 +488,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   const isChecklistIncomplete = useMemo(() => {
     if (!activeChecklistRecord) return true;
     const addressEquips = equipments.filter(eq => eq && eq.addressId === activeChecklistRecord.addressId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
-    if (addressEquips.length === 0) return false;
+    if (addressEquips.length === 0) return true;
     
     return addressEquips.some(eq => {
       const item = modalChecklist.find(m => m && m.equipmentId === eq.id) || activeChecklistRecord.checklist?.find(m => m && m.equipmentId === eq.id);
@@ -1206,9 +1206,15 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
   const checkRecordMatchesTech = (r: MaintenanceRecord, currentTechFilter: string): boolean => {
     const filter = (currentTechFilter || '').trim();
-    if (!filter) {
-      // Se for usuário com perfil de técnico ou tablet de campo, NUNCA exibe nada sem filtro ativo (bloqueio total de vazamento de dados de outros técnicos)
-      if (userRole === UserRole.TECHNICIAN || isTabletMode) return false;
+    if (!filter || filter.toUpperCase() === 'TODOS' || filter.toUpperCase() === 'ALL') {
+      // Se for usuário com perfil de técnico ou tablet de campo, tenta vincular o nome/fullname do técnico logado
+      if (userRole === UserRole.TECHNICIAN || isTabletMode) {
+        const resolvedName = (authTech?.name || authTech?.fullName || userProfile?.name || (userProfile as any)?.displayName || '').trim();
+        if (resolvedName) {
+          return techIndex.matchesTechTitular(r.technician1, resolvedName) || techIndex.matchesTechTitular(r.technician2, resolvedName);
+        }
+        return false;
+      }
       return true;
     }
     return techIndex.matchesTechTitular(r.technician1, filter) || techIndex.matchesTechTitular(r.technician2, filter);
@@ -1222,9 +1228,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   // Filtro ativo do técnico respeitando autenticação e perfil
   const activeTechFilter = useMemo(() => {
     if (userRole === UserRole.TECHNICIAN) {
-      return (authTech?.name || userProfile?.name || selectedTech || '').trim();
+      return (authTech?.name || authTech?.fullName || userProfile?.name || (userProfile as any)?.displayName || selectedTech || '').trim();
     }
-    return (isTabletMode && authTech ? authTech.name : selectedTech || '').trim();
+    return (isTabletMode && authTech ? (authTech.name || authTech.fullName) : selectedTech || '').trim();
   }, [userRole, authTech, userProfile, isTabletMode, selectedTech]);
 
   // NEW: Filter & order records specifically for the daily itinerary route (preventives + service orders in full chronological sequence)
@@ -1541,7 +1547,11 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       // Sem assinatura completa pelo cliente, NUNCA entra na fila de aprovação administrativa!
       if (!isFieldFinalized) return false;
 
-      return r.status === MaintenanceStatus.PRE_COMPLETED || isFieldFinalized;
+      // Somente registros com status PRE_COMPLETED pertencem à fila de aprovação!
+      // Se o atendimento foi devolvido para rascunho (status === PENDING), ele sai imediatamente da fila de aprovação.
+      if (r.status !== MaintenanceStatus.PRE_COMPLETED) return false;
+
+      return true;
     });
     const map = new Map<string, MaintenanceRecord>();
 
@@ -1755,7 +1765,25 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     }
 
     const executedCount = updatedChecklist.filter(item => item && item.checked && !item.skipped && !item.requestedRemoval).length;
-    const updates = { checklist: updatedChecklist, executedQuantity: executedCount };
+    const recAddrId = String(record.addressId || '').trim();
+    const liveAddrObj = addresses.find(a => a && a.id === recAddrId);
+    const addressEquips = equipments.filter(eq => eq && String(eq.addressId || '').trim() === recAddrId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+    const totalEqs = addressEquips.length > 0 ? addressEquips.length : (liveAddrObj?.totalMachines || 0);
+
+    const isAllChecked = totalEqs > 0 && executedCount >= totalEqs;
+    const newStatus = isAllChecked
+      ? (record.adminApproved ? MaintenanceStatus.COMPLETED : MaintenanceStatus.PRE_COMPLETED)
+      : MaintenanceStatus.PENDING;
+
+    const updates: Partial<MaintenanceRecord> = {
+      checklist: updatedChecklist,
+      executedQuantity: executedCount,
+      status: newStatus,
+      routeStatus: newStatus
+    };
+    if (newStatus === MaintenanceStatus.PENDING) {
+      updates.completionDate = undefined;
+    }
 
     // Optimistic update: Update React state immediately for instant checkbox feedback
     setRecords(prev => prev.map(r => r.id === record.id ? { ...r, ...updates } : r));
@@ -1769,7 +1797,8 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
   // Toggle all equipment in active approval record (Select All / Deselect All)
   const handleToggleAllApprovalMachines = async (record: MaintenanceRecord, targetChecked: boolean) => {
-    const addressEquips = equipments.filter(eq => eq && eq.addressId === record.addressId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+    const recAddrId = String(record.addressId || '').trim();
+    const addressEquips = equipments.filter(eq => eq && String(eq.addressId || '').trim() === recAddrId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
     const currentChecklist = record.checklist || [];
     
     const updatedChecklist: EquipmentChecklistItem[] = addressEquips.map(eq => {
@@ -1795,7 +1824,23 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     });
 
     const executedCount = updatedChecklist.filter(item => item && item.checked && !item.skipped && !item.requestedRemoval).length;
-    const updates = { checklist: updatedChecklist, executedQuantity: executedCount };
+    const liveAddrObj2 = addresses.find(a => a && a.id === recAddrId);
+    const totalEqs = addressEquips.length > 0 ? addressEquips.length : (liveAddrObj2?.totalMachines || 0);
+
+    const isAllChecked = targetChecked && totalEqs > 0 && executedCount >= totalEqs;
+    const newStatus = isAllChecked
+      ? (record.adminApproved ? MaintenanceStatus.COMPLETED : MaintenanceStatus.PRE_COMPLETED)
+      : MaintenanceStatus.PENDING;
+
+    const updates: Partial<MaintenanceRecord> = {
+      checklist: updatedChecklist,
+      executedQuantity: executedCount,
+      status: newStatus,
+      routeStatus: newStatus
+    };
+    if (newStatus === MaintenanceStatus.PENDING) {
+      updates.completionDate = undefined;
+    }
 
     // Optimistic update
     setRecords(prev => prev.map(r => r.id === record.id ? { ...r, ...updates } : r));
@@ -1845,10 +1890,11 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     setDeletingEquipmentLoading(true);
     setSavingId(record.id);
     try {
+      const techName = [record.technician1, record.technician2].filter(Boolean).join(' / ') || record.technician1 || 'Setor Administrativo';
       await dataService.deactivateEquipment(
         eq.id, 
         'Removido permanentemente no painel de aprovação',
-        'Setor Administrativo',
+        techName,
         record.id
       );
       setEquipments(prev => prev.filter(e => e.id !== eq.id));
@@ -1873,10 +1919,11 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     }
     setDeletingEquipmentLoading(true);
     try {
+      const techName = [record.technician1, record.technician2].filter(Boolean).join(' / ') || record.technician1 || 'Setor Administrativo';
       await dataService.deactivateEquipment(
         eq.id, 
         reason || 'Máquina descontinuada / removida no atendimento técnico', 
-        'Setor Administrativo (Aprovação)', 
+        techName, 
         record.id
       );
       setEquipments(prev => prev.filter(e => e.id !== eq.id));
@@ -2219,7 +2266,17 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       worksheet.getCell('A4').font = { name: 'Arial', size: 8 };
 
       worksheet.mergeCells('E4:H4');
-      worksheet.getCell('E4').value = `MÊS DE REFERÊNCIA: ${record.month}`;
+      const excelBillingRaw = client.billingMonth || record.billingMonth || record.month || '';
+      const monthsAbbrList = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
+      let excelMonthDisplay = excelBillingRaw;
+      try {
+        const parts = excelBillingRaw.split('-');
+        if (parts.length >= 2) {
+          const mIdx = parseInt(parts[1], 10) - 1;
+          if (mIdx >= 0 && mIdx < 12) excelMonthDisplay = `${monthsAbbrList[mIdx]}/${parts[0]}`;
+        }
+      } catch (e) {}
+      worksheet.getCell('E4').value = `MÊS: ${excelMonthDisplay}`;
       worksheet.getCell('E4').font = { name: 'Arial', size: 8, bold: true };
       worksheet.getCell('E4').alignment = { horizontal: 'right' };
 
@@ -2407,12 +2464,13 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       // Processar e desativar com segurança máquinas com solicitação de exclusão do técnico
       const removalItems = currentChecklist.filter(item => item && item.requestedRemoval);
       if (removalItems.length > 0) {
+        const techName = [record.technician1, record.technician2].filter(Boolean).join(' / ') || record.technician1 || 'Setor Administrativo';
         for (const item of removalItems) {
           try {
             await dataService.deactivateEquipment(
               item.equipmentId,
               item.removalReason || 'Máquina descontinuada / removida no atendimento técnico',
-              'Setor Administrativo (Homologação)',
+              techName,
               record.id
             );
           } catch (e) {
@@ -2485,19 +2543,20 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
   // Reject and return to Draft/Pending
   const handleRejectRecord = async (record: MaintenanceRecord) => {
-    const reason = window.prompt("Por favor, informe o motivo da rejeição/devolução deste atendimento (os técnicos verão este feedback no aplicativo):");
-    if (reason === null) return; // Cancelado pelo usuário
+    const reasonPrompt = window.prompt("Por favor, informe o motivo da devolução para rascunho (opcional - o técnico visualizará esta observação no aplicativo):");
+    if (reasonPrompt === null) return; // Cancelado pelo usuário
     
-    if (!reason.trim()) {
-      alert("É obrigatório preencher o motivo da rejeição para devolver o atendimento aos técnicos.");
-      return;
-    }
+    const reason = reasonPrompt.trim() || "Devolvido pelo setor administrativo para revisão e ajustes no atendimento.";
 
     setProcessingApproval(true);
     try {
       const updates: Partial<MaintenanceRecord> = {
         status: MaintenanceStatus.PENDING,
-        rejectionReason: reason.trim()
+        routeStatus: MaintenanceStatus.PENDING,
+        rejectionReason: reason,
+        adminApproved: false,
+        approvedAt: undefined,
+        approvedBy: undefined
       };
 
       await dataService.upsertRecord({ ...record, ...updates });
@@ -2517,7 +2576,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       setRecords(prev => prev.map(r => (r.id === record.id || (r.addressId === record.addressId && r.month === record.month)) ? { ...r, ...updates } : r));
       setRecentApprovedRecords(prev => prev.filter(r => r.id !== record.id && r.addressId !== record.addressId));
       setSelectedApprovalRecordId(null);
-      alert("Atendimento devolvido com sucesso! O técnico já pode visualizar o motivo no aplicativo e realizar os ajustes necessários.");
+      alert("Atendimento devolvido como rascunho com sucesso!\n\nO status retornou para 'Em Aberto' e todos os dados já preenchidos (checklists das máquinas, nome do cliente, matrícula e assinaturas digitais) foram totalmente mantidos para nova edição no aplicativo.");
     } catch (err) {
       console.error(err);
       alert("Erro ao devolver atendimento.");
@@ -2632,13 +2691,13 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         status: 'aberta',
         type: osFormType,
         openedAt: new Date(targetDate + 'T08:00:00').toISOString(),
-        openedBy: userRole === UserRole.ADMIN ? 'ADMIN' : 'Administrativo',
+        openedBy: userRole === UserRole.ADMIN ? (userProfile?.name || 'ADMIN') : (authTech?.name || selectedTech1?.name || userProfile?.name || 'TÉCNICO'),
         description: osFormDescription || 'Atendimento / Chamado de Ordem de Serviço',
         services: [],
         products: [],
         totalValue: 0,
-        technicianId: osFormTechId,
-        technician2Id: osFormTech2Id || undefined,
+        technicianId: osFormTechId || selectedTech1?.id,
+        technician2Id: osFormTech2Id || selectedTech2?.id || undefined,
         authenticatedTeam: selectedTech1 ? `Técnico: ${selectedTech1.name}${selectedTech2 ? ` / ${selectedTech2.name}` : ''}` : '',
         clientRepresentative: '',
         clientRepresentativeMatricula: '',
@@ -2683,6 +2742,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       const extractedNumber = orderOrRecord.notes?.match(/\[O\.S\.\s*#?([^\]]+)\]/)?.[1] || String(Date.now()).slice(-5);
       const addr = addresses.find(a => a.id === orderOrRecord.addressId);
       const client = clients.find(c => c.id === addr?.clientId);
+      const defaultTechName = authTech?.name || (userRole === UserRole.TECHNICIAN ? userProfile?.name : 'TÉCNICO');
+      const defaultTechObj = authTech || techs.find(t => t.name.trim().toLowerCase() === defaultTechName.trim().toLowerCase()) || selectedTech;
+
       order = {
         id: extractedNumber,
         osNumber: extractedNumber,
@@ -2708,7 +2770,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         status: 'aberta',
         type: 'MANUTENÇÃO CORRETIVA CONTRATO',
         openedAt: new Date().toISOString(),
-        openedBy: 'Administrativo',
+        openedBy: defaultTechName,
+        technicianId: orderOrRecord.technician1 
+          ? (typeof orderOrRecord.technician1 === 'string' ? (techs.find(t => t.name === orderOrRecord.technician1)?.id || orderOrRecord.technician1) : (orderOrRecord.technician1 as any)?.id) 
+          : (typeof defaultTechObj === 'object' && defaultTechObj ? (defaultTechObj as any).id : undefined),
+        technician2Id: orderOrRecord.technician2 
+          ? (typeof orderOrRecord.technician2 === 'string' ? (techs.find(t => t.name === orderOrRecord.technician2)?.id || orderOrRecord.technician2) : (orderOrRecord.technician2 as any)?.id) 
+          : undefined,
+        authenticatedTeam: defaultTechName ? `Técnico: ${defaultTechName}` : '',
         description: orderOrRecord.notes || 'Atendimento de Ordem de Serviço',
         services: [],
         products: [],
@@ -2793,11 +2862,19 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     setTechOSSaving(true);
     try {
       const now = new Date();
+      const targetTechName = authTech?.name || activeOSForTech.openedBy || userProfile?.name || 'TÉCNICO';
+      const resolvedTechObj = authTech || techs.find(t => t.name.trim().toLowerCase() === targetTechName.trim().toLowerCase());
+      const resolvedTechIdFromObj = resolvedTechObj?.id || (typeof selectedTech === 'object' && selectedTech ? (selectedTech as any).id : (typeof selectedTech === 'string' ? selectedTech : undefined));
+      const targetTechId = activeOSForTech.technicianId || resolvedTechIdFromObj;
+
       // REGRA: Somente o sistema administrativo tem autonomia para finalizar uma O.S.
       // Quando o técnico clica em finalizar no aplicativo de atendimento, a O.S. vai para o sistema administrativo
       // com status "aberta" (Em aberto), com a flag techFinalized: true e adminFinalized: false.
       const updatedOrder: ServiceOrder = {
         ...activeOSForTech,
+        technicianId: targetTechId || activeOSForTech.technicianId,
+        openedBy: activeOSForTech.openedBy && activeOSForTech.openedBy !== 'Administrativo' ? activeOSForTech.openedBy : targetTechName,
+        authenticatedTeam: activeOSForTech.authenticatedTeam || `Técnico: ${targetTechName}`,
         diagnosis: techOSDiagnosis,
         solution: techOSSolution,
         services: techOSServices,
@@ -3223,13 +3300,13 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                               <div className="print:hidden flex items-center justify-center gap-1">
                                 <input 
                                   type="date"
-                                  disabled={isReadOnly}
+                                  disabled={isReadOnly || isCompleted}
                                   value={record.plannedDate || ''}
                                   onChange={(e) => handleUpdateRecord(record, { plannedDate: e.target.value })}
                                   className={cn(
                                     "text-[11px] font-bold border rounded-lg px-2 py-1 outline-none transition-all",
-                                    isReadOnly 
-                                      ? "cursor-not-allowed bg-slate-50 border-slate-200 text-slate-600"
+                                    isReadOnly || isCompleted
+                                      ? "cursor-not-allowed bg-slate-100 border-slate-200 text-slate-400 font-medium"
                                       : record.plannedDate 
                                         ? "cursor-pointer font-bold text-blue-600 bg-blue-50/60 border-blue-200 focus:border-blue-500 hover:border-blue-300" 
                                         : "cursor-pointer font-semibold text-slate-400 bg-slate-50 border-slate-200 focus:text-blue-600 hover:border-slate-300"
@@ -6357,6 +6434,10 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
           return dateStr;
         };
 
+        // Mês da cobrança selecionado no contrato ou no registro (fallback para mês de referência do cronograma)
+        const effectiveBillingMonthRaw = printClient?.billingMonth || isPrintingChecklist.billingMonth || isPrintingChecklist.month || '';
+        const displayBillingMonth = effectiveBillingMonthRaw ? getMonthAbbr(effectiveBillingMonthRaw) : '-';
+
         const getFormattedCycleStr = () => {
           const rawCycle = printClient?.contractCycle || isPrintingChecklist.cycle || 1;
           const num = String(rawCycle).padStart(3, '0');
@@ -6364,7 +6445,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
           
           const start = formatDateBRL(printClient?.cycleStartDate);
           const end = formatDateBRL(printClient?.cycleEndDate);
-          const abbr = getMonthAbbr(isPrintingChecklist.month);
+          const abbr = displayBillingMonth;
           
           if (format === 'full_period' && start && end) {
             return `${num} - ${start} a ${end} (${abbr})`;
@@ -6387,7 +6468,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
           
           const start = formatDateBRL(printClient?.cycleStartDate);
           const end = formatDateBRL(printClient?.cycleEndDate);
-          const abbr = getMonthAbbr(isPrintingChecklist.month);
+          const abbr = displayBillingMonth;
           
           if (format === 'full_period' && start && end) {
             return { num, period: `${start} a ${end} (${abbr})` };
@@ -6485,7 +6566,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
               </div>
               <div className="text-right flex flex-col items-end">
                  <p className="text-[9px]">Página: 1 de 1</p>
-                 <p className="text-[9px]">Mês: {isPrintingChecklist.month}</p>
+                 <p className="text-[9px] font-bold">Mês: {displayBillingMonth}</p>
               </div>
             </div>
 

@@ -52,12 +52,20 @@ export function buildTechnicianIndex(techs: Technician[] = []): TechnicianIndexS
   const byName = new Map<string, IndexedTechnician>();
   const byNorm = new Map<string, IndexedTechnician>();
 
-  indexedTechs.forEach(it => {
+  indexedTechs.forEach((it, idx) => {
+    const tObj = techs[idx];
     if (it.id) byId.set(it.id.toUpperCase(), it);
     if (it.originalId) byId.set(it.originalId.toUpperCase(), it);
     if (it.indexedCode) byCode.set(it.indexedCode.toUpperCase(), it);
     if (it.name) byName.set(it.name, it);
     if (it.normalizedUpper) byNorm.set(it.normalizedUpper, it);
+
+    if (tObj && tObj.fullName) {
+      const fnUpper = tObj.fullName.trim().toUpperCase();
+      const fnNorm = normalizeTechString(fnUpper);
+      if (fnUpper) byName.set(fnUpper, it);
+      if (fnNorm) byNorm.set(fnNorm, it);
+    }
   });
 
   /**
@@ -85,12 +93,16 @@ export function buildTechnicianIndex(techs: Technician[] = []): TechnicianIndexS
 
     // 5. Varredura com tolerância completa
     for (const it of indexedTechs) {
+      const tObj = techs[it.indexNumber - 1];
+      const fnNorm = tObj?.fullName ? normalizeTechString(tObj.fullName) : '';
       if (
         it.id.toUpperCase() === qRaw ||
         it.originalId.toUpperCase() === qRaw ||
         it.indexedCode.toUpperCase() === qRaw ||
         it.name === qRaw ||
-        it.normalizedUpper === qNorm
+        it.normalizedUpper === qNorm ||
+        (fnNorm && (fnNorm === qNorm || fnNorm.includes(qNorm) || qNorm.includes(fnNorm))) ||
+        (it.normalizedUpper && (it.normalizedUpper.includes(qNorm) || qNorm.includes(it.normalizedUpper)))
       ) {
         return it;
       }
@@ -158,18 +170,24 @@ export function buildTechnicianIndex(techs: Technician[] = []): TechnicianIndexS
     if (order.technicianId) {
       const orderTech = findTech(order.technicianId);
       if (orderTech) {
-        return orderTech.id.toUpperCase() === targetIdUpper || orderTech.normalizedUpper === targetNorm;
+        if (orderTech.id.toUpperCase() === targetIdUpper || orderTech.normalizedUpper === targetNorm) return true;
       }
-      return normalizeTechString(order.technicianId) === targetNorm || order.technicianId.trim().toUpperCase() === targetIdUpper;
+      if (normalizeTechString(order.technicianId) === targetNorm || order.technicianId.trim().toUpperCase() === targetIdUpper) return true;
     }
 
     // 2. Se não tem technicianId, verifica quem abriu a OS (openedBy)
-    if (order.openedBy) {
+    if (order.openedBy && order.openedBy !== 'ADMIN' && order.openedBy !== 'Administrativo') {
       const openerTech = findTech(order.openedBy);
       if (openerTech) {
-        return openerTech.id.toUpperCase() === targetIdUpper || openerTech.normalizedUpper === targetNorm;
+        if (openerTech.id.toUpperCase() === targetIdUpper || openerTech.normalizedUpper === targetNorm) return true;
       }
-      return normalizeTechString(order.openedBy) === targetNorm;
+      if (normalizeTechString(order.openedBy) === targetNorm) return true;
+    }
+
+    // 3. Equipe Autenticada (authenticatedTeam)
+    if (order.authenticatedTeam) {
+      const teamNorm = normalizeTechString(order.authenticatedTeam);
+      if (teamNorm && targetNorm && teamNorm.includes(targetNorm)) return true;
     }
 
     return false;
