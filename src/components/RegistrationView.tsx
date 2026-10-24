@@ -30,7 +30,7 @@ import {
   ChevronDown
 } from 'lucide-react';
 import { dataService, normalizeAddressText } from '../services/dataService';
-import { Client, Address, Technician, RouteConfiguration, TravelCard, Equipment, RouteType } from '../types';
+import { Client, Address, Technician, RouteConfiguration, TravelCard, Equipment, RouteType, UserRole, UserProfile } from '../types';
 import { db } from '../lib/firebase';
 import { writeBatch, collection, getDocs, doc, serverTimestamp } from 'firebase/firestore';
 import { SEB_EQUIPMENTS } from '../lib/seb-equipments';
@@ -46,8 +46,23 @@ const getMapsUrl = (coordinates: string) => {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(trimmed)}`;
 };
 
-export default function RegistrationView() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'addresses' | 'techs' | 'cards' | 'equipments'>('overview');
+interface RegistrationViewProps {
+  userRole?: UserRole;
+  userProfile?: UserProfile;
+}
+
+export default function RegistrationView({ userRole, userProfile }: RegistrationViewProps = {}) {
+  const isAssistant = userRole === UserRole.ASSISTANT;
+  const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'addresses' | 'techs' | 'cards' | 'equipments'>(() => {
+    if (userRole === UserRole.ASSISTANT) return 'equipments';
+    return 'overview';
+  });
+
+  useEffect(() => {
+    if (isAssistant && activeTab !== 'equipments') {
+      setActiveTab('equipments');
+    }
+  }, [isAssistant, activeTab]);
   const [clients, setClients] = useState<Client[]>([]);
   const [inactiveClients, setInactiveClients] = useState<Client[]>([]);
   const [addresses, setAddresses] = useState<Address[]>([]);
@@ -1393,50 +1408,65 @@ export default function RegistrationView() {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-2 bg-white p-1 rounded-2xl border border-gray-200 w-fit">
           <button 
-            onClick={() => { setActiveTab('overview'); handleCancelEdit(); }}
+            onClick={() => { if (!isAssistant) { setActiveTab('overview'); handleCancelEdit(); } }}
+            disabled={isAssistant}
+            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
-              activeTab === 'overview' ? "bg-gray-900 text-white shadow-lg shadow-gray-200" : "text-gray-500 hover:bg-gray-50"
+              activeTab === 'overview' ? "bg-gray-900 text-white shadow-lg shadow-gray-200" : "text-gray-500 hover:bg-gray-50",
+              isAssistant && "opacity-35 cursor-not-allowed hover:bg-transparent text-gray-300"
             )}
           >
             <TrendingUp className="w-4 h-4" />
             Visão Geral
           </button>
           <button 
-            onClick={() => { setActiveTab('clients'); handleCancelEdit(); }}
+            onClick={() => { if (!isAssistant) { setActiveTab('clients'); handleCancelEdit(); } }}
+            disabled={isAssistant}
+            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
-              activeTab === 'clients' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50"
+              activeTab === 'clients' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
+              isAssistant && "opacity-35 cursor-not-allowed hover:bg-transparent text-gray-300"
             )}
           >
             <Building2 className="w-4 h-4" />
             Clientes
           </button>
           <button 
-            onClick={() => { setActiveTab('addresses'); handleCancelEdit(); }}
+            onClick={() => { if (!isAssistant) { setActiveTab('addresses'); handleCancelEdit(); } }}
+            disabled={isAssistant}
+            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
-              activeTab === 'addresses' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50"
+              activeTab === 'addresses' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
+              isAssistant && "opacity-35 cursor-not-allowed hover:bg-transparent text-gray-300"
             )}
           >
             <MapPin className="w-4 h-4" />
             Endereços
           </button>
           <button 
-            onClick={() => { setActiveTab('techs'); handleCancelEdit(); }}
+            onClick={() => { if (!isAssistant) { setActiveTab('techs'); handleCancelEdit(); } }}
+            disabled={isAssistant}
+            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
-              activeTab === 'techs' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50"
+              activeTab === 'techs' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
+              isAssistant && "opacity-35 cursor-not-allowed hover:bg-transparent text-gray-300"
             )}
           >
             <Users className="w-4 h-4" />
             Técnicos
           </button>
           <button 
-            onClick={() => { setActiveTab('cards'); handleCancelEdit(); }}
+            onClick={() => { if (!isAssistant) { setActiveTab('cards'); handleCancelEdit(); } }}
+            disabled={isAssistant}
+            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
-              activeTab === 'cards' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50"
+              activeTab === 'cards' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
+              isAssistant && "opacity-35 cursor-not-allowed hover:bg-transparent text-gray-300"
             )}
           >
             <CreditCard className="w-4 h-4" />

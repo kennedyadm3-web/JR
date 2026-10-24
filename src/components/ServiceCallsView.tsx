@@ -372,14 +372,18 @@ export default function ServiceCallsView({
     try {
       if (!activeModalCall) {
         // Criar Novo Chamado
-        const hasOpenCall = calls.some(c => 
-          c.addressId === formData.addressId && 
-          (c.status === ServiceCallStatus.OPEN || c.status === ServiceCallStatus.IN_PROGRESS)
-        );
+        const existingOpenCalls = calls.filter(c => {
+          if (!c || !c.addressId || !formData.addressId) return false;
+          if (String(c.addressId).trim() !== String(formData.addressId).trim()) return false;
+          const statusStr = String(c.status || '').toLowerCase();
+          const isResolved = statusStr === 'resolved' || statusStr === 'cancelled' || statusStr === 'resolvido' || statusStr === 'cancelado' || statusStr === ServiceCallStatus.RESOLVED || statusStr === ServiceCallStatus.CANCELLED;
+          return !isResolved;
+        });
 
-        if (hasOpenCall) {
+        if (existingOpenCalls.length > 0) {
+          const callIdLabel = existingOpenCalls[0].id ? `#${String(existingOpenCalls[0].id).slice(-6).toUpperCase()}` : '';
           setMessage({ 
-            text: 'Este endereço já possui um chamado em aberto no sistema. Finalize-o antes de abrir um novo.', 
+            text: `BLOQUEIO: Este endereço já possui um chamado em aberto no sistema ${callIdLabel ? `(Chamado ${callIdLabel})` : ''}. É necessário concluir o chamado existente antes de abrir um novo para este endereço.`, 
             type: 'error' 
           });
           setSaving(false);

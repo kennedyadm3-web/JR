@@ -62,6 +62,13 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
   const [reactivateModalEq, setReactivateModalEq] = useState<Equipment | null>(null);
   const [isReactivating, setIsReactivating] = useState<boolean>(false);
 
+  // Filtro Personalizado por Período e Cliente
+  const [reportStartDate, setReportStartDate] = useState<string>('');
+  const [reportEndDate, setReportEndDate] = useState<string>('');
+  const [reportClientId, setReportClientId] = useState<string>('');
+  const [isReportModalOpen, setIsReportModalOpen] = useState<boolean>(false);
+  const [isPeriodFilterExpanded, setIsPeriodFilterExpanded] = useState<boolean>(false);
+
   const loadDeactivatedEquipments = async () => {
     setLoadingDeactivated(true);
     try {
@@ -230,6 +237,275 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
     return result;
   }, [addresses, selectedClientId, searchTerm, clients]);
 
+  // Filtro de Atendimentos PMOC por Período e Cliente
+  const periodReportData = useMemo(() => {
+    if (!reportStartDate && !reportEndDate && !reportClientId) {
+      return [];
+    }
+
+    return records.filter(rec => {
+      if (!rec) return false;
+
+      // Address & Client check
+      const addr = addresses.find(a => a.id === rec.addressId);
+      if (reportClientId && reportClientId !== 'all') {
+        if (!addr || addr.clientId !== reportClientId) {
+          return false;
+        }
+      }
+
+      // Determine execution date
+      let rawDate: string | null = null;
+      if (rec.executionDate && rec.executionDate.trim().length >= 10) {
+        rawDate = rec.executionDate.slice(0, 10);
+      } else if (rec.completionDate && rec.completionDate.trim().length >= 10) {
+        rawDate = rec.completionDate.slice(0, 10);
+      } else if (rec.plannedDate && rec.plannedDate.trim().length >= 10) {
+        rawDate = rec.plannedDate.slice(0, 10);
+      } else if (rec.month && rec.month.trim().length >= 7) {
+        rawDate = `${rec.month}-01`;
+      }
+
+      if (!rawDate) return false;
+
+      // Date range check
+      if (reportStartDate && rawDate < reportStartDate) return false;
+      if (reportEndDate && rawDate > reportEndDate) return false;
+
+      // Only include records that have been performed/completed or have execution date/executed quantity
+      const isCompletedOrExecuted = 
+        rec.status === MaintenanceStatus.COMPLETED ||
+        rec.status === MaintenanceStatus.PRE_COMPLETED ||
+        (rec.executedQuantity && rec.executedQuantity > 0) ||
+        (rec.executionDate && rec.executionDate.trim().length > 0) ||
+        (rec.checklist && rec.checklist.some(c => c.checked || Boolean(c.checkedAt)));
+
+      if (!isCompletedOrExecuted) return false;
+
+      return true;
+    }).map(rec => {
+      const addr = addresses.find(a => a.id === rec.addressId);
+      const client = addr ? clients.find(c => c.id === addr.clientId) : null;
+      const clientName = client?.name || rec.temporaryClient || 'Cliente Não Informado';
+      
+      const streetName = addr
+        ? `${addr.street}${addr.number ? `, ${addr.number}` : ''}${addr.neighborhood ? ` - ${addr.neighborhood}` : ''}`
+        : (rec.temporaryStreet || 'Endereço Não Informado');
+
+      const techName = [rec.technician1, rec.technician2].filter(Boolean).join(' / ') || 'Técnico Não Informado';
+
+      let rawDate: string = '';
+      if (rec.executionDate && rec.executionDate.trim().length >= 10) {
+        rawDate = rec.executionDate.slice(0, 10);
+      } else if (rec.completionDate && rec.completionDate.trim().length >= 10) {
+        rawDate = rec.completionDate.slice(0, 10);
+      } else if (rec.plannedDate && rec.plannedDate.trim().length >= 10) {
+        rawDate = rec.plannedDate.slice(0, 10);
+      } else {
+        rawDate = `${rec.month}-01`;
+      }
+
+      let formattedDate = rawDate;
+      try {
+        const parts = rawDate.split('-');
+        if (parts.length === 3) {
+          formattedDate = `${parts[2]}/${parts[1]}/${parts[0]}`;
+        }
+      } catch (e) {}
+
+      let machinesCount = 0;
+      if (typeof rec.executedQuantity === 'number' && rec.executedQuantity > 0) {
+        machinesCount = rec.executedQuantity;
+      } else if (rec.checklist && rec.checklist.length > 0) {
+        const checked = rec.checklist.filter(c => c.checked || Boolean(c.checkedAt)).length;
+        machinesCount = checked > 0 ? checked : rec.checklist.length;
+      } else {
+        const addressEquips = equipments.filter(eq => eq.addressId === rec.addressId);
+        machinesCount = addressEquips.length > 0 ? addressEquips.length : 1;
+      }
+
+      return {
+        record: rec,
+        clientId: client?.id || '',
+        clientName,
+        addressStreet: streetName,
+        technicianName: techName,
+        executionDateRaw: rawDate,
+        executionDateFormatted: formattedDate,
+        machinesCount,
+      };
+    }).sort((a, b) => b.executionDateRaw.localeCompare(a.executionDateRaw));
+  }, [records, addresses, clients, equipments, reportStartDate, reportEndDate, reportClientId]);
+
+  const handleExportPeriodReportExcel = () => {
+    if (periodReportData.length === 0) {
+      alert("Nenhum atendimento encontrado para os filtros selecionados.");
+      return;
+    }
+
+    const selectedClient = clients.find(c => c.id === reportClientId);
+    const clientTitle = selectedClient ? selectedClient.name : 'Todos os Clientes';
+
+    const rows = periodReportData.map(item => ({
+      'Cliente': item.clientName,
+      'Endereço': item.addressStreet,
+      'Técnico Responsável': item.technicianName,
+      'Data de Realização': item.executionDateFormatted,
+      'Máquinas Realizadas': item.machinesCount,
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Relatório PMOC');
+
+    worksheet['!cols'] = [
+      { wch: 25 },
+      { wch: 40 },
+      { wch: 25 },
+      { wch: 18 },
+      { wch: 20 },
+    ];
+
+    const filename = `Relatorio_PMOC_${clientTitle.replace(/[^a-zA-Z0-9]/g, '_')}_${reportStartDate || 'inicio'}_a_${reportEndDate || 'fim'}.xlsx`;
+    XLSX.writeFile(workbook, filename);
+  };
+
+  const handlePrintPeriodReport = () => {
+    if (periodReportData.length === 0) {
+      alert("Nenhum atendimento encontrado para os filtros selecionados.");
+      return;
+    }
+
+    const selectedClient = clients.find(c => c.id === reportClientId);
+    const clientTitle = selectedClient ? selectedClient.name : 'Todos os Clientes';
+    
+    const formattedStart = reportStartDate ? reportStartDate.split('-').reverse().join('/') : 'Início';
+    const formattedEnd = reportEndDate ? reportEndDate.split('-').reverse().join('/') : 'Atual';
+
+    const totalMachines = periodReportData.reduce((acc, item) => acc + item.machinesCount, 0);
+
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      alert("Por favor, permita popups para abrir a janela de impressão.");
+      return;
+    }
+
+    const rowsHtml = periodReportData.map((item, index) => `
+      <tr style="background-color: ${index % 2 === 0 ? '#ffffff' : '#f8fafc'};">
+        <td style="padding: 10px 12px; border: 1px solid #e2e8f0; font-weight: 600; color: #1e293b;">${item.addressStreet}</td>
+        <td style="padding: 10px 12px; border: 1px solid #e2e8f0; color: #334155;">${item.technicianName}</td>
+        <td style="padding: 10px 12px; border: 1px solid #e2e8f0; text-align: center; color: #0f172a; font-weight: 600;">${item.executionDateFormatted}</td>
+        <td style="padding: 10px 12px; border: 1px solid #e2e8f0; text-align: center; font-weight: 700; color: #1e1b4b;">${item.machinesCount}</td>
+      </tr>
+    `).join('');
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Relatório de Atendimentos PMOC - ${clientTitle}</title>
+          <style>
+            body {
+              font-family: Arial, Helvetica, sans-serif;
+              margin: 30px;
+              color: #1e293b;
+            }
+            .header {
+              border-bottom: 2px solid #4f46e5;
+              padding-bottom: 15px;
+              margin-bottom: 20px;
+            }
+            .title {
+              font-size: 20px;
+              font-weight: bold;
+              color: #1e1b4b;
+              margin: 0 0 6px 0;
+            }
+            .subtitle {
+              font-size: 13px;
+              color: #64748b;
+              margin: 0;
+            }
+            .meta-info {
+              display: flex;
+              gap: 20px;
+              margin-bottom: 20px;
+              background: #f1f5f9;
+              padding: 12px 16px;
+              border-radius: 8px;
+              font-size: 12px;
+            }
+            .meta-item {
+              font-weight: 600;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 12px;
+            }
+            th {
+              background-color: #4f46e5;
+              color: white;
+              text-align: left;
+              padding: 10px 12px;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+            }
+            .summary {
+              margin-top: 20px;
+              text-align: right;
+              font-size: 13px;
+              font-weight: bold;
+              color: #1e1b4b;
+            }
+            @media print {
+              body { margin: 15px; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1 class="title">RELATÓRIO DE ATENDIMENTOS PMOC POR PERÍODO</h1>
+            <p class="subtitle">Histórico de Manutenções Preventivas Realizadas</p>
+          </div>
+
+          <div class="meta-info">
+            <div><span class="meta-item">Cliente:</span> ${clientTitle}</div>
+            <div><span class="meta-item">Período:</span> ${formattedStart} a ${formattedEnd}</div>
+            <div><span class="meta-item">Total Endereços Atendidos:</span> ${periodReportData.length}</div>
+            <div><span class="meta-item">Total Máquinas Atendidas:</span> ${totalMachines}</div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Nome do Endereço</th>
+                <th>Técnico que Fez</th>
+                <th style="text-align: center;">Data de Realização</th>
+                <th style="text-align: center;">Máquinas Realizadas</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+
+          <div class="summary">
+            Total de Locais Atendidos: ${periodReportData.length} | Total de Máquinas: ${totalMachines}
+          </div>
+
+          <script>
+            window.onload = function() {
+              window.print();
+            };
+          </script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+  };
+
   return (
     <div className="space-y-6 animate-fade-in">
       {/* NAVEGAÇÃO DE SUB-ABAS DA CENTRAL PMOC */}
@@ -386,6 +662,132 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
             </div>
           )}
         </div>
+      </div>
+
+      {/* CARD DE RELATÓRIO DE ATENDIMENTOS POR PERÍODO E CLIENTE (DESIGN LEVE E RECOLHÍVEL) */}
+      <div className="bg-slate-50/90 border border-slate-200/90 rounded-2xl p-3.5 sm:p-4 text-slate-800 shadow-xs transition-all duration-200 hover:border-slate-300">
+        <div 
+          onClick={() => setIsPeriodFilterExpanded(!isPeriodFilterExpanded)}
+          className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer select-none"
+        >
+          <div className="flex items-center gap-3">
+            <div className="bg-indigo-50 text-indigo-600 p-2 rounded-xl border border-indigo-100/80 shrink-0">
+              <FileText className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs sm:text-sm font-bold text-slate-800 tracking-tight">Filtro & Relatório de Atendimentos por Período</h3>
+                {(reportStartDate || reportEndDate || reportClientId) && (
+                  <span className="bg-indigo-100 text-indigo-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-indigo-200/60">
+                    Filtro Ativo
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 font-medium">Consulte endereços e manutenções realizadas por cliente no período selecionado</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+            {periodReportData.length > 0 && (
+              <div className="bg-emerald-50 text-emerald-700 border border-emerald-200/80 px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1.5">
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                {periodReportData.length} {periodReportData.length === 1 ? 'Endereço' : 'Endereços'}
+              </div>
+            )}
+            
+            <button
+              type="button"
+              className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 rounded-xl transition-colors flex items-center gap-1 text-xs font-bold"
+            >
+              <span className="hidden sm:inline text-[11px] text-slate-500">{isPeriodFilterExpanded ? 'Ocultar' : 'Expandir'}</span>
+              {isPeriodFilterExpanded ? (
+                <ChevronUp className="w-4 h-4 text-slate-600" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-600" />
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* CONTEÚDO EXPANDIDO */}
+        {isPeriodFilterExpanded && (
+          <div className="pt-3.5 mt-3 border-t border-slate-200/80 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {/* Data Início */}
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-1">
+                Data de Início
+              </label>
+              <input
+                type="date"
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 cursor-pointer shadow-2xs"
+                value={reportStartDate}
+                onChange={(e) => setReportStartDate(e.target.value)}
+              />
+            </div>
+
+            {/* Data Final */}
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-1">
+                Data Final
+              </label>
+              <input
+                type="date"
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 cursor-pointer shadow-2xs"
+                value={reportEndDate}
+                onChange={(e) => setReportEndDate(e.target.value)}
+              />
+            </div>
+
+            {/* Cliente */}
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wider mb-1">
+                Cliente
+              </label>
+              <select
+                className="w-full bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 cursor-pointer shadow-2xs"
+                value={reportClientId}
+                onChange={(e) => setReportClientId(e.target.value)}
+              >
+                <option value="">Todos os Clientes</option>
+                {activeClients.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Ações */}
+            <div className="flex items-end gap-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsReportModalOpen(true);
+                }}
+                disabled={!reportStartDate && !reportEndDate && !reportClientId}
+                className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-3.5 rounded-xl shadow-xs transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed h-[34px]"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Gerar Relatório ({periodReportData.length})
+              </button>
+              
+              {(reportStartDate || reportEndDate || reportClientId) && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setReportStartDate('');
+                    setReportEndDate('');
+                    setReportClientId('');
+                  }}
+                  className="bg-slate-200/80 hover:bg-slate-200 text-slate-700 p-2 rounded-xl text-xs font-bold transition-all cursor-pointer h-[34px] w-[34px] flex items-center justify-center shrink-0"
+                  title="Limpar Filtros de Período"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -949,6 +1351,149 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                 )}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE RELATÓRIO DE ATENDIMENTOS PMOC POR PERÍODO */}
+      {isReportModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-scale-in border border-slate-100">
+            
+            {/* Modal Header */}
+            <div className="bg-slate-900 text-white p-6 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="bg-indigo-600 p-2.5 rounded-2xl text-white">
+                  <FileText className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black tracking-tight">Relatório de Atendimentos PMOC por Período</h3>
+                  <p className="text-xs text-slate-300 font-medium">
+                    Listagem consolidada de endereços atendidos no intervalo selecionado
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setIsReportModalOpen(false)}
+                className="text-slate-400 hover:text-white p-2 rounded-xl transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Tags de Resumo */}
+            <div className="bg-slate-50 border-b border-slate-200 p-4 flex flex-wrap items-center justify-between gap-3 text-xs font-semibold text-slate-700 shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="bg-indigo-50 text-indigo-700 px-3 py-1 rounded-xl border border-indigo-100 font-bold">
+                  👤 Cliente: {reportClientId ? (clients.find(c => c.id === reportClientId)?.name || 'Cliente Selecionado') : 'Todos os Clientes'}
+                </span>
+                <span className="bg-slate-200 text-slate-800 px-3 py-1 rounded-xl font-bold">
+                  📅 Período: {reportStartDate ? reportStartDate.split('-').reverse().join('/') : 'Início'} até {reportEndDate ? reportEndDate.split('-').reverse().join('/') : 'Atual'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-4 text-xs font-bold text-slate-800">
+                <div>
+                  <span className="text-slate-400 uppercase text-[10px] block font-black">Endereços Atendidos</span>
+                  <span className="text-indigo-600 font-black text-sm">{periodReportData.length}</span>
+                </div>
+                <div className="border-l border-slate-300 h-6"></div>
+                <div>
+                  <span className="text-slate-400 uppercase text-[10px] block font-black">Total Máquinas</span>
+                  <span className="text-emerald-600 font-black text-sm">
+                    {periodReportData.reduce((sum, item) => sum + item.machinesCount, 0)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Tabela do Relatório */}
+            <div className="p-6 overflow-y-auto flex-1 custom-scrollbar">
+              {periodReportData.length === 0 ? (
+                <div className="text-center py-12 space-y-3">
+                  <Info className="w-12 h-12 text-slate-300 mx-auto" />
+                  <h4 className="text-base font-bold text-slate-700">Nenhum atendimento encontrado</h4>
+                  <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                    Não foram encontradas manutenções PMOC executadas com os filtros de data e cliente definidos. Tente alterar o período.
+                  </p>
+                </div>
+              ) : (
+                <div className="border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 text-slate-700 text-[11px] font-black uppercase tracking-wider border-b border-slate-200">
+                        <th className="py-3 px-4">Nome do Endereço</th>
+                        <th className="py-3 px-4">Nome do Técnico que Fez</th>
+                        <th className="py-3 px-4 text-center">Data Realizada</th>
+                        <th className="py-3 px-4 text-center">Máquinas Realizadas</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 text-xs text-slate-800">
+                      {periodReportData.map((item, idx) => (
+                        <tr key={item.record.id || idx} className="hover:bg-indigo-50/40 transition-colors">
+                          <td className="py-3.5 px-4 font-bold text-slate-900">
+                            <div>{item.addressStreet}</div>
+                            {(!reportClientId || reportClientId === 'all') && (
+                              <div className="text-[10px] font-extrabold text-indigo-600 uppercase mt-0.5">
+                                {item.clientName}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 font-medium text-slate-700">
+                            <span className="inline-flex items-center gap-1.5 bg-slate-100 text-slate-800 px-2.5 py-1 rounded-lg text-xs font-bold">
+                              <UserCheck className="w-3.5 h-3.5 text-indigo-600" />
+                              {item.technicianName}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 text-center font-bold text-slate-800 whitespace-nowrap">
+                            <span className="bg-indigo-50 text-indigo-800 px-2.5 py-1 rounded-lg border border-indigo-100">
+                              {item.executionDateFormatted}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-4 text-center font-black text-slate-900 whitespace-nowrap">
+                            <span className="bg-emerald-100 text-emerald-800 px-3 py-1 rounded-full text-xs">
+                              {item.machinesCount} máq.
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer / Ações */}
+            <div className="bg-slate-50 border-t border-slate-200 p-4 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <button
+                onClick={() => setIsReportModalOpen(false)}
+                className="px-5 py-2.5 text-xs font-bold text-slate-600 bg-slate-200 hover:bg-slate-300 rounded-2xl transition-all cursor-pointer"
+              >
+                Fechar
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleExportPeriodReportExcel}
+                  disabled={periodReportData.length === 0}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-2xl shadow-sm transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <TableIcon className="w-4 h-4" />
+                  Exportar Excel
+                </button>
+                
+                <button
+                  onClick={handlePrintPeriodReport}
+                  disabled={periodReportData.length === 0}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-2xl shadow-md shadow-indigo-200 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  <Printer className="w-4 h-4" />
+                  Imprimir / Salvar PDF
+                </button>
+              </div>
+            </div>
+
           </div>
         </div>
       )}

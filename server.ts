@@ -1435,10 +1435,10 @@ async function startServer() {
           const score = (rec: any) => {
             let pts = 0;
             const rDate = (rec.plannedDate || "").split("T")[0].trim();
-            if (rDate === targetDate) pts += 100;
-            if (rec.month === targetMonth) pts += 50;
-            if (rec.status === "pending" || rec.status === "in_progress") pts += 40;
-            if (rec.status === "pre_completed") pts += 20;
+            if (rDate === targetDate) pts += 1000;
+            if (rec.month === targetMonth) pts += 200;
+            if (rec.status === "pending" || rec.status === "in_progress") pts += 100;
+            if (rec.status === "pre_completed") pts += 50;
             if (rec.status === "completed") pts += 10;
             if (rec.id && rec.month && rec.id.startsWith(rec.month + "_")) pts += 5;
             return pts;
@@ -1451,21 +1451,16 @@ async function startServer() {
         activeAddressScheduleDocId.set(aid, scheduledList[0].id);
       }
 
-      // Determina a data efetiva: se não houver agendamentos na data exata, busca o último/próximo agendamento ativo
+      // Determina a data efetiva: se targetDate for fornecido, respeita rigorosamente a data solicitada
       let effectiveTargetDate = targetDate;
       const techRecordsAllDates = allRecords.filter(r => {
         if (!r || !r.plannedDate) return false;
-        if (r.addressId && !r.isTemporaryRoute) {
-          const aid = String(r.addressId).trim();
-          const canonicalDocId = activeAddressScheduleDocId.get(aid);
-          if (canonicalDocId && canonicalDocId !== r.id) return false;
-        }
         return matchesTechResilient(r.technician1, r.technician2);
       });
 
       const hasExactDateMatch = techRecordsAllDates.some(r => (r.plannedDate || "").split("T")[0].trim() === targetDate);
-      if (!hasExactDateMatch && techRecordsAllDates.length > 0) {
-        // Encontra a data mais próxima
+      if (!targetDate && !hasExactDateMatch && techRecordsAllDates.length > 0) {
+        // Encontra a data mais próxima se nenhuma data for informada
         const dates = Array.from(new Set(techRecordsAllDates.map(r => (r.plannedDate || "").split("T")[0].trim()))).sort();
         if (dates.length > 0) {
           effectiveTargetDate = dates.find(d => d >= targetDate) || dates[dates.length - 1];
@@ -1476,15 +1471,8 @@ async function startServer() {
       const filteredRecords = allRecords.filter((r: any) => {
         if (!r) return false;
         const rDate = (r.plannedDate || "").split("T")[0].trim();
-        if (rDate !== effectiveTargetDate) return false;
-
-        if (r.addressId && !r.isTemporaryRoute) {
-          const aid = String(r.addressId).trim();
-          const canonicalDocId = activeAddressScheduleDocId.get(aid);
-          if (canonicalDocId && canonicalDocId !== r.id) {
-            return false;
-          }
-        }
+        const matchesDate = rDate === targetDate || rDate === effectiveTargetDate;
+        if (!matchesDate) return false;
 
         return matchesTechResilient(r.technician1, r.technician2);
       });
@@ -1493,7 +1481,8 @@ async function startServer() {
       const filteredOS = allOS.filter((os: any) => {
         if (!os || os.status === "cancelada") return false;
         const osDate = (os.plannedDate || (os.openedAt ? os.openedAt.substring(0, 10) : "")).split("T")[0].trim();
-        if (osDate !== effectiveTargetDate && osDate !== targetDate) return false;
+        const matchesDate = osDate === targetDate || osDate === effectiveTargetDate;
+        if (!matchesDate) return false;
 
         return matchesTechResilient(os.technicianId || os.technician1, os.technician2Id || os.technician2);
       });

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { dataService } from '../services/dataService';
 import { Address, Client, MaintenanceRecord, MaintenanceStatus, RouteConfiguration, isOSRecord } from '../types';
 import { format } from 'date-fns';
+import { getCanonicalRouteName } from '../lib/utils';
 
 export const MacroTable = ({ currentMonthStr, addresses, clients, routeConfigs }: { currentMonthStr: string, addresses: Address[], clients: Client[], routeConfigs: RouteConfiguration[] }) => {
   const [loading, setLoading] = useState(true);
@@ -56,7 +57,7 @@ export const MacroTable = ({ currentMonthStr, addresses, clients, routeConfigs }
   const rowsByRoute = useMemo(() => {
     const map: Record<string, Address[]> = {};
     addresses.forEach(addr => {
-      const route = addr.route || 'Sem Rota';
+      const route = getCanonicalRouteName(addr.route, routeConfigs);
       if (!map[route]) map[route] = [];
       map[route].push(addr);
     });
@@ -64,7 +65,11 @@ export const MacroTable = ({ currentMonthStr, addresses, clients, routeConfigs }
     // Sort routes
     const routes = Object.keys(map).sort();
     return routes.map(route => {
-      const config = routeConfigs.find(rc => rc.id === route);
+      const config = routeConfigs.find(rc => {
+        if (rc.id === route) return true;
+        const canonC = getCanonicalRouteName(rc.routeName || rc.id, routeConfigs);
+        return canonC.toLowerCase() === route.toLowerCase();
+      });
       const sortedAddresses = map[route].sort((a, b) => {
         const nameA = a.clientName || clients.find(c => c.id === a.clientId)?.name || '';
         const nameB = b.clientName || clients.find(c => c.id === b.clientId)?.name || '';

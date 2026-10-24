@@ -28,7 +28,7 @@ import {
 import { dataService, normalizeAddressText } from '../services/dataService';
 import { ImageUploader } from './ImageUploader';
 import { Client, Address, MaintenanceRecord, MaintenanceStatus, Technician, ServiceCallStatus, ServiceCallPriority, ServiceCall, UserRole, RouteConfiguration, RouteType, isOSRecord } from '../types';
-import { cn, formatDate } from '../lib/utils';
+import { cn, formatDate, getCanonicalRouteName } from '../lib/utils';
 import { format, addMonths, subMonths, startOfMonth, subDays, addDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { MacroTable } from './MacroTable';
@@ -364,7 +364,7 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
           ? formatDate(lastExecDateObj) 
           : (r.executionDate ? formatDate(r.executionDate) : '');
 
-        const route = r.address?.route || 'Sem Rota';
+        const route = getCanonicalRouteName(r.address?.route, routeConfigs);
         const clientName = r.client?.name || 'Cliente temporário ou não encontrado';
         const street = r.address?.street || '';
         const totalMachines = r.address?.totalMachines ?? 0;
@@ -503,7 +503,13 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
       const key = getCanonicalAddressKey(client?.id || addr.clientId || '', addr.street || '', addr.number);
 
       if (!uniqueMap.has(key)) {
-        const routeConfig = routeConfigs.find(c => c.id === addr.route && (c.type === RouteType.FIXED || c.type === RouteType.TEMPORARY));
+        const canonRoute = getCanonicalRouteName(addr.route, routeConfigs);
+        const routeConfig = routeConfigs.find(c => {
+          if (c.type !== RouteType.FIXED && c.type !== RouteType.TEMPORARY) return false;
+          if (c.id === addr.route) return true;
+          const canonC = getCanonicalRouteName(c.routeName || c.id, routeConfigs);
+          return canonC.toLowerCase() === canonRoute.toLowerCase();
+        });
         
         const defaultItem: EnrichedRecord = {
           id: `virtual_${currentMonth}_${addr.id}`,
@@ -526,17 +532,19 @@ export default function ScheduleView({ managerClientId, userRole }: Props) {
 
     const enriched: EnrichedRecord[] = Array.from(uniqueMap.values()).filter(r => {
       const searchTerms = search.toLowerCase();
+      const canonRoute = getCanonicalRouteName(r.address?.route, routeConfigs).toLowerCase();
       return (
         r.client?.name?.toLowerCase().includes(searchTerms) ||
         r.address?.street?.toLowerCase().includes(searchTerms) ||
-        r.address?.route?.toLowerCase().includes(searchTerms) ||
+        canonRoute.includes(searchTerms) ||
+        (r.address?.route || '').toLowerCase().includes(searchTerms) ||
         r.technician1?.toLowerCase().includes(searchTerms)
       );
     });
 
     const groups: Record<string, EnrichedRecord[]> = {};
     enriched.forEach(r => {
-      const route = r.address?.route || 'Sem Rota';
+      const route = getCanonicalRouteName(r.address?.route, routeConfigs);
       if (!groups[route]) groups[route] = [];
       groups[route].push(r);
     });

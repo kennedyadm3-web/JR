@@ -933,9 +933,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       dataService.clearCache('records_');
     }
     try {
-      const activeTechFilter = isTabletMode && authTech ? authTech.name : selectedTech;
       const itineraryMonth = itineraryDate ? itineraryDate.substring(0, 7) : month;
-      const monthsToFetch = new Set<string>([month, itineraryMonth]);
+      const parts = itineraryMonth.split('-').map(Number);
+      const iy = parts[0] || 2026;
+      const im = parts[1] || 10;
+      const prevItineraryMonth = format(new Date(iy, im - 2, 1), 'yyyy-MM');
+      const nextItineraryMonth = format(new Date(iy, im, 1), 'yyyy-MM');
+
+      const monthsToFetch = new Set<string>([month, itineraryMonth, prevItineraryMonth, nextItineraryMonth]);
 
       // Busca dados com sincronização dedicada para o roteiro do técnico
       const itineraryFetchPromise = fetch(`/api/tech-demand/itinerary?date=${itineraryDate || ''}&tech=${encodeURIComponent(activeTechFilter || '')}&month=${itineraryMonth}`)
@@ -1196,24 +1201,26 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   // Sistema canônico de indexação de técnicos em MAIÚSCULAS
   const techIndex = useMemo(() => buildTechnicianIndex(techs), [techs]);
 
-  // Funções de correspondência estrita (data única e técnico correto)
+  // Funções de correspondência estrita e resiliente (data única e técnico correto)
   const checkRecordMatchesDate = (r: MaintenanceRecord, targetDate: string): boolean => {
     if (!r || !targetDate) return false;
-    // REGRA MANDATÓRIA: Endereços têm estritamente uma única data agendada
+    const cleanTarget = targetDate.trim();
     const rDate = (r.plannedDate || '').split('T')[0].trim();
-    return rDate === targetDate.trim();
+    if (rDate === cleanTarget) return true;
+    if (r.plannedDate && String(r.plannedDate).slice(0, 10) === cleanTarget) return true;
+    return false;
   };
 
   const checkRecordMatchesTech = (r: MaintenanceRecord, currentTechFilter: string): boolean => {
     const filter = (currentTechFilter || '').trim();
     if (!filter || filter.toUpperCase() === 'TODOS' || filter.toUpperCase() === 'ALL') {
-      // Se for usuário com perfil de técnico ou tablet de campo, tenta vincular o nome/fullname do técnico logado
+      // Se for usuário com perfil de técnico ou tablet de campo, vincula o nome/fullname do técnico logado ou selecionado
       if (userRole === UserRole.TECHNICIAN || isTabletMode) {
-        const resolvedName = (authTech?.name || authTech?.fullName || userProfile?.name || (userProfile as any)?.displayName || '').trim();
+        const resolvedName = (authTech?.name || authTech?.fullName || userProfile?.name || (userProfile as any)?.displayName || selectedTech || '').trim();
         if (resolvedName) {
           return techIndex.matchesTechTitular(r.technician1, resolvedName) || techIndex.matchesTechTitular(r.technician2, resolvedName);
         }
-        return false;
+        return true;
       }
       return true;
     }

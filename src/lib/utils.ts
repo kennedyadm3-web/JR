@@ -171,3 +171,46 @@ export function sortOrdersByCreationDateDesc<T extends { id?: string }>(ordersLi
   });
 }
 
+/**
+ * Normaliza e resolve o nome canônico de uma rota para agrupamento unificado.
+ * Remove prefixos "ROTA:", "Rota:" e unifica chaves de rota por ID ou Nome.
+ */
+export function getCanonicalRouteName(rawRoute?: string, routeConfigs: any[] = []): string {
+  if (!rawRoute || !String(rawRoute).trim()) return 'Sem Rota';
+
+  const rawStr = String(rawRoute).trim();
+  // Limpa prefixos redundantes como "ROTA:", "Rota:", "ROTA "
+  const cleanStr = rawStr
+    .replace(/^rota\s*:\s*/i, '')
+    .replace(/^rota\s+/i, '')
+    .trim();
+
+  if (!cleanStr) return 'Sem Rota';
+
+  if (Array.isArray(routeConfigs) && routeConfigs.length > 0) {
+    const matched = routeConfigs.find(c => {
+      if (!c) return false;
+      if (c.id && (c.id === rawStr || c.id === cleanStr)) return true;
+      if (c.routeName) {
+        if (c.routeName === rawStr || c.routeName === cleanStr) return true;
+        const cCleaned = c.routeName
+          .replace(/^rota\s*:\s*/i, '')
+          .replace(/^rota\s+/i, '')
+          .trim();
+        if (cCleaned.toLowerCase() === cleanStr.toLowerCase()) return true;
+      }
+      return false;
+    });
+
+    if (matched && matched.routeName) {
+      return matched.routeName
+        .replace(/^rota\s*:\s*/i, '')
+        .replace(/^rota\s+/i, '')
+        .trim();
+    }
+  }
+
+  return cleanStr;
+}
+
+

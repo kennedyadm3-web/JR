@@ -306,11 +306,13 @@ export const deduplicateRecordsList = (records: MaintenanceRecord[]): { deduplic
         const db = b.plannedDate || '';
         return db.localeCompare(da);
       });
-      // REGRA MANDATÓRIA: Somente uma data para cada endereço! O registro prioritário é o único que mantém a data prevista ativa.
+      // REGRA MANDATÓRIA: Registros ativos pendentes/parciais preservam sua data agendada para não sumir do roteiro do técnico
       for (const loser of withPlannedDate.slice(1)) {
-        loser.plannedDate = undefined;
-        loser.plannedDates = undefined;
-        loser.returnDate = undefined;
+        if (loser.status !== MaintenanceStatus.PENDING && loser.status !== MaintenanceStatus.PARTIAL && (loser as any).status !== 'in_progress') {
+          loser.plannedDate = undefined;
+          loser.plannedDates = undefined;
+          loser.returnDate = undefined;
+        }
       }
     }
   }
@@ -1239,13 +1241,24 @@ export const dataService = {
 
   async getRecordsByPlannedDate(plannedDate: string): Promise<MaintenanceRecord[]> {
     const targetDate = plannedDate.split('T')[0];
-    const monthStr = targetDate.slice(0, 7);
+    const targetYearMonth = targetDate.slice(0, 7);
+    const parts = targetYearMonth.split('-').map(Number);
+    const y = parts[0] || 2026;
+    const m = parts[1] || 10;
+    
+    const prevDate = new Date(y, m - 2, 1);
+    const nextDate = new Date(y, m, 1);
+    const prevMonthStr = format(prevDate, 'yyyy-MM');
+    const nextMonthStr = format(nextDate, 'yyyy-MM');
+
     const cacheKey = `records_plannedDate_${targetDate}`;
     return getCachedData(cacheKey, async () => {
       try {
-        const [snapExact, snapMonth] = await Promise.all([
+        const [snapExact, snapMonth, snapPrevMonth, snapNextMonth] = await Promise.all([
           getDocs(query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', targetDate))),
-          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', monthStr)))
+          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', targetYearMonth))),
+          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', prevMonthStr))),
+          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', nextMonthStr)))
         ]);
         const map = new Map<string, any>();
         const processDoc = (docSnap: any) => {
@@ -1265,6 +1278,8 @@ export const dataService = {
         };
         snapExact.docs.forEach(processDoc);
         snapMonth.docs.forEach(processDoc);
+        snapPrevMonth.docs.forEach(processDoc);
+        snapNextMonth.docs.forEach(processDoc);
 
         const rawList = Array.from(map.values()) as MaintenanceRecord[];
         const { deduplicated, duplicateIds } = deduplicateRecordsList(rawList);
@@ -1282,15 +1297,22 @@ export const dataService = {
   subscribeRecordsByPlannedDate(plannedDate: string, callback: (records: MaintenanceRecord[]) => void): () => void {
     if (!plannedDate) return () => {};
     const targetDate = plannedDate.split('T')[0];
-    const monthStr = targetDate.slice(0, 7);
+    const targetYearMonth = targetDate.slice(0, 7);
+    const parts = targetYearMonth.split('-').map(Number);
+    const y = parts[0] || 2026;
+    const m = parts[1] || 10;
+    const prevMonthStr = format(new Date(y, m - 2, 1), 'yyyy-MM');
+
     try {
-      const q = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', monthStr));
-      return onSnapshot(q, (snapshot) => {
-        const list = snapshot.docs
-          .map(docSnap => {
-            const data = docSnap.data() as any;
-            return { id: docSnap.id, ...data } as MaintenanceRecord;
-          })
+      const qCur = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', targetYearMonth));
+      const qPrev = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', prevMonthStr));
+
+      let curDocs: any[] = [];
+      let prevDocs: any[] = [];
+
+      const emitCombined = () => {
+        const combined = [...curDocs, ...prevDocs];
+        const list = combined
           .filter(r => (r.plannedDate || '').split('T')[0] === targetDate)
           .map(r => {
             if (Array.isArray(r.checklist)) {
@@ -1303,9 +1325,26 @@ export const dataService = {
           });
         const { deduplicated } = deduplicateRecordsList(list);
         callback(deduplicated);
+      };
+
+      const unsubCur = onSnapshot(qCur, (snapshot) => {
+        curDocs = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord));
+        emitCombined();
       }, (err) => {
-        console.warn('[Realtime Listener] Erro em subscribeRecordsByPlannedDate:', err);
+        console.warn('[Realtime Listener] Erro em subscribeRecordsByPlannedDate cur:', err);
       });
+
+      const unsubPrev = onSnapshot(qPrev, (snapshot) => {
+        prevDocs = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord));
+        emitCombined();
+      }, (err) => {
+        console.warn('[Realtime Listener] Erro em subscribeRecordsByPlannedDate prev:', err);
+      });
+
+      return () => {
+        unsubCur();
+        unsubPrev();
+      };
     } catch (e) {
       console.warn('[Realtime Listener Setup] Falha:', e);
       return () => {};
@@ -2110,6 +2149,20 @@ export const dataService = {
 
   async addServiceCall(call: Omit<ServiceCall, 'id'>) {
     try {
+      if (call.addressId) {
+        const existingCalls = await dataService.getServiceCalls(call.clientId);
+        const hasActiveOpenCall = existingCalls.some(c => {
+          if (!c || !c.addressId) return false;
+          if (String(c.addressId).trim() !== String(call.addressId).trim()) return false;
+          const st = String(c.status || '').toLowerCase();
+          const isResolved = st === 'resolved' || st === 'cancelled' || st === 'resolvido' || st === 'cancelado' || st === ServiceCallStatus.RESOLVED || st === ServiceCallStatus.CANCELLED;
+          return !isResolved;
+        });
+        if (hasActiveOpenCall) {
+          throw new Error('Este endereço já possui um chamado em aberto no sistema. Conclua o chamado existente antes de cadastrar um novo.');
+        }
+      }
+
       const docRef = await addDoc(collection(db, COLLECTIONS.SERVICE_CALLS), {
         ...call,
         createdAt: serverTimestamp()

@@ -22,7 +22,8 @@ import {
   Layers, 
   LayoutList, 
   Table as TableIcon, 
-  Navigation
+  Navigation,
+  AlertCircle
 } from 'lucide-react';
 import { MaintenanceRecord, Address, Client, Technician, ServiceOrder, MaintenanceStatus, UserRole, Equipment } from '../../types';
 import { format, parseISO, addDays, subDays } from 'date-fns';
@@ -1086,6 +1087,25 @@ export function ItineraryList({
         {/* ÁREA DA PLANILHA COMPACTA (Lado direito, aproveitando o espaço restante) */}
         <main className="flex-1 min-w-0 space-y-2">
           
+          {/* Alerta quando há filtro por técnico e existem atendimentos de outros técnicos no mesmo dia */}
+          {selectedTech && techSummary.totalDemandsCount > filteredMetrics.total && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-900 px-3.5 py-2 rounded-2xl text-xs flex items-center justify-between gap-3 font-medium shadow-xs print:hidden animate-in fade-in">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>
+                  Exibindo apenas os atendimentos do técnico <strong className="font-black text-amber-950">{selectedTech}</strong> ({filteredMetrics.total} no dia). Existem outros <strong className="font-black text-amber-950">{techSummary.totalDemandsCount - filteredMetrics.total}</strong> atendimentos agendados para este dia com outros técnicos.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedTech(null)}
+                className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl transition-all shrink-0 cursor-pointer shadow-2xs active:scale-95"
+              >
+                Ver Todas as Rotas
+              </button>
+            </div>
+          )}
+
           {/* TOOLBAR DA PLANILHA (Busca, Filtros e Controle de Densidade) */}
           <div className="bg-white border border-slate-200 rounded-2xl p-2.5 sm:p-3 shadow-xs flex flex-wrap items-center justify-between gap-2 print:hidden">
             

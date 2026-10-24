@@ -12,7 +12,7 @@ import { cn, generateInitialOsNumber, sortOrdersByCreationDateDesc } from '../li
 import { buildTechnicianIndex, normalizeTechString } from '../lib/technicianIndex';
 import { dataService } from '../services/dataService';
 import { CompanyLogo, getCompanyConfigFromCache } from './CompanyLogo';
-import { Client, Address, Equipment, Technician, ServiceOrder, ServiceOrderItem, UserRole, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, MaintenanceRecord, JettingControl, MaintenanceStatus, TechOSDraft } from '../types';
+import { Client, Address, Equipment, Technician, ServiceOrder, ServiceOrderItem, UserRole, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, MaintenanceRecord, JettingControl, MaintenanceStatus, TechOSDraft, ServiceCall, ServiceCallStatus } from '../types';
 import { ImageUploader } from './ImageUploader';
 import { JettingControlCenter } from './JettingControlCenter';
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, PieChart, Pie, Cell } from 'recharts';
@@ -25,15 +25,38 @@ const isOSRecord = (r: any): boolean => {
   return false;
 };
 
-const formatDateSafe = (dateStr?: string): string => {
+const formatDateSafe = (dateStr?: any): string => {
   if (!dateStr) return '';
   try {
-    const parts = dateStr.split('T')[0].split('-');
-    if (parts.length === 3) {
-      return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    if (typeof dateStr === 'object' && dateStr !== null) {
+      if ('seconds' in dateStr && typeof dateStr.seconds === 'number') {
+        const dateObj = new Date(dateStr.seconds * 1000);
+        return dateObj.toLocaleDateString('pt-BR');
+      }
+      if ('_seconds' in dateStr && typeof dateStr._seconds === 'number') {
+        const dateObj = new Date(dateStr._seconds * 1000);
+        return dateObj.toLocaleDateString('pt-BR');
+      }
+      if (dateStr instanceof Date) {
+        return dateStr.toLocaleDateString('pt-BR');
+      }
     }
-  } catch (e) {}
-  return dateStr;
+    if (typeof dateStr === 'number') {
+      return new Date(dateStr).toLocaleDateString('pt-BR');
+    }
+    if (typeof dateStr === 'string') {
+      const cleanStr = dateStr.trim();
+      if (!cleanStr) return '';
+      const parts = cleanStr.split('T')[0].split('-');
+      if (parts.length === 3 && parts[0].length === 4) {
+        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+      }
+      return cleanStr;
+    }
+  } catch (e) {
+    console.error("Error in formatDateSafe:", e);
+  }
+  return String(dateStr || '');
 };
 
 // Modelos pré-definidos para facilitar a inserção
@@ -548,6 +571,25 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [startDateFilter, setStartDateFilter] = useState('');
   const [endDateFilter, setEndDateFilter] = useState('');
   const [activeTab, setActiveTab] = useState<'list' | 'reports' | 'jetting'>('list');
+
+  // Chamados Técnicos e Modal de Alerta Prévio de Chamado em Aberto
+  const [serviceCalls, setServiceCalls] = useState<ServiceCall[]>([]);
+  const [isOpenCallsWarningModalOpen, setIsOpenCallsWarningModalOpen] = useState(false);
+  const [pendingOpenCallsData, setPendingOpenCallsData] = useState<{
+    order: ServiceOrder;
+    openCalls: ServiceCall[];
+  } | null>(null);
+  const [isCallDetailsExpandedInForm, setIsCallDetailsExpandedInForm] = useState(false);
+
+  // Inscrição em tempo real para sincronizar chamados técnicos
+  useEffect(() => {
+    const unsubscribeCalls = dataService.subscribeServiceCalls((calls) => {
+      setServiceCalls(calls);
+    }, managerClientId);
+    return () => {
+      unsubscribeCalls();
+    };
+  }, [managerClientId]);
 
   // Estados de Paginação para a Tabela Principal de O.S.
   const [currentPage, setCurrentPage] = useState(1);
@@ -1669,6 +1711,65 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       setTechActiveTab('form');
     } else {
       setIsFormOpen(true);
+    }
+  };
+
+  // Função de busca rápida de chamados em aberto para um endereço
+  const getOpenCallsForAddress = (addressId?: string, clientId?: string): ServiceCall[] => {
+    if (!addressId && !clientId) return [];
+    if (!Array.isArray(serviceCalls)) return [];
+
+    const normAddrId = addressId ? String(addressId).trim() : '';
+    const normClientId = clientId ? String(clientId).trim() : '';
+
+    return serviceCalls.filter(call => {
+      if (!call) return false;
+      const statusStr = String(call.status || '').toLowerCase();
+      const isResolved = statusStr === 'resolved' || statusStr === 'cancelled' || statusStr === 'resolvido' || statusStr === 'cancelado' || statusStr === ServiceCallStatus.RESOLVED || statusStr === ServiceCallStatus.CANCELLED;
+      if (isResolved) return false;
+
+      // Se o ID do endereço foi informado, filtra ESTRITAMENTE pelo ID do endereço
+      if (normAddrId) {
+        return Boolean(call.addressId && String(call.addressId).trim() === normAddrId);
+      }
+
+      // Fallback para quando apenas o ID do cliente foi informado
+      if (normClientId) {
+        return Boolean(call.clientId && String(call.clientId).trim() === normClientId);
+      }
+
+      return false;
+    });
+  };
+
+  // Função de Pré-Carregamento / Verificação de Chamados antes de abrir a tela de edição
+  const handleEditPreCheck = (order: ServiceOrder) => {
+    if (!order) return;
+    try {
+      const openCalls = getOpenCallsForAddress(order.addressId, order.clientId);
+      if (openCalls && openCalls.length > 0) {
+        setPendingOpenCallsData({ order, openCalls });
+        setIsOpenCallsWarningModalOpen(true);
+      } else {
+        handleEdit(order);
+      }
+    } catch (err) {
+      console.error('Erro no pré-carregamento de chamados:', err);
+      handleEdit(order);
+    }
+  };
+
+  // Ação ao confirmar no modal de aviso do chamado em aberto
+  const handleProceedToEditWithWarning = () => {
+    if (pendingOpenCallsData?.order) {
+      const orderToEdit = pendingOpenCallsData.order;
+      setIsOpenCallsWarningModalOpen(false);
+      setPendingOpenCallsData(null);
+      setIsCallDetailsExpandedInForm(false);
+      handleEdit(orderToEdit);
+    } else {
+      setIsOpenCallsWarningModalOpen(false);
+      setPendingOpenCallsData(null);
     }
   };
 
@@ -4246,7 +4347,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                             {isOrderFinalized ? (
                               <button
                                 type="button"
-                                onClick={() => handleEdit(order)}
+                                onClick={() => handleEditPreCheck(order)}
                                 className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-black uppercase tracking-wider py-2.5 px-3 rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
                               >
                                 <Eye className="w-4 h-4 text-slate-500" />
@@ -4255,7 +4356,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => handleEdit(order)}
+                                onClick={() => handleEditPreCheck(order)}
                                 className="w-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-wider py-2.5 px-3 rounded-xl transition-all shadow-xs flex items-center justify-center gap-2 cursor-pointer"
                               >
                                 <Edit3 className="w-4 h-4" />
@@ -4597,7 +4698,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                       {/* Ação Principal: Iniciar / Preencher O.S. */}
                       <button
                         type="button"
-                        onClick={() => handleEdit(order)}
+                        onClick={() => handleEditPreCheck(order)}
                         className="w-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-widest py-3 px-4 rounded-xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
                       >
                         <Wrench className="w-4 h-4" />
@@ -4871,14 +4972,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           </td>
                           <td className="px-5 py-4 text-center">
                             <div className="flex items-center justify-center gap-1.5">
-                              <button
-                                id={`btn-download-excel-allorder-${o.id}`}
-                                onClick={() => downloadOsExcel(o)}
-                                className="p-1.5 text-emerald-600 hover:bg-emerald-50 border border-transparent hover:border-emerald-100 rounded-lg transition-all cursor-pointer"
-                                title="Baixar Excel"
-                              >
-                                <FileSpreadsheet className="w-4 h-4" />
-                              </button>
+                              {(() => {
+                                const isSigned = Boolean(
+                                  (o.clientSignature && String(o.clientSignature).trim().length > 10) ||
+                                  o.clientSignatureDate ||
+                                  o.techFinalized ||
+                                  o.adminFinalized
+                                );
+
+                                return isSigned ? (
+                                  <div
+                                    className="p-1.5 text-emerald-600 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center justify-center shadow-2xs"
+                                    title="Ordem de Serviço Assinada pelo Cliente (Atendimento Executado)"
+                                  >
+                                    <CheckCircle2 className="w-4 h-4 text-emerald-600 fill-emerald-100" />
+                                  </div>
+                                ) : (
+                                  <div
+                                    className="p-1.5 text-slate-300 bg-slate-50 border border-slate-200/60 rounded-lg flex items-center justify-center"
+                                    title="Aguardando Assinatura do Cliente"
+                                  >
+                                    <CheckCircle2 className="w-4 h-4 text-slate-300 opacity-60" />
+                                  </div>
+                                );
+                              })()}
                               <button
                                 onClick={() => handlePrint(o)}
                                 className="p-1.5 text-blue-600 hover:bg-blue-50 border border-transparent hover:border-blue-100 rounded-lg transition-all cursor-pointer"
@@ -4887,7 +5004,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 <Printer className="w-4 h-4" />
                               </button>
                               <button
-                                onClick={() => handleEdit(o)}
+                                onClick={() => handleEditPreCheck(o)}
                                 className="p-1.5 text-amber-600 hover:bg-amber-50 border border-transparent hover:border-amber-100 rounded-lg transition-all cursor-pointer"
                                 title={o.status === 'cancelada' ? "Visualizar O.S. Cancelada" : "Editar OS"}
                               >
@@ -5407,7 +5524,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           <td className="px-5 py-3.5 text-center">
                             <div className="flex items-center justify-center gap-1.5">
                               <button
-                                onClick={() => handleEdit(o)}
+                                onClick={() => handleEditPreCheck(o)}
                                 className="p-1.5 text-amber-600 hover:bg-amber-50 border border-transparent hover:border-amber-100 rounded-lg transition-all cursor-pointer"
                                 title={o.status === 'cancelada' ? "Visualizar O.S. Cancelada" : "Editar O.S."}
                               >
@@ -5449,6 +5566,42 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         const isTechFinalizeReady = isClientSignatureFilled && isClientRepFilled && isClientMatriculaFilled && isSolutionFilled && !isLockedForTech && !isSaving;
         const isFinalizeReady = isSolutionFilled && !isSolutionDisabled && !isOtherEquipmentSelected;
 
+        const activeOrderOpenCalls = getOpenCallsForAddress(formAddressId || selectedOrder?.addressId || '', formClientId || selectedOrder?.clientId || '');
+        const hasOpenCallsForAddress = activeOrderOpenCalls.length > 0;
+
+        const isExternalOrTechOpenedSO = Boolean(
+          selectedOrder && (
+            selectedOrder.techFinalized ||
+            (selectedOrder.authenticatedTeam && (
+              selectedOrder.authenticatedTeam.toLowerCase().includes('jdsmartos') ||
+              selectedOrder.authenticatedTeam.toLowerCase().includes('app:') ||
+              selectedOrder.authenticatedTeam.toLowerCase().includes('aplicativo') ||
+              selectedOrder.authenticatedTeam.toLowerCase().includes('android') ||
+              selectedOrder.authenticatedTeam.toLowerCase().includes('pwa') ||
+              selectedOrder.authenticatedTeam.toLowerCase().includes('externo') ||
+              selectedOrder.authenticatedTeam.toLowerCase().includes('tablet')
+            )) ||
+            (
+              selectedOrder.openedBy &&
+              !['ADMIN', 'ADMINISTRADOR', 'ADMINISTRATIVO', 'ESCRITORIO', 'ESCRITÓRIO', 'SISTEMA', 'LEFRIO', 'ALCLIMA', 'SUPORTE', 'ASSISTENTE', 'GERENTE'].some(term =>
+                (selectedOrder.openedBy || '').trim().toUpperCase().startsWith(term)
+              ) &&
+              technicians.some(t => {
+                const openedStr = (selectedOrder.openedBy || '').trim().toUpperCase();
+                const tName = (t.name || '').trim().toUpperCase();
+                const tFull = (t.fullName || '').trim().toUpperCase();
+                const tId = (t.id || '').trim().toUpperCase();
+                return (
+                  (tName && (openedStr === tName || openedStr.includes(tName))) ||
+                  (tFull && (openedStr === tFull || openedStr.includes(tFull))) ||
+                  (tId && openedStr === tId)
+                );
+              })
+            ) ||
+            (selectedOrder.externalOs && !['ADMIN', 'ADMINISTRADOR', 'ESCRITORIO', 'ESCRITÓRIO', 'SISTEMA', 'LEFRIO', 'ALCLIMA'].some(term => (selectedOrder.openedBy || '').trim().toUpperCase().startsWith(term)))
+          )
+        );
+
         return (
         <div className={cn(
           userRole === UserRole.TECHNICIAN
@@ -5462,19 +5615,32 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               : "max-w-4xl my-8 shadow-2xl max-h-[90vh]"
           )}>
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-150 px-5 py-2.5 bg-slate-50/70 rounded-t-2xl">
+            <div className={cn(
+              "flex items-center justify-between border-b px-5 py-2.5 rounded-t-2xl transition-all",
+              hasOpenCallsForAddress
+                ? "bg-gradient-to-r from-amber-500/15 via-orange-500/20 to-amber-500/15 border-b-2 border-amber-500 text-amber-950"
+                : "border-slate-150 bg-slate-50/70"
+            )}>
               <div className="flex items-center gap-2.5">
                 <div className={cn(
                   "w-8 h-8 rounded-lg flex items-center justify-center shrink-0",
-                  isLockedForTech ? "bg-amber-100 text-amber-700" : "bg-blue-600/10 text-blue-600"
+                  hasOpenCallsForAddress
+                    ? "bg-amber-500 text-white shadow-xs animate-pulse"
+                    : isLockedForTech ? "bg-amber-100 text-amber-700" : "bg-blue-600/10 text-blue-600"
                 )}>
-                  {isLockedForTech ? <Lock className="w-4 h-4" /> : <FileText className="w-4 h-4" />}
+                  {hasOpenCallsForAddress ? <AlertTriangle className="w-4 h-4 text-white" /> : (isLockedForTech ? <Lock className="w-4 h-4" /> : <FileText className="w-4 h-4" />)}
                 </div>
                 <div>
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider">
                       {selectedOrder ? `Editar O.S. #${formOsNumber || (formId && !formId.startsWith('OS_') ? formId : '00000')}` : 'Nova Ordem de Serviço'}
                     </h3>
+                    {hasOpenCallsForAddress && (
+                      <span className="px-2 py-0.5 text-[8.5px] font-black uppercase tracking-wider bg-amber-600 text-white rounded-full flex items-center gap-1 shadow-2xs animate-pulse">
+                        <AlertTriangle className="w-2.5 h-2.5 text-white" />
+                        {activeOrderOpenCalls.length === 1 ? '1 Chamado em Aberto' : `${activeOrderOpenCalls.length} Chamados em Aberto`}
+                      </span>
+                    )}
                     {batchIndex >= 0 && batchQueue.length > 0 && (
                       <span className="px-1.5 py-0.5 text-[8.5px] font-black uppercase tracking-wider bg-purple-100 text-purple-800 border border-purple-200 rounded-md flex items-center gap-1">
                         <ListPlus className="w-2.5 h-2.5 text-purple-600" /> Máquina {batchIndex + 1}/{batchQueue.length}
@@ -5511,6 +5677,76 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               }
               handleSave(e);
             }} className={cn("flex-1 p-4 sm:p-5 space-y-3.5", userRole !== UserRole.TECHNICIAN && "overflow-y-auto")}>
+              {/* Banner Compacto e Elegante de Alerta de Chamado em Aberto */}
+              {hasOpenCallsForAddress && (
+                <div className="bg-amber-50/90 border border-amber-300/80 rounded-xl p-2.5 sm:p-3 shadow-3xs transition-all space-y-2 text-amber-950">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <span className="text-xs font-black uppercase tracking-wide text-amber-900 truncate">
+                        Atenção: Chamado Técnico em Aberto para este Endereço
+                      </span>
+                      <span className="bg-amber-200/90 text-amber-950 font-black text-[9px] px-2 py-0.5 rounded-full uppercase tracking-wider shrink-0">
+                        {activeOrderOpenCalls.length === 1 ? '1 Chamado' : `${activeOrderOpenCalls.length} Chamados`}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsCallDetailsExpandedInForm(!isCallDetailsExpandedInForm)}
+                      className="text-amber-900 hover:text-amber-950 bg-amber-100 hover:bg-amber-200 text-[10px] font-extrabold px-2.5 py-1 rounded-lg transition-all shrink-0 cursor-pointer flex items-center gap-1 border border-amber-300/80"
+                    >
+                      <span>{isCallDetailsExpandedInForm ? 'Ocultar Detalhes' : 'Ver Detalhes do Chamado'}</span>
+                      <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", isCallDetailsExpandedInForm && "rotate-180")} />
+                    </button>
+                  </div>
+
+                  {/* Conteúdo Expansível com Descrição Completa do Chamado */}
+                  {isCallDetailsExpandedInForm && (
+                    <div className="space-y-2 pt-2 border-t border-amber-200/80">
+                      {activeOrderOpenCalls.map((call, idx) => (
+                        <div key={call?.id || idx} className="bg-white text-slate-800 rounded-lg p-2.5 shadow-3xs space-y-1.5 border border-amber-200/90">
+                          <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-100 pb-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-250 px-2 py-0.5 rounded">
+                                Chamado #{call?.id ? String(call.id).slice(-6).toUpperCase() : '000'}
+                              </span>
+                              <span className="text-[10px] font-bold text-slate-500 uppercase">
+                                Aberto em: {formatDateSafe(call?.createdAt)}
+                              </span>
+                            </div>
+                            <span className={cn(
+                              "text-[9px] font-black uppercase px-2 py-0.5 rounded border",
+                              call?.priority === 'high' ? "bg-rose-50 text-rose-700 border-rose-200" :
+                              call?.priority === 'medium' ? "bg-amber-50 text-amber-800 border-amber-200" :
+                              "bg-blue-50 text-blue-700 border-blue-200"
+                            )}>
+                              Prioridade: {call?.priority === 'high' ? 'Alta' : call?.priority === 'medium' ? 'Média' : 'Baixa'}
+                            </span>
+                          </div>
+
+                          <div>
+                            <span className="text-[9.5px] font-black text-slate-400 uppercase tracking-wider block mb-0.5">
+                              Descrição do Problema Relatado:
+                            </span>
+                            <div className="bg-slate-50 border border-slate-200 p-2 rounded-md text-xs font-semibold text-slate-800 leading-relaxed whitespace-pre-wrap">
+                              {call?.description || 'Sem descrição detalhada.'}
+                            </div>
+                          </div>
+
+                          {call?.resolutionNotes && (
+                            <div>
+                              <span className="text-[9.5px] font-black text-slate-400 uppercase tracking-wider block mb-0.5">
+                                Notas do Atendimento:
+                              </span>
+                              <p className="text-xs text-slate-700 bg-amber-50/50 p-1.5 rounded border border-amber-100">{call.resolutionNotes}</p>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {/* Banner de Carregamento e Salvamento de Próxima O.S */}
               {isSavingNext && (
                 <div className="bg-purple-50 border border-purple-200 text-purple-900 rounded-xl px-3 py-2 flex items-center gap-2.5 shadow-2xs animate-pulse text-xs">
@@ -5724,41 +5960,85 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   {/* Datas e Outros - Escritório */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
                     <div>
-                      <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block mb-0.5">Data/Hora Abertura</label>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">Data/Hora Abertura</label>
+                        {isExternalOrTechOpenedSO && (
+                          <span className="text-[8px] font-bold text-amber-700 bg-amber-100 px-1 py-0.2 rounded border border-amber-200 uppercase">Auto/Externo</span>
+                        )}
+                      </div>
                       <input
                         type="datetime-local"
                         value={formOpenedAt}
                         onChange={(e) => setFormOpenedAt(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2.5 text-xs font-semibold text-slate-700 outline-none"
+                        disabled={isExternalOrTechOpenedSO}
+                        className={cn(
+                          "w-full border rounded-lg py-1.5 px-2.5 text-xs font-semibold outline-none transition-all",
+                          isExternalOrTechOpenedSO
+                            ? "bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed"
+                            : "bg-white border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        )}
                         required
                       />
                     </div>
                     <div>
-                      <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block mb-0.5">Resp. Abertura</label>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">Resp. Abertura</label>
+                        {isExternalOrTechOpenedSO && (
+                          <span className="text-[8px] font-bold text-amber-700 bg-amber-100 px-1 py-0.2 rounded border border-amber-200 uppercase">Auto/Externo</span>
+                        )}
+                      </div>
                       <input
                         type="text"
                         value={formOpenedBy}
                         onChange={(e) => setFormOpenedBy(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2.5 text-xs font-semibold text-slate-700 outline-none uppercase"
+                        disabled={isExternalOrTechOpenedSO}
+                        className={cn(
+                          "w-full border rounded-lg py-1.5 px-2.5 text-xs font-semibold outline-none uppercase transition-all",
+                          isExternalOrTechOpenedSO
+                            ? "bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed"
+                            : "bg-white border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        )}
                       />
                     </div>
                     <div>
-                      <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block mb-0.5">Data/Hora Finalização</label>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">Data/Hora Finalização</label>
+                        {isExternalOrTechOpenedSO && (
+                          <span className="text-[8px] font-bold text-amber-700 bg-amber-100 px-1 py-0.2 rounded border border-amber-200 uppercase">Auto/Externo</span>
+                        )}
+                      </div>
                       <input
                         type="datetime-local"
                         value={formFinishedAt}
                         onChange={(e) => setFormFinishedAt(e.target.value)}
-                        className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2.5 text-xs font-semibold text-slate-700 outline-none"
+                        disabled={isExternalOrTechOpenedSO}
+                        className={cn(
+                          "w-full border rounded-lg py-1.5 px-2.5 text-xs font-semibold outline-none transition-all",
+                          isExternalOrTechOpenedSO
+                            ? "bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed"
+                            : "bg-white border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        )}
                       />
                     </div>
                     <div>
-                      <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block mb-0.5">O.S. Externa (Nº Chamado)</label>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">O.S. Externa (Nº Chamado)</label>
+                        {isExternalOrTechOpenedSO && (
+                          <span className="text-[8px] font-bold text-amber-700 bg-amber-100 px-1 py-0.2 rounded border border-amber-200 uppercase">Auto/Externo</span>
+                        )}
+                      </div>
                       <input
                         type="text"
                         value={formExternalOs}
                         onChange={(e) => setFormExternalOs(e.target.value)}
                         placeholder="Ex: 0002200316"
-                        className="w-full bg-white border border-slate-200 rounded-lg py-1.5 px-2.5 text-xs font-semibold text-slate-700 outline-none uppercase"
+                        disabled={isExternalOrTechOpenedSO}
+                        className={cn(
+                          "w-full border rounded-lg py-1.5 px-2.5 text-xs font-semibold outline-none uppercase transition-all",
+                          isExternalOrTechOpenedSO
+                            ? "bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed"
+                            : "bg-white border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        )}
                       />
                     </div>
                   </div>
@@ -7046,6 +7326,18 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 )}
               </div>
               <div className="flex items-center gap-3">
+                {selectedOrder && (
+                  <button
+                    type="button"
+                    id={`btn-download-excel-modal-${selectedOrder.id}`}
+                    onClick={() => downloadOsExcel(selectedOrder)}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-xl transition-all cursor-pointer shadow-2xs active:scale-95"
+                    title="Baixar Ordem de Serviço em planilha Excel (.xlsx)"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                    <span>Baixar Excel</span>
+                  </button>
+                )}
                 {(() => {
                   if (userRole === UserRole.TECHNICIAN) {
                     if (isLockedForTech) {
@@ -7800,6 +8092,135 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DIALOG: ALERTA DE PRÉ-CARREGAMENTO DE CHAMADO EM ABERTO PARA O ENDEREÇO */}
+      {isOpenCallsWarningModalOpen && pendingOpenCallsData && (
+        <div className="fixed inset-0 z-[9999] bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-200 no-print">
+          <div className="bg-white border-2 border-amber-500/80 rounded-3xl max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-200">
+            
+            {/* Header do Modal Dialog */}
+            <div className="bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 p-4 sm:p-5 text-white flex items-center justify-between gap-3 shadow-md">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-white/20 backdrop-blur-md rounded-2xl text-white shrink-0 shadow-xs">
+                  <AlertTriangle className="w-6 h-6 animate-bounce" />
+                </div>
+                <div>
+                  <h3 className="text-sm sm:text-base font-black uppercase tracking-wider text-white">
+                    Atenção: Chamado Técnico em Aberto!
+                  </h3>
+                  <p className="text-xs text-amber-100 font-medium">
+                    Aviso prévio antes da edição da Ordem de Serviço
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsOpenCallsWarningModalOpen(false);
+                  setPendingOpenCallsData(null);
+                }}
+                className="p-1.5 text-white/80 hover:text-white hover:bg-white/20 rounded-xl transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Conteúdo do Modal Dialog */}
+            <div className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1">
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-amber-950 space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-black text-xs uppercase text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-md">
+                    Endereço Correspondente
+                  </span>
+                  <span className="text-xs font-black text-amber-900">
+                    {pendingOpenCallsData.order.clientName}
+                  </span>
+                </div>
+                <p className="text-xs font-extrabold text-amber-900 leading-snug">
+                  {pendingOpenCallsData.order.clientAddress || pendingOpenCallsData.order.addressStreet || 'Endereço cadastrado'}
+                </p>
+                <p className="text-[11px] text-amber-800 font-medium leading-relaxed">
+                  Foi localizado <strong>{pendingOpenCallsData.openCalls.length} chamado(s) técnico(s) em aberto</strong> para este endereço. Veja a descrição do problema relatado abaixo para dar a devida atenção durante o atendimento da O.S.
+                </p>
+              </div>
+
+              {/* Lista dos Chamados Encontrados */}
+              <div className="space-y-3">
+                <h4 className="text-xs font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                  <Inbox className="w-4 h-4 text-amber-600" />
+                  <span>Chamado(s) em Aberto Encontrado(s):</span>
+                </h4>
+
+                {pendingOpenCallsData.openCalls.map((call) => (
+                  <div key={call.id} className="bg-slate-50 border-2 border-amber-300 rounded-2xl p-4 space-y-3 shadow-3xs">
+                    <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-200 pb-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-black text-amber-900 bg-amber-100 border border-amber-300 px-2.5 py-1 rounded-lg">
+                          Chamado #{call.id ? call.id.slice(-6).toUpperCase() : '000'}
+                        </span>
+                        <span className="text-[11px] font-bold text-slate-500">
+                          Aberto em: {formatDateSafe(call.createdAt)}
+                        </span>
+                      </div>
+                      <span className={cn(
+                        "text-[10px] font-black uppercase px-2.5 py-1 rounded-full shadow-2xs",
+                        call.priority === 'high' ? "bg-rose-100 text-rose-800 border border-rose-300" :
+                        call.priority === 'medium' ? "bg-amber-100 text-amber-800 border border-amber-300" :
+                        "bg-blue-100 text-blue-800 border border-blue-300"
+                      )}>
+                        Prioridade: {call.priority === 'high' ? 'Alta' : call.priority === 'medium' ? 'Média' : 'Baixa'}
+                      </span>
+                    </div>
+
+                    {/* Descrição / Problema Relatado */}
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
+                        Descrição do Problema Relatado:
+                      </label>
+                      <div className="bg-white border-2 border-amber-200 rounded-xl p-3 text-xs font-semibold text-slate-800 leading-relaxed whitespace-pre-wrap shadow-inner">
+                        {call.description || 'Sem descrição cadastrada no chamado.'}
+                      </div>
+                    </div>
+
+                    {call.resolutionNotes && (
+                      <div>
+                        <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
+                          Notas do Atendimento:
+                        </label>
+                        <p className="text-xs text-slate-700 bg-slate-100 p-2.5 rounded-xl border border-slate-200">
+                          {call.resolutionNotes}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Footer do Modal com Botões */}
+            <div className="p-4 sm:p-5 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsOpenCallsWarningModalOpen(false);
+                  setPendingOpenCallsData(null);
+                }}
+                className="w-full sm:w-auto px-4 py-2.5 bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs uppercase tracking-wider border border-slate-300 rounded-xl transition-all cursor-pointer shadow-3xs"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleProceedToEditWithWarning}
+                className="w-full sm:w-auto px-6 py-2.5 bg-gradient-to-r from-amber-600 via-orange-600 to-amber-600 hover:from-amber-700 hover:to-orange-700 text-white font-black text-xs uppercase tracking-wider rounded-xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Entendi / Abrir Edição da O.S.</span>
+              </button>
             </div>
           </div>
         </div>

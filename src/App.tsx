@@ -75,7 +75,7 @@ const menuItems = [
   { id: 'reports', label: 'Relatórios', icon: BarChart3, roles: [UserRole.ADMIN, UserRole.SUPPORT, UserRole.ASSISTANT] },
   { id: 'finance', label: 'Financeiro', icon: DollarSign, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT] },
   { id: 'contracts', label: 'Contratos', icon: Briefcase, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT] },
-  { id: 'registration', label: 'Cadastros', icon: MapPin, roles: [UserRole.ADMIN] },
+  { id: 'registration', label: 'Cadastros', icon: MapPin, roles: [UserRole.ADMIN, UserRole.ASSISTANT] },
   { id: 'settings', label: 'Configurações', icon: Settings, roles: [UserRole.ADMIN, UserRole.SUPPORT] },
   { id: 'profile', label: 'Meu Perfil', icon: User, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.MANAGER, UserRole.SUPPORT, UserRole.TECHNICIAN] },
 ];
@@ -1148,7 +1148,12 @@ export default function App() {
               className="h-full print:h-auto print:overflow-visible"
             >
               {activeView === 'schedule' && hasAccess('schedule') && <ScheduleView managerClientId={profile?.clientId} userRole={profile?.role} />}
-              {activeView === 'registration' && hasAccess('registration') && <RegistrationView />}
+              {activeView === 'registration' && hasAccess('registration') && (
+                <RegistrationView 
+                  userRole={profile?.role} 
+                  userProfile={profile || undefined} 
+                />
+              )}
               {activeView === 'reports' && hasAccess('reports') && <ReportsView managerClientId={profile?.clientId} />}
               {activeView === 'finance' && hasAccess('finance') && <FinancialView managerClientId={profile?.clientId} />}
               {activeView === 'contracts' && hasAccess('contracts') && <ContractsView managerClientId={profile?.clientId} userRole={profile?.role} />}
