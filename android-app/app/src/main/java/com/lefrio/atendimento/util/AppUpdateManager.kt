@@ -96,8 +96,11 @@ class AppUpdateManager(private val context: Context) {
     }
 
     fun getDownloadedApkFile(): File {
-        // Usa o diretório de cache interno com subpasta dedicada a updates (acesso 100% garantido pelo FileProvider e PackageInstaller)
-        val dir = File(context.cacheDir, "updates")
+        // Usa preferencialmente getExternalFilesDir para que instaladores de fabricantes (Xiaomi, Samsung, Motorola)
+        // tenham acesso de leitura garantido pelo FileProvider e pelo kernel
+        val baseDir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)
+            ?: context.cacheDir
+        val dir = File(baseDir, "updates")
         if (!dir.exists()) {
             dir.mkdirs()
         }
@@ -427,48 +430,7 @@ class AppUpdateManager(private val context: Context) {
                 }
             }
 
-            // 1. TENTA PRIMEIRO A SESSION DO PackageInstaller NATIVO (Método moderno e atômico no Android 10+)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                try {
-                    val packageInstaller = context.packageManager.packageInstaller
-                    val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
-                        setAppPackageName(context.packageName)
-                    }
-                    val sessionId = packageInstaller.createSession(params)
-                    val session = packageInstaller.openSession(sessionId)
-
-                    apkFile.inputStream().use { input ->
-                        session.openWrite("lefrio_update_package", 0, apkFile.length()).use { output ->
-                            input.copyTo(output)
-                            session.fsync(output)
-                        }
-                    }
-
-                    val callbackIntent = Intent(context, com.lefrio.atendimento.ui.MainActivity::class.java).apply {
-                        action = "com.lefrio.atendimento.INSTALL_COMPLETED"
-                    }
-                    val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
-                    } else {
-                        PendingIntent.FLAG_UPDATE_CURRENT
-                    }
-                    val pendingIntent = PendingIntent.getActivity(
-                        context,
-                        sessionId,
-                        callbackIntent,
-                        pendingFlags
-                    )
-
-                    session.commit(pendingIntent.intentSender)
-                    session.close()
-                    Log.i(TAG, "Sessão PackageInstaller enviada ao sistema com sucesso!")
-                    return true
-                } catch (e: Exception) {
-                    Log.w(TAG, "PackageInstaller Session falhou, utilizando fallback FileProvider: ${e.message}")
-                }
-            }
-
-            // 2. FALLBACK SEGURO VIA FileProvider (Sem FLAG_ACTIVITY_CLEAR_TOP para não encerrar o processo que provê o arquivo)
+            // Dispara diretamente o instalador oficial do Android através do FileProvider seguro
             apkFile.setReadable(true, false)
 
             val apkUri = FileProvider.getUriForFile(
@@ -484,10 +446,12 @@ class AppUpdateManager(private val context: Context) {
                 putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
             }
 
-            // Concede permissões explícitas a instaladores do sistema
+            // Concede permissões explícitas a todos os possíveis instaladores do sistema (Google, AOSP, MIUI, etc.)
             val knownInstallers = listOf(
                 "com.google.android.packageinstaller",
-                "com.android.packageinstaller"
+                "com.android.packageinstaller",
+                "com.miui.packageinstaller",
+                "com.samsung.android.packageinstaller"
             )
             for (pkg in knownInstallers) {
                 try {
@@ -511,6 +475,7 @@ class AppUpdateManager(private val context: Context) {
             }
 
             context.startActivity(installIntent)
+            Log.i(TAG, "Instalador de pacotes do Android aberto com sucesso!")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Falha ao abrir instalador do APK: ${e.message}", e)

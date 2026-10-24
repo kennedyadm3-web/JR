@@ -1509,10 +1509,32 @@ async function startServer() {
       const allClients = clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
       const relevantClients = allClients.filter((c: any) => clientIds.has(String(c.id).trim()));
 
-      const allEquipments = await fetchAllEquipmentsServer();
-      const relevantEquipments = allEquipments
-        .filter((eq: any) => eq?.addressId && addressIds.has(String(eq.addressId).trim()))
-        .filter((eq: any) => eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+      let relevantEquipments: any[] = [];
+      try {
+        if (addressIds.size > 0 && addressIds.size <= 25) {
+          // Otimização de performance: busca apenas os equipamentos dos endereços agendados (100ms)
+          const addrIdList = Array.from(addressIds);
+          const eqPromises = addrIdList.map(aid => 
+            clientGetDocs(clientQuery(clientCollection(dbClient, "equipments"), clientWhere("addressId", "==", aid)))
+          );
+          const snaps = await Promise.all(eqPromises);
+          for (const s of snaps) {
+            for (const d of s.docs) {
+              const data = d.data() as any;
+              if (data.status !== 'deactivated' && data.active !== false && !data.isDeactivated) {
+                relevantEquipments.push({ id: d.id, ...data });
+              }
+            }
+          }
+        } else {
+          const allEquipments = await fetchAllEquipmentsServer();
+          relevantEquipments = allEquipments
+            .filter((eq: any) => eq?.addressId && addressIds.has(String(eq.addressId).trim()))
+            .filter((eq: any) => eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+        }
+      } catch (e: any) {
+        console.warn("[Itinerary] Aviso ao carregar equipamentos:", e.message);
+      }
 
       res.json({
         success: true,
@@ -1524,7 +1546,7 @@ async function startServer() {
         clients: relevantClients,
         techs: allTechs,
         equipments: relevantEquipments,
-        totalEquipmentsCount: allEquipments.length,
+        totalEquipmentsCount: relevantEquipments.length,
         erinaldoRecordsAllDates: allRecords.filter((r: any) => 
           (r.technician1 && r.technician1.toUpperCase().includes("ERINALDO")) ||
           (r.technician2 && r.technician2.toUpperCase().includes("ERINALDO")) ||
