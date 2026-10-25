@@ -1490,8 +1490,8 @@ async function startServer() {
       const addressIds = new Set<string>();
       filteredRecords.forEach((r: any) => { if (r.addressId) addressIds.add(String(r.addressId).trim()); });
       filteredOS.forEach((os: any) => { if (os.addressId) addressIds.add(String(os.addressId).trim()); });
-      // Inclui também os endereços do mês alvo para pré-carregamento da pauta
-      allRecords.forEach((r: any) => {
+      // Apenas inclui outros endereços atribuídos a este técnico no mês caso necessário
+      techRecordsAllDates.forEach((r: any) => {
         if (r && r.month === targetMonth && r.addressId) {
           addressIds.add(String(r.addressId).trim());
         }
@@ -1504,15 +1504,55 @@ async function startServer() {
       const clientIds = new Set<string>();
       relevantAddresses.forEach((a: any) => { if (a.clientId) clientIds.add(String(a.clientId).trim()); });
       filteredOS.forEach((os: any) => { if (os.clientId) clientIds.add(String(os.clientId).trim()); });
+      filteredRecords.forEach((r: any) => { if (r.clientId) clientIds.add(String(r.clientId).trim()); });
 
       const clientsSnap = await clientGetDocs(clientCollection(dbClient, "clients"));
       const allClients = clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
       const relevantClients = allClients.filter((c: any) => clientIds.has(String(c.id).trim()));
 
+      // Enriquecimento proativo dos registros com nomes reais de clientes e endereços completos
+      const enrichedRecords = filteredRecords.map((r: any) => {
+        const addr = relevantAddresses.find((a: any) => a.id === r.addressId);
+        const resolvedClientId = addr?.clientId || r.clientId || (r.address?.clientId) || "";
+        const client = relevantClients.find((c: any) => c.id === resolvedClientId);
+
+        const rawStreet = addr?.street || r.addressStreet || r.address?.street || "Endereço Operacional";
+        const num = addr?.number ? `, ${addr.number}` : "";
+        const neigh = addr?.neighborhood ? ` - ${addr.neighborhood}` : "";
+        const fullStreet = (rawStreet.includes(num) || num.length === 0) ? rawStreet : `${rawStreet}${num}${neigh}`.trim();
+        const resolvedClientName = client?.name || client?.fullName || r.clientName || r.client?.name || r.client?.fullName || "Cliente LeFrio PMOC";
+        const resolvedCity = addr?.city || r.addressCity || r.address?.city || "Maceió";
+
+        return {
+          ...r,
+          clientId: resolvedClientId,
+          clientName: resolvedClientName,
+          addressStreet: fullStreet,
+          addressCity: resolvedCity
+        };
+      });
+
+      const enrichedOS = filteredOS.map((os: any) => {
+        const addr = relevantAddresses.find((a: any) => a.id === os.addressId);
+        const resolvedClientId = addr?.clientId || os.clientId || "";
+        const client = relevantClients.find((c: any) => c.id === resolvedClientId);
+        const rawStreet = addr?.street || os.addressStreet || "Endereço de Atendimento";
+        const num = addr?.number ? `, ${addr.number}` : "";
+        const neigh = addr?.neighborhood ? ` - ${addr.neighborhood}` : "";
+        const fullStreet = (rawStreet.includes(num) || num.length === 0) ? rawStreet : `${rawStreet}${num}${neigh}`.trim();
+
+        return {
+          ...os,
+          clientId: resolvedClientId,
+          clientName: client?.name || os.clientName || "Cliente Solicitante O.S.",
+          addressStreet: fullStreet
+        };
+      });
+
       let relevantEquipments: any[] = [];
       try {
         if (addressIds.size > 0 && addressIds.size <= 25) {
-          // Otimização de performance: busca apenas os equipamentos dos endereços agendados (100ms)
+          // Otimização ultra-rápida: busca apenas equipamentos dos endereços escalados para o técnico
           const addrIdList = Array.from(addressIds);
           const eqPromises = addrIdList.map(aid => 
             clientGetDocs(clientQuery(clientCollection(dbClient, "equipments"), clientWhere("addressId", "==", aid)))
@@ -1540,8 +1580,8 @@ async function startServer() {
         success: true,
         targetDate,
         targetTech: rawTargetTech,
-        records: filteredRecords,
-        serviceOrders: filteredOS,
+        records: enrichedRecords,
+        serviceOrders: enrichedOS,
         addresses: relevantAddresses,
         clients: relevantClients,
         techs: allTechs,

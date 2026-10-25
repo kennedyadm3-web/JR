@@ -582,6 +582,92 @@ fun OrderDetailScreen(
                                     }
                                 )
                             }
+
+                            if (order.status == "finalizada" || !order.completionDate.isNullOrBlank() || !order.clientSignatureDate.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC)),
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFE2E8F0))
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text(
+                                            text = "REGISTRO DE AUDITORIA OPERACIONAL",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Color(0xFF64748B),
+                                            letterSpacing = 0.5.sp
+                                        )
+
+                                        // Hora da Finalização
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color.White)
+                                                .border(1.dp, Color(0xFFE0E7FF), RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(Color(0xFF6366F1))
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = "HORA DA FINALIZAÇÃO",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFF64748B)
+                                                )
+                                                Text(
+                                                    text = com.lefrio.atendimento.util.DateTimeUtils.formatDetailedTimestamp(order.completionDate).ifBlank { "Registrada nesta finalização" },
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Black,
+                                                    color = Color(0xFF312E81)
+                                                )
+                                            }
+                                        }
+
+                                        // Hora da Assinatura do Cliente
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(Color.White)
+                                                .border(1.dp, Color(0xFFD1FAE5), RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(Color(0xFF10B981))
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = "HORA DA ASSINATURA DO CLIENTE",
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFF64748B)
+                                                )
+                                                Text(
+                                                    text = com.lefrio.atendimento.util.DateTimeUtils.formatDetailedTimestamp(order.clientSignatureDate).ifBlank { "Registrada na colheita digital" },
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Black,
+                                                    color = Color(0xFF065F46)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

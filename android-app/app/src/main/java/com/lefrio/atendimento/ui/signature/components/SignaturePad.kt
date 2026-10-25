@@ -243,3 +243,18 @@ fun saveSignatureToLocalFile(
 
     return file
 }
+
+/**
+ * Converte um arquivo de assinatura em string Base64 no formato data URI (data:image/png;base64,...)
+ * para compatibilidade total e visualização imediata no painel administrativo e PWA.
+ */
+fun convertFileToBase64(file: File): String? {
+    return try {
+        if (!file.exists() || file.length() == 0L) return null
+        val bytes = file.readBytes()
+        val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        "data:image/png;base64,$base64"
+    } catch (e: Exception) {
+        null
+    }
+}

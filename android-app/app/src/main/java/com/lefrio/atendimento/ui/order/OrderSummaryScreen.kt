@@ -248,6 +248,43 @@ fun OrderSummaryScreen(
                             }
                         }
                     }
+
+                    val compTimeStr = com.lefrio.atendimento.util.DateTimeUtils.formatDetailedTimestamp(order.completionDate)
+                    val sigTimeStr = com.lefrio.atendimento.util.DateTimeUtils.formatDetailedTimestamp(order.clientSignatureDate)
+                    if (compTimeStr.isNotBlank() || sigTimeStr.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (compTimeStr.isNotBlank()) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFFEEF2FF))
+                                        .border(1.dp, Color(0xFFC7D2FE), RoundedCornerShape(8.dp))
+                                        .padding(8.dp)
+                                ) {
+                                    Text("HORA FINALIZAÇÃO", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4338CA))
+                                    Text(compTimeStr, fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color(0xFF312E81))
+                                }
+                            }
+                            if (sigTimeStr.isNotBlank()) {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFFECFDF5))
+                                        .border(1.dp, Color(0xFFA7F3D0), RoundedCornerShape(8.dp))
+                                        .padding(8.dp)
+                                ) {
+                                    Text("HORA ASSINATURA", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFF047857))
+                                    Text(sigTimeStr, fontSize = 11.sp, fontWeight = FontWeight.Black, color = Color(0xFF065F46))
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

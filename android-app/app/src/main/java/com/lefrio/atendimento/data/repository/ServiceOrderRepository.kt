@@ -365,8 +365,8 @@ class ServiceOrderRepository(private val context: Context) {
                 try {
                     val url = java.net.URL(endpoint)
                     val conn = url.openConnection() as java.net.HttpURLConnection
-                    conn.connectTimeout = 2000
-                    conn.readTimeout = 3000
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 15000
                     conn.requestMethod = "GET"
                     conn.setRequestProperty("Accept", "application/json")
 
@@ -421,16 +421,35 @@ class ServiceOrderRepository(private val context: Context) {
                                 val recId = rec.optString("id", UUID.randomUUID().toString())
                                 val addrId = rec.optString("addressId", "")
                                 val addrObj = addrsMap[addrId]
-                                val clientId = addrObj?.optString("clientId", "") ?: rec.optString("clientId", "")
-                                val clientObj = clientsMap[clientId]
+                                val embeddedAddr = rec.optJSONObject("address")
+                                val embeddedClient = rec.optJSONObject("client")
 
-                                val clientName = clientObj?.optString("name")
-                                    ?: rec.optString("clientName", "Cliente LeFrio PMOC")
-                                val street = addrObj?.optString("street") ?: "Endereço Operacional"
-                                val num = addrObj?.optString("number")?.let { ", $it" } ?: ""
-                                val neigh = addrObj?.optString("neighborhood")?.let { " - $it" } ?: ""
-                                val city = addrObj?.optString("city", "Maceió") ?: "Maceió"
-                                val fullStreet = "$street$num$neigh"
+                                val clientId = addrObj?.optString("clientId", "")
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?: embeddedAddr?.optString("clientId", "")?.takeIf { it.isNotBlank() }
+                                    ?: embeddedClient?.optString("id", "")?.takeIf { it.isNotBlank() }
+                                    ?: rec.optString("clientId", "")
+
+                                val clientObj = if (clientId.isNotBlank()) clientsMap[clientId] else null
+
+                                val clientName = rec.optString("clientName")
+                                    .takeIf { it.isNotBlank() && it != "Cliente LeFrio" && it != "Cliente PMOC" }
+                                    ?: clientObj?.optString("name")
+                                    ?: clientObj?.optString("fullName")
+                                    ?: embeddedClient?.optString("name")
+                                    ?: embeddedClient?.optString("fullName")
+                                    ?: "Cliente LeFrio PMOC"
+
+                                val rawStreet = rec.optString("addressStreet")
+                                    .takeIf { it.isNotBlank() && it != "Endereço Operacional" }
+                                    ?: addrObj?.optString("street")
+                                    ?: embeddedAddr?.optString("street")
+                                    ?: "Endereço Operacional"
+
+                                val num = if (rawStreet.contains(",")) "" else (addrObj?.optString("number") ?: embeddedAddr?.optString("number", "") ?: "").let { if (it.isNotBlank()) ", $it" else "" }
+                                val neigh = if (rawStreet.contains("-")) "" else (addrObj?.optString("neighborhood") ?: embeddedAddr?.optString("neighborhood", "") ?: "").let { if (it.isNotBlank()) " - $it" else "" }
+                                val city = addrObj?.optString("city") ?: embeddedAddr?.optString("city") ?: rec.optString("addressCity", "Maceió").ifBlank { "Maceió" }
+                                val fullStreet = if (num.isNotBlank() || neigh.isNotBlank()) "$rawStreet$num$neigh".trim() else rawStreet.trim()
 
                                 val orderId = "PREV_${recId}"
                                 val statusRaw = rec.optString("status", "aberta")
@@ -752,7 +771,13 @@ class ServiceOrderRepository(private val context: Context) {
         accuracy: Float,
         signatureBase64: String? = null,
         checklistItems: List<EquipmentChecklistEntity>? = null
-    ) {
+        val existingOrder = orderDao.getOrderById(orderId)
+        val isPreventive = existingOrder?.type?.contains("PREVENTIVA", ignoreCase = true) == true || orderId.startsWith("PREV_")
+        val originalRecordId = existingOrder?.originalId ?: orderId.removePrefix("PREV_")
+        val addressId = existingOrder?.addressId ?: ""
+        val plannedDate = existingOrder?.plannedDate ?: ""
+        val month = if (plannedDate.length >= 7) plannedDate.substring(0, 7) else SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date())
+
         orderDao.finalizeOrderWithSignature(
             orderId = orderId,
             signeeName = signeeName,
@@ -765,14 +790,39 @@ class ServiceOrderRepository(private val context: Context) {
             accuracy = accuracy
         )
 
+        val checklistArr = JSONArray()
+        checklistItems?.forEach { item ->
+            val obj = JSONObject().apply {
+                put("equipmentId", item.equipmentId)
+                put("checked", item.isChecked)
+                put("skipped", item.isSkipped)
+                put("justification", item.justification ?: "")
+                put("notes", item.notes ?: "")
+                put("checkedAt", item.checkedAt ?: completionDate)
+            }
+            checklistArr.put(obj)
+        }
+
+        val executedQty = checklistItems?.count { it.isChecked && !it.isSkipped } ?: 0
+
         val payload = JSONObject().apply {
             put("clientRepresentative", signeeName)
+            put("clientSigneeName", signeeName)
             put("clientSigneeDoc", signeeDoc)
+            put("clientSigneeRegistration", signeeDoc)
             put("clientSignatureDate", signatureDate)
             put("completionDate", completionDate)
+            put("finishedAt", completionDate)
+            put("techFinalizedAt", completionDate)
             put("completionLatitude", latitude)
             put("completionLongitude", longitude)
             put("completionAccuracy", accuracy.toDouble())
+            put("isPreventive", isPreventive)
+            put("originalRecordId", originalRecordId)
+            put("addressId", addressId)
+            put("month", month)
+            put("executedQuantity", executedQty)
+            put("checklist", checklistArr)
             if (!signatureBase64.isNullOrBlank()) {
                 put("clientSignature", signatureBase64)
             }
@@ -952,6 +1002,9 @@ class ServiceOrderRepository(private val context: Context) {
             put("clientSignaturePath", params.signaturePath ?: "")
             put("clientSignatureDate", if (isFinal) nowIso else "")
             put("completionDate", completionDate ?: "")
+            put("finishedAt", if (isFinal) nowIso else "")
+            put("techFinalizedAt", if (isFinal) nowIso else "")
+            put("techFinalized", isFinal)
             put("clientSignature", params.signatureBase64 ?: "")
             put("generalNotes", fullNotes)
             put("openedAt", nowIso)

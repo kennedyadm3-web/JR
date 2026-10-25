@@ -149,20 +149,26 @@ class OrderDetailViewModel(
                     currentState.order?.clientSignaturePath ?: ""
                 }
 
-                val nowStr = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+                val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.format(Date())
+
+                val sigBase64 = if (signatureFilePath.isNotBlank()) {
+                    com.lefrio.atendimento.ui.signature.components.convertFileToBase64(java.io.File(signatureFilePath))
+                } else null
 
                 // 3. Grava finalização no banco local Room e enfileira para sincronização
                 repository.finalizeServiceOrder(
                     orderId = orderId,
                     signeeName = name,
                     signeeDoc = doc,
-                    signatureDate = nowStr,
+                    signatureDate = nowIso,
                     signatureFilePath = signatureFilePath,
-                    completionDate = nowStr,
+                    completionDate = nowIso,
                     latitude = latitude,
                     longitude = longitude,
                     accuracy = accuracy,
-                    signatureBase64 = null,
+                    signatureBase64 = sigBase64,
                     checklistItems = currentState.checklistItems
                 )
 

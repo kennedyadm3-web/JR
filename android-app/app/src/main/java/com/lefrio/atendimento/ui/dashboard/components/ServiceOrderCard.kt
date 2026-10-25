@@ -301,20 +301,48 @@ fun ServiceOrderCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (order.status == "finalizada") Icons.Default.CheckCircle else Icons.Default.Schedule,
-                        contentDescription = null,
-                        tint = if (order.status == "finalizada") Color(0xFF059669) else Color(0xFF64748B),
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = if (order.status == "finalizada") "Concluído com Assinatura" else "Programado para Hoje",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (order.status == "finalizada") Color(0xFF059669) else Color(0xFF64748B)
-                    )
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (order.status == "finalizada") Icons.Default.CheckCircle else Icons.Default.Schedule,
+                            contentDescription = null,
+                            tint = if (order.status == "finalizada") Color(0xFF059669) else Color(0xFF64748B),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = if (order.status == "finalizada") "Concluído com Assinatura" else "Programado para Hoje",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (order.status == "finalizada") Color(0xFF059669) else Color(0xFF64748B)
+                        )
+                    }
+                    val compTime = com.lefrio.atendimento.util.DateTimeUtils.formatDisplayTime(order.completionDate)
+                    val sigTime = com.lefrio.atendimento.util.DateTimeUtils.formatDisplayTime(order.clientSignatureDate)
+                    if (compTime.isNotBlank() || sigTime.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (compTime.isNotBlank()) {
+                                Text(
+                                    text = "🕒 Fin: $compTime",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4338CA)
+                                )
+                            }
+                            if (sigTime.isNotBlank()) {
+                                Text(
+                                    text = "✍️ Ass: $sigTime",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF047857)
+                                )
+                            }
+                        }
+                    }
                 }
 
                 Button(

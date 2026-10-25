@@ -89,22 +89,27 @@ class SignatureViewModel(
                     orderId = orderId
                 )
 
-                val nowStr = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+                val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.format(Date())
+
+                val sigBase64 = com.lefrio.atendimento.ui.signature.components.convertFileToBase64(signatureFile)
 
                 // 3. Grava no Room e enfileira para sincronização
                 repository.finalizeServiceOrder(
                     orderId = orderId,
                     signeeName = signeeName.trim(),
                     signeeDoc = signeeDoc.trim(),
-                    signatureDate = nowStr,
+                    signatureDate = nowIso,
                     signatureFilePath = signatureFile.absolutePath,
-                    completionDate = nowStr,
+                    completionDate = nowIso,
                     latitude = latitude,
                     longitude = longitude,
-                    accuracy = accuracy
+                    accuracy = accuracy,
+                    signatureBase64 = sigBase64
                 )
 
-                _uiState.value = SignatureUiState.Success(orderId, nowStr)
+                _uiState.value = SignatureUiState.Success(orderId, nowIso)
             } catch (e: Exception) {
                 _uiState.value = SignatureUiState.Error(e.message ?: "Erro ao finalizar atendimento.")
             }

@@ -145,7 +145,14 @@ class PdfReportGenerator(private val context: Context) {
         paint.typeface = Typeface.DEFAULT
         canvas.drawText("Recebedor: ${order.clientRepresentative ?: "Responsável"}", 30f, y, paint)
         canvas.drawText("Documento: ${order.clientSigneeDoc ?: "Não informado"}", 250f, y, paint)
-        canvas.drawText("Data: ${order.clientSignatureDate ?: order.completionDate ?: "Hoje"}", 430f, y, paint)
+        val sigFormatted = DateTimeUtils.formatDisplayDateTime(order.clientSignatureDate)
+        val compFormatted = DateTimeUtils.formatDisplayDateTime(order.completionDate)
+        val dateText = when {
+            sigFormatted.isNotBlank() -> "Assinado: $sigFormatted"
+            compFormatted.isNotBlank() -> "Finalizado: $compFormatted"
+            else -> "Hoje"
+        }
+        canvas.drawText(dateText, 350f, y, paint)
 
         // Desenha a imagem da assinatura se o arquivo existir
         order.clientSignaturePath?.let { sigPath: String ->
