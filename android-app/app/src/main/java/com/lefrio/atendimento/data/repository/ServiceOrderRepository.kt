@@ -771,6 +771,7 @@ class ServiceOrderRepository(private val context: Context) {
         accuracy: Float,
         signatureBase64: String? = null,
         checklistItems: List<EquipmentChecklistEntity>? = null
+    ) {
         val existingOrder = orderDao.getOrderById(orderId)
         val isPreventive = existingOrder?.type?.contains("PREVENTIVA", ignoreCase = true) == true || orderId.startsWith("PREV_")
         val originalRecordId = existingOrder?.originalId ?: orderId.removePrefix("PREV_")
