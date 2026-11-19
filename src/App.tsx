@@ -63,6 +63,7 @@ import SettingsView from './components/SettingsView';
 import TechProductionView from './components/TechProductionView';
 import TechMobileExpenseView from './components/TechMobileExpenseView';
 import PendingApprovalScreen from './components/PendingApprovalScreen';
+import PublicOSSignatureView from './components/PublicOSSignatureView';
 
 const menuItems = [
   { id: 'demand', label: 'Demanda Técnica', icon: Users, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.TECHNICIAN] },
@@ -81,6 +82,14 @@ const menuItems = [
 ];
 
 export default function App() {
+  // Verifica se a URL possui token de assinatura pública (ex: ?signToken=xyz)
+  const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
+  const publicSignToken = urlParams.get('signToken') || urlParams.get('token') || urlParams.get('sign_token') || urlParams.get('sign_os');
+
+  if (publicSignToken) {
+    return <PublicOSSignatureView token={publicSignToken} />;
+  }
+
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -155,6 +164,96 @@ export default function App() {
     });
 
     return () => unsubscribe();
+  }, [profile]);
+
+  // Telemetria Passiva e Não-Intrusiva de Qualidade da Rede para Técnicos (Heartbeat PWA)
+  useEffect(() => {
+    let techNameOrId = '';
+    if (profile?.role === UserRole.TECHNICIAN) {
+      techNameOrId = profile.name || profile.uid;
+    }
+    
+    if (!techNameOrId && typeof window !== 'undefined') {
+      const storedTeam = localStorage.getItem('lefrio_authenticated_team') || localStorage.getItem('lefrio_active_tech');
+      if (storedTeam) {
+        techNameOrId = storedTeam;
+      }
+    }
+
+    if (!techNameOrId) return;
+
+    const currentTech = techNameOrId.trim().toUpperCase();
+
+    const runHeartbeat = async () => {
+      try {
+        const isOnline = navigator.onLine;
+        const navConn = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
+        
+        let effectiveType = navConn?.effectiveType || (isOnline ? '4g' : 'offline');
+        let rttMs = navConn?.rtt;
+        let downlinkMbps = navConn?.downlink;
+
+        // Teste leve e instantâneo de latência do servidor (ping real)
+        let pingMs: number | undefined = undefined;
+        if (isOnline) {
+          const startTime = performance.now();
+          try {
+            await fetch('/api/equipments/cache-clear', { method: 'POST', cache: 'no-store' });
+            pingMs = Math.round(performance.now() - startTime);
+          } catch {
+            pingMs = undefined;
+          }
+        }
+
+        let pendingOfflineCount = 0;
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            const queueStr = localStorage.getItem('lefrio_offline_queue') || '[]';
+            const parsedQueue = JSON.parse(queueStr);
+            if (Array.isArray(parsedQueue)) pendingOfflineCount = parsedQueue.length;
+          } catch {}
+        }
+
+        await dataService.sendTechnicianConnectionHeartbeat({
+          technicianId: currentTech,
+          technicianName: profile?.name || currentTech,
+          isOnline,
+          effectiveType,
+          rttMs,
+          downlinkMbps,
+          pingMs,
+          lastSeenAt: new Date().toISOString(),
+          pendingOfflineCount,
+          deviceInfo: `${navigator.platform || ''} • ${navigator.userAgent ? (navigator.userAgent.includes('Mobile') ? 'Mobile App/PWA' : 'Web Browser') : 'PWA'}`
+        });
+      } catch (err) {
+        console.warn('Erro ao executar heartbeat passivo:', err);
+      }
+    };
+
+    runHeartbeat();
+    const interval = setInterval(runHeartbeat, 40000);
+
+    const handleOnlineStatusChange = () => runHeartbeat();
+    window.addEventListener('online', handleOnlineStatusChange);
+    window.addEventListener('offline', handleOnlineStatusChange);
+
+    const unsubscribePingListener = dataService.subscribeTechnicianConnectionStatuses((statuses) => {
+      const myStatus = statuses.find(s => s.technicianId === currentTech);
+      if (myStatus && myStatus.pingRequestedAt) {
+        const reqTime = new Date(myStatus.pingRequestedAt).getTime();
+        if (Date.now() - reqTime < 15000) {
+          runHeartbeat();
+        }
+      }
+    });
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('online', handleOnlineStatusChange);
+      window.removeEventListener('offline', handleOnlineStatusChange);
+      unsubscribePingListener();
+    };
   }, [profile]);
 
   const handleMarkAsRead = async (id: string) => {

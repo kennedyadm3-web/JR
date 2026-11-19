@@ -26,6 +26,73 @@ interface Props {
 
 const STORAGE_KEY = 'lefrio_diretoria_report_config';
 
+function parseFlexibleDate(val: any): Date | null {
+  if (!val) return null;
+  if (val instanceof Date) return isNaN(val.getTime()) ? null : val;
+  if (typeof val === 'number') {
+    const d = new Date(val);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof val === 'object') {
+    if ('seconds' in val && typeof val.seconds === 'number') {
+      return new Date(val.seconds * 1000);
+    }
+    if ('_seconds' in val && typeof val._seconds === 'number') {
+      return new Date(val._seconds * 1000);
+    }
+  }
+  if (typeof val === 'string') {
+    const s = val.trim();
+    if (!s) return null;
+    
+    // YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+      try {
+        const d = parseISO(s);
+        if (!isNaN(d.getTime())) return d;
+      } catch {}
+    }
+    
+    // DD/MM/YYYY
+    if (/^\d{2}\/\d{2}\/\d{4}/.test(s)) {
+      const parts = s.split('/');
+      const day = parseInt(parts[0], 10);
+      const monthIndex = parseInt(parts[1], 10) - 1;
+      const year = parseInt(parts[2].slice(0, 4), 10);
+      const d = new Date(year, monthIndex, day, 12, 0, 0);
+      if (!isNaN(d.getTime())) return d;
+    }
+
+    try {
+      const d = new Date(s);
+      if (!isNaN(d.getTime())) return d;
+    } catch {}
+  }
+  return null;
+}
+
+function getRecordExecutionDate(rec: MaintenanceRecord): Date | null {
+  const candidates = [
+    rec.executionDate,
+    rec.completionDate,
+    (rec as any).clientSignatureDate,
+    (rec as any).approvedAt,
+    rec.plannedDate,
+    (rec as any).updatedAt,
+    (rec as any).createdAt
+  ];
+
+  for (const cand of candidates) {
+    const d = parseFlexibleDate(cand);
+    if (d) return d;
+  }
+
+  if (rec.month && /^\d{4}-\d{2}$/.test(rec.month)) {
+    return parseFlexibleDate(`${rec.month}-01`);
+  }
+  return null;
+}
+
 export function ExecutiveBoardReport({ managerClientId }: Props) {
   // Load saved configuration from localStorage if available
   const savedConfig = useMemo(() => {
@@ -110,13 +177,33 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
 
   useEffect(() => {
     loadData();
-  }, [month, managerClientId]);
+  }, [month, startDate, endDate, managerClientId]);
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [r, a, c, osList, tList] = await Promise.all([
-        dataService.getRecords(month),
+      const monthsToFetch = new Set<string>();
+      if (month) monthsToFetch.add(month);
+
+      if (startDate) {
+        monthsToFetch.add(startDate.slice(0, 7));
+      }
+      if (endDate) {
+        monthsToFetch.add(endDate.slice(0, 7));
+      }
+      if (startDate && endDate) {
+        try {
+          let curr = startOfMonth(parseISO(startDate));
+          const endM = endOfMonth(parseISO(endDate));
+          while (curr <= endM) {
+            monthsToFetch.add(format(curr, 'yyyy-MM'));
+            curr = new Date(curr.getFullYear(), curr.getMonth() + 1, 1);
+          }
+        } catch {}
+      }
+
+      const [recordsArrays, a, c, osList, tList] = await Promise.all([
+        Promise.all(Array.from(monthsToFetch).map(m => dataService.getRecords(m).catch(() => []))),
         dataService.getAddresses(),
         dataService.getClients(),
         dataService.getServiceOrders(managerClientId),
@@ -126,7 +213,14 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       const filteredAddresses = a.filter(addr => !managerClientId || addr.clientId === managerClientId);
       const addressIds = new Set(filteredAddresses.map(addr => addr.id));
 
-      setRecords(r.filter(rec => addressIds.has(rec.addressId)));
+      const recordsMap = new Map<string, MaintenanceRecord>();
+      recordsArrays.flat().forEach(rec => {
+        if (rec && rec.id && addressIds.has(rec.addressId)) {
+          recordsMap.set(rec.id, rec);
+        }
+      });
+
+      setRecords(Array.from(recordsMap.values()));
       setAddresses(filteredAddresses);
       setClients(c.filter(client => !managerClientId || client.id === managerClientId));
       setServiceOrders(osList || []);
@@ -229,34 +323,24 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
 
     // 1. Process Preventive Maintenance Records (PMOC) -> Machines
     records.forEach(rec => {
-      if (rec.status === MaintenanceStatus.COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0)) {
+      const isCompleted = rec.status === MaintenanceStatus.COMPLETED || rec.status === MaintenanceStatus.PRE_COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0);
+      if (isCompleted) {
         const executedQty = rec.executedQuantity || 0;
-        
-        let recDate: Date | null = null;
-        if (rec.executionDate) {
-          try { recDate = parseISO(rec.executionDate); } catch (e) {}
-        } else if (rec.completionDate) {
-          try { recDate = parseISO(rec.completionDate); } catch (e) {}
-        } else if (rec.plannedDate) {
-          try { recDate = parseISO(rec.plannedDate); } catch (e) {}
-        }
+        const recDate = getRecordExecutionDate(rec);
 
         const inPeriod = Boolean(recDate && start && end && isWithinInterval(recDate, { start, end }));
+        const inMonth = rec.month === month || Boolean(recDate && startMonth && endMonth && isWithinInterval(recDate, { start: startMonth, end: endMonth }));
 
         if (rec.technician1) {
           const t1 = getOrCreateTech(rec.technician1);
-          t1.monthMachines += executedQty;
-          if (inPeriod) {
-            t1.periodMachines += executedQty;
-          }
+          if (inMonth) t1.monthMachines += executedQty;
+          if (inPeriod) t1.periodMachines += executedQty;
         }
 
         if (rec.technician2) {
           const t2 = getOrCreateTech(rec.technician2);
-          t2.monthMachines += executedQty;
-          if (inPeriod) {
-            t2.periodMachines += executedQty;
-          }
+          if (inMonth) t2.monthMachines += executedQty;
+          if (inPeriod) t2.periodMachines += executedQty;
         }
       }
     });
@@ -407,21 +491,15 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       } catch (e) {}
     }
 
+    const monthRecords = records.filter(r => r.month === month);
     const totalContractMachines = addresses.reduce((sum, a) => sum + (a.totalMachines || 0), 0);
-    const totalDoneMachines = records.reduce((sum, r) => sum + (r.executedQuantity || 0), 0);
+    const totalDoneMachines = monthRecords.reduce((sum, r) => sum + (r.executedQuantity || 0), 0);
 
     let periodDoneMachines = 0;
     records.forEach(rec => {
-      if (rec.status === MaintenanceStatus.COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0)) {
-        let recDate: Date | null = null;
-        if (rec.executionDate) {
-          try { recDate = parseISO(rec.executionDate); } catch (e) {}
-        } else if (rec.completionDate) {
-          try { recDate = parseISO(rec.completionDate); } catch (e) {}
-        } else if (rec.plannedDate) {
-          try { recDate = parseISO(rec.plannedDate); } catch (e) {}
-        }
-
+      const isCompleted = rec.status === MaintenanceStatus.COMPLETED || rec.status === MaintenanceStatus.PRE_COMPLETED || (rec.executedQuantity && rec.executedQuantity > 0);
+      if (isCompleted) {
+        const recDate = getRecordExecutionDate(rec);
         if (recDate && start && end && isWithinInterval(recDate, { start, end })) {
           periodDoneMachines += rec.executedQuantity || 0;
         }
@@ -429,7 +507,7 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
     });
 
     const globalPercent = totalContractMachines > 0 ? Math.round((totalDoneMachines / totalContractMachines) * 100) : 0;
-    const completedAddresses = new Set(records.filter(r => (r.executedQuantity || 0) > 0).map(r => r.addressId)).size;
+    const completedAddresses = new Set(monthRecords.filter(r => (r.executedQuantity || 0) > 0).map(r => r.addressId)).size;
     const totalAddresses = addresses.length;
 
     return {
@@ -440,7 +518,7 @@ export function ExecutiveBoardReport({ managerClientId }: Props) {
       completedAddresses,
       totalAddresses
     };
-  }, [records, addresses, startDate, endDate]);
+  }, [records, addresses, startDate, endDate, month]);
 
   const totalHiddenCount = hiddenClients.size + hiddenTechs.size;
 

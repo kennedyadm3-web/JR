@@ -3,9 +3,10 @@ import { Address, MaintenanceRecord, Client } from '../types';
 import { dataService } from '../services/dataService';
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-import { CheckCircle, Calendar as CalendarIcon, Eye, X, Printer } from 'lucide-react';
+import { CheckCircle, Calendar as CalendarIcon, Eye, X, Printer, FileSpreadsheet } from 'lucide-react';
 import { cn, formatDate } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+import ExcelJS from 'exceljs';
 
 interface Props {
   managerClientId?: string;
@@ -361,6 +362,109 @@ function ClientDetailsModal({
     .slice()
     .sort((addrA, addrB) => (addrA.street || '').localeCompare(addrB.street || ''));
   
+  const handleExportToExcel = async () => {
+    try {
+      const safeDate = (dateVal?: any): string => {
+        if (!dateVal) return 'Não definida';
+        try {
+          const str = String(dateVal).trim();
+          if (!str) return 'Não definida';
+          const match = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+          if (match) {
+            return `${match[3]}/${match[2]}/${match[1]}`;
+          }
+          const parsed = new Date(str);
+          if (!isNaN(parsed.getTime())) {
+            return format(parsed, 'dd/MM/yyyy');
+          }
+        } catch (e) {
+          console.error("Erro ao formatar data:", dateVal, e);
+        }
+        return String(dateVal);
+      };
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Status dos Endereços');
+
+      worksheet.views = [{ showGridLines: true }];
+
+      worksheet.columns = [
+        { header: 'Item', key: 'item', width: 8 },
+        { header: 'Nome do Local', key: 'name', width: 35 },
+        { header: 'Endereço Completo', key: 'address', width: 50 },
+        { header: 'Rota / Bairro', key: 'route', width: 20 },
+        { header: 'Máquinas', key: 'machines', width: 12 },
+        { header: 'Data Prevista', key: 'plannedDate', width: 16 },
+        { header: 'Status Mês', key: 'status', width: 16 },
+        { header: 'Data Conclusão', key: 'doneDate', width: 16 },
+        { header: 'Técnicos Previstos / Executores', key: 'techs', width: 30 },
+      ];
+
+      clientAddresses.forEach((addr, idx) => {
+        const record = records.find(r => r.addressId === addr.id);
+        const isDone = record && (record.executedQuantity || 0) > 0;
+        const plannedDateRaw = record?.plannedDate;
+        const formattedPlannedDate = plannedDateRaw ? safeDate(plannedDateRaw) : 'Não definida';
+        
+        let doneDateFormatted = '-';
+        if (isDone && record) {
+          const rawDone = (record as any).executionDate || (record as any).maintenanceDate || record.month + "-01";
+          doneDateFormatted = safeDate(rawDone);
+        }
+
+        let techsFormatted = '-';
+        if (record) {
+          if ((record as any).technicians && Array.isArray((record as any).technicians) && (record as any).technicians.length > 0) {
+            techsFormatted = (record as any).technicians.join(', ');
+          } else if (record.technician1) {
+            techsFormatted = [record.technician1, record.technician2].filter(Boolean).join(', ');
+          }
+        }
+
+        const row = worksheet.addRow({
+          item: idx + 1,
+          name: addr.name || '-',
+          address: `${addr.street || ''}${addr.number ? `, ${addr.number}` : ''}${addr.neighborhood ? ` - ${addr.neighborhood}` : ''}${addr.city ? `, ${addr.city}` : ''}`,
+          route: addr.route || addr.neighborhood || '-',
+          machines: addr.totalMachines || 0,
+          plannedDate: formattedPlannedDate,
+          status: isDone ? 'Concluído' : 'Pendente',
+          doneDate: doneDateFormatted,
+          techs: techsFormatted
+        });
+
+        row.alignment = { vertical: 'middle', horizontal: 'left' };
+      });
+
+      const headerRow = worksheet.getRow(1);
+      headerRow.font = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFF' } };
+      headerRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: '059669' }
+      };
+      headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+      headerRow.height = 24;
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const clientNameSanitized = (clientInfo?.name || 'Cliente').replace(/[^a-z0-9]/gi, '_');
+      const fileName = `Status_Enderecos_${clientNameSanitized}_${month}.xlsx`;
+
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error("Erro ao exportar relatório para Excel:", error);
+      alert("Ocorreu um erro ao gerar a planilha do Excel. Por favor, tente novamente.");
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/40 backdrop-blur-sm">
       <motion.div
@@ -376,12 +480,23 @@ function ClientDetailsModal({
             </h3>
             <p className="text-sm font-medium text-gray-500 mt-0.5">Endereços e Programação ({format(new Date(month + '-01T12:00:00'), 'MMMM/yyyy')})</p>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-gray-400 hover:text-gray-900 hover:bg-gray-200 rounded-lg transition-colors outline-none"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportToExcel}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer active:scale-95"
+              title="Exportar para Excel"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Exportar Excel</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 text-gray-400 hover:text-gray-900 hover:bg-gray-200 rounded-lg transition-colors outline-none"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
         
         <div className="p-0 overflow-y-auto bg-gray-50/30 flex-1">

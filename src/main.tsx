@@ -32,8 +32,18 @@ createRoot(document.getElementById('root')!).render(
 // Registrar o Service Worker para suporte offline completo (PWA) nos celulares/tablets
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
+    if ('caches' in window) {
+      caches.keys().then((names) => {
+        names.forEach((name) => {
+          if (name !== 'lefrio-cache-v3') {
+            caches.delete(name);
+          }
+        });
+      }).catch(() => {});
+    }
     navigator.serviceWorker.register('/sw.js')
       .then((reg) => {
+        reg.update().catch(() => {});
         console.log('Service Worker registrado para suporte offline:', reg.scope);
       })
       .catch((err) => {

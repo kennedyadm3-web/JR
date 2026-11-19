@@ -1,10 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Address, MaintenanceRecord, Client } from '../types';
+import { Address, MaintenanceRecord, Client, RouteConfiguration } from '../types';
 import { dataService } from '../services/dataService';
 import { format, differenceInDays, parseISO, isValid } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { AlertTriangle, Clock, Calendar, Search, Printer, CheckCircle, TrendingUp, Award, Users, Target, Percent, Eye, X, MapPin, AlertCircle, Building2 } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { cn, getCanonicalRouteName, normalizeRouteKey } from '../lib/utils';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { ExecutiveBoardReport } from './ExecutiveBoardReport';
 
@@ -28,9 +28,10 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [allRecords, setAllRecords] = useState<MaintenanceRecord[]>([]);
+  const [routeConfigs, setRouteConfigs] = useState<RouteConfiguration[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  
+
   const [viewMode, setViewMode] = useState<'pending' | 'completed' | 'client_routes' | 'diretoria'>(() => {
     return (localStorage.getItem('schedule_report_view_mode') as any) || 'pending';
   });
@@ -84,10 +85,11 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
     setLoading(true);
     const safetyTimeout = setTimeout(() => setLoading(false), 8000);
     try {
-      const [a, c, r] = await Promise.all([
+      const [a, c, r, rc] = await Promise.all([
         dataService.getAddresses().catch(() => []),
         dataService.getClients().catch(() => []),
-        dataService.getAllRecords().catch(() => [])
+        dataService.getAllRecords().catch(() => []),
+        dataService.getRouteConfigs().catch(() => [])
       ]);
       
       // Filter for manager if needed
@@ -96,6 +98,7 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
       setAddresses(filteredAddresses);
       setClients(c);
       setAllRecords(r);
+      setRouteConfigs(rc);
     } catch (e) {
       console.error('Erro ao carregar dados do relatório de cronograma:', e);
     } finally {
@@ -394,7 +397,7 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
         .map(r => r.addressId)
     );
 
-    // Agrupar os endereços do cliente por rota
+    // Agrupar os endereços do cliente por rota usando chave normalizada e nome canônico
     const routesMap: Record<string, {
       routeName: string;
       totalAddresses: number;
@@ -404,10 +407,12 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
     }> = {};
 
     clientAddresses.forEach(addr => {
-      const routeName = addr.route || 'Sem Rota';
-      if (!routesMap[routeName]) {
-        routesMap[routeName] = {
-          routeName,
+      const canonicalName = addr.route ? getCanonicalRouteName(addr.route, routeConfigs) : 'Sem Rota';
+      const normKey = normalizeRouteKey(addr.route || 'Sem Rota');
+
+      if (!routesMap[normKey]) {
+        routesMap[normKey] = {
+          routeName: canonicalName,
           totalAddresses: 0,
           completedAddresses: 0,
           priorityAddressesTotal: 0,
@@ -415,7 +420,7 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
         };
       }
 
-      const group = routesMap[routeName];
+      const group = routesMap[normKey];
       group.totalAddresses++;
 
       const isCompletedNow = completedAddressIds.has(addr.id);
@@ -438,7 +443,7 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
       if (b.routeName === 'Sem Rota') return -1;
       return a.routeName.localeCompare(b.routeName, 'pt-BR');
     });
-  }, [selectedClientId, addresses, allRecords, selectedMonth]);
+  }, [selectedClientId, addresses, allRecords, selectedMonth, routeConfigs]);
 
   const handleOpenPriorityModal = async (routeName: string) => {
     setPriorityModal({
@@ -469,10 +474,12 @@ export function ScheduleReport({ managerClientId }: { managerClientId?: string }
         dataService.getRecords(prevMonth)
       ]);
 
+      const normTargetKey = normalizeRouteKey(routeName);
+
       // Endereços do cliente selecionado nesta rota específica
       const clientAddressesInRoute = addresses.filter(
         a => (!selectedClientId || a.clientId === selectedClientId) && 
-             (a.route === routeName || (!a.route && routeName === 'Sem Rota'))
+             normalizeRouteKey(a.route || 'Sem Rota') === normTargetKey
       );
 
       const routeAddressIds = new Set(clientAddressesInRoute.map(a => a.id));

@@ -87,7 +87,8 @@ const COLLECTIONS = {
   ROUTE_PLANNINGS: 'routePlannings',
   SERVICE_ORDERS: 'serviceOrders',
   SERVICE_CATALOG: 'serviceCatalog',
-  ROUTE_EXPENSES: 'routeExpenses'
+  ROUTE_EXPENSES: 'routeExpenses',
+  TECHNICIAN_CONNECTIONS: 'technicianConnections'
 };
 
 const clean = (obj: any): any => {
@@ -320,23 +321,94 @@ export const deduplicateRecordsList = (records: MaintenanceRecord[]): { deduplic
   return { deduplicated: Array.from(map.values()), duplicateIds };
 };
 
-// Cache em memória para reduzir leituras no Firestore e otimizar velocidade
+// Cache avançado multinível (Memória + SessionStorage) para cortar consumo de leituras do Firestore
 interface CacheEntry {
   data: any;
   timestamp: number;
 }
 
 const memoryCache: Record<string, CacheEntry> = {};
-const CACHE_TTL = 10000; // 10 segundos de TTL (ideal para operações em lote, carregamentos paralelos de abas e navegação rápida)
 
-const getCachedData = async (key: string, fetchFn: () => Promise<any>): Promise<any> => {
+// TTLs customizados por tipo de coleção para manter a operação em custo mínimo (em milissegundos)
+const TTL_CONFIG: Record<string, number> = {
+  // Cadastros e configurações estáticas: 25 minutos
+  clients: 25 * 60 * 1000,
+  technicians: 25 * 60 * 1000,
+  route_configs: 25 * 60 * 1000,
+  serviceCatalog: 25 * 60 * 1000,
+  service_order_settings: 25 * 60 * 1000,
+  addresses: 15 * 60 * 1000,
+  travelCards: 15 * 60 * 1000,
+  
+  // Equipamentos por endereço: 15 minutos
+  equipments_address: 15 * 60 * 1000,
+  equipments_all: 20 * 60 * 1000,
+  
+  // Histórico de manutenções homologadas: 10 minutos
+  records_approved: 10 * 60 * 1000,
+  records_pre_completed: 5 * 60 * 1000,
+  
+  // Registros agendados e por data: 2 minutos (alta fidelidade para técnicos em campo)
+  records_plannedDate: 2 * 60 * 1000,
+  records_month: 2 * 60 * 1000,
+  
+  // Padrão geral: 60 segundos (em vez de 10s anteriores)
+  default: 60 * 1000
+};
+
+const getCachedData = async (key: string, fetchFn: () => Promise<any>, customTtl?: number): Promise<any> => {
   const now = Date.now();
+  
+  let ttl = customTtl;
+  if (!ttl) {
+    ttl = TTL_CONFIG.default;
+    for (const [prefix, configTtl] of Object.entries(TTL_CONFIG)) {
+      if (key.startsWith(prefix)) {
+        ttl = configTtl;
+        break;
+      }
+    }
+  }
+
+  // 1. Checa memória RAM primeiro
   const cached = memoryCache[key];
-  if (cached && (now - cached.timestamp < CACHE_TTL)) {
+  if (cached && (now - cached.timestamp < ttl)) {
     return cached.data;
   }
+
+  // 2. Se for coleção de dados estáticos, checa sessionStorage (sobrevive a F5 e navegação entre abas sem consultar Firestore)
+  const isStatic = key.startsWith('clients') || 
+                   key.startsWith('technicians') || 
+                   key.startsWith('route_configs') || 
+                   key.startsWith('addresses') || 
+                   key.startsWith('serviceCatalog') || 
+                   key.startsWith('service_order_settings');
+
+  if (isStatic && typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      const stored = window.sessionStorage.getItem(`lefrio_cache_${key}`);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && parsed.timestamp && (now - parsed.timestamp < ttl)) {
+          memoryCache[key] = parsed;
+          return parsed.data;
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Busca fresca
   const freshData = await fetchFn();
-  memoryCache[key] = { data: freshData, timestamp: now };
+  const entry = { data: freshData, timestamp: now };
+  memoryCache[key] = entry;
+
+  // Persiste no sessionStorage para dados estáticos
+  if (isStatic && typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      window.sessionStorage.setItem(`lefrio_cache_${key}`, JSON.stringify(entry));
+    } catch {}
+  }
+
   return freshData;
 };
 
@@ -347,6 +419,18 @@ const clearCache = (prefix?: string) => {
         delete memoryCache[key];
       }
     });
+
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        for (let i = window.sessionStorage.length - 1; i >= 0; i--) {
+          const k = window.sessionStorage.key(i);
+          if (k && k.startsWith(`lefrio_cache_${prefix}`)) {
+            window.sessionStorage.removeItem(k);
+          }
+        }
+      } catch {}
+    }
+
     if (prefix.startsWith('equipments')) {
       fetch('/api/equipments/cache-clear', { method: 'POST' }).catch(() => {});
     }
@@ -354,9 +438,35 @@ const clearCache = (prefix?: string) => {
     Object.keys(memoryCache).forEach(key => {
       delete memoryCache[key];
     });
+
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        for (let i = window.sessionStorage.length - 1; i >= 0; i--) {
+          const k = window.sessionStorage.key(i);
+          if (k && k.startsWith('lefrio_cache_')) {
+            window.sessionStorage.removeItem(k);
+          }
+        }
+      } catch {}
+    }
+
     fetch('/api/equipments/cache-clear', { method: 'POST' }).catch(() => {});
   }
 };
+
+export function isStaffName(name: string | undefined | null): boolean {
+  if (!name) return true;
+  const cleanName = String(name).trim().toUpperCase();
+  if (!cleanName) return true;
+
+  const staffTerms = [
+    'ADMIN', 'ADMINISTRADOR', 'ADMINISTRATIVO', 'ESCRITORIO', 'ESCRITÓRIO',
+    'SISTEMA', 'LEFRIO', 'ALCLIMA', 'KENNEDY', 'KENNEDY2026', 'SUPPORT', 'SUPORTE',
+    'GABRIELA', 'ATENDIMENTO', 'GESTOR'
+  ];
+
+  return staffTerms.some(term => cleanName === term || cleanName.startsWith(term));
+}
 
 // Função auxiliar para garantir a regra absoluta de negócios da Le Frio:
 // Somente o sistema administrativo tem autonomia para finalizar uma O.S.
@@ -376,13 +486,13 @@ function normalizeServiceOrderStatus(order: ServiceOrder): ServiceOrder {
   }
 
   // Garantia de integridade do técnico titular (technicianId):
-  // Se a O.S. não tem technicianId, infere automaticamente a partir de openedBy ou equipe autenticada
+  // NUNCA atribui technicianId para administradores, escritórios ou usuários não-técnicos
   if (!normalized.technicianId) {
-    if (normalized.openedBy && normalized.openedBy !== 'ADMIN' && normalized.openedBy !== 'Administrativo') {
+    if (normalized.openedBy && !isStaffName(normalized.openedBy)) {
       normalized.technicianId = normalized.openedBy;
     } else if (normalized.authenticatedTeam) {
       const match = normalized.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
-      if (match && match[1]) {
+      if (match && match[1] && !isStaffName(match[1])) {
         normalized.technicianId = match[1].trim();
       }
     }
@@ -470,9 +580,10 @@ export const dataService = {
     try {
       const { id, ...data } = config;
       await setDoc(doc(db, COLLECTIONS.ROUTE_CONFIGS, id), clean({
+        createdAt: (data as any).createdAt || serverTimestamp(),
         ...data,
         updatedAt: serverTimestamp()
-      }));
+      }), { merge: true });
       await historyService.log(id, 'RouteConfiguration', 'Upsert', data);
       clearCache('route_configs');
     } catch (e) {
@@ -588,6 +699,7 @@ export const dataService = {
       const docId = `${planning.month}_${safeRouteName}`;
       const docRef = doc(db, COLLECTIONS.ROUTE_PLANNINGS, docId);
       await setDoc(docRef, clean({
+        createdAt: (planning as any).createdAt || serverTimestamp(),
         ...planning,
         updatedAt: serverTimestamp()
       }), { merge: true });
@@ -595,6 +707,19 @@ export const dataService = {
       clearCache('route_plannings_');
     } catch (e) {
       handleFirestoreError(e, OperationType.WRITE, COLLECTIONS.ROUTE_PLANNINGS);
+    }
+  },
+
+  async deleteRoutePlanning(month: string, routeName: string) {
+    try {
+      const safeRouteName = routeName ? routeName.replace(/\//g, '_slash_') : 'default';
+      const docId = `${month}_${safeRouteName}`;
+      const docRef = doc(db, COLLECTIONS.ROUTE_PLANNINGS, docId);
+      await deleteDoc(docRef);
+      await historyService.log(docId, 'RouteMonthlyPlanning', 'Delete', { month, routeName });
+      clearCache('route_plannings_');
+    } catch (e) {
+      handleFirestoreError(e, OperationType.DELETE, `${COLLECTIONS.ROUTE_PLANNINGS}/${month}_${routeName}`);
     }
   },
 
@@ -1242,25 +1367,14 @@ export const dataService = {
   async getRecordsByPlannedDate(plannedDate: string): Promise<MaintenanceRecord[]> {
     const targetDate = plannedDate.split('T')[0];
     const targetYearMonth = targetDate.slice(0, 7);
-    const parts = targetYearMonth.split('-').map(Number);
-    const y = parts[0] || 2026;
-    const m = parts[1] || 10;
-    
-    const prevDate = new Date(y, m - 2, 1);
-    const nextDate = new Date(y, m, 1);
-    const prevMonthStr = format(prevDate, 'yyyy-MM');
-    const nextMonthStr = format(nextDate, 'yyyy-MM');
 
     const cacheKey = `records_plannedDate_${targetDate}`;
     return getCachedData(cacheKey, async () => {
       try {
-        const [snapExact, snapMonth, snapPrevMonth, snapNextMonth] = await Promise.all([
-          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', targetDate))),
-          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', targetYearMonth))),
-          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', prevMonthStr))),
-          getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', nextMonthStr)))
-        ]);
+        // OTIMIZAÇÃO CRÍTICA FIRESTORE: Busca direta por plannedDate (lê apenas 2 a 15 documentos em vez de 3.000+ de 3 meses!)
+        const snapExact = await getDocs(query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', targetDate)));
         const map = new Map<string, any>();
+        
         const processDoc = (docSnap: any) => {
           if (!map.has(docSnap.id)) {
             const data = docSnap.data() as any;
@@ -1276,10 +1390,14 @@ export const dataService = {
             }
           }
         };
+
         snapExact.docs.forEach(processDoc);
-        snapMonth.docs.forEach(processDoc);
-        snapPrevMonth.docs.forEach(processDoc);
-        snapNextMonth.docs.forEach(processDoc);
+
+        // Fallback seguro: se não encontrou pela query exata de plannedDate, busca apenas no mês vigente (e não em 3 meses inteiros!)
+        if (map.size === 0) {
+          const snapMonth = await getDocs(query(collection(db, COLLECTIONS.RECORDS), where('month', '==', targetYearMonth)));
+          snapMonth.docs.forEach(processDoc);
+        }
 
         const rawList = Array.from(map.values()) as MaintenanceRecord[];
         const { deduplicated, duplicateIds } = deduplicateRecordsList(rawList);
@@ -1297,22 +1415,14 @@ export const dataService = {
   subscribeRecordsByPlannedDate(plannedDate: string, callback: (records: MaintenanceRecord[]) => void): () => void {
     if (!plannedDate) return () => {};
     const targetDate = plannedDate.split('T')[0];
-    const targetYearMonth = targetDate.slice(0, 7);
-    const parts = targetYearMonth.split('-').map(Number);
-    const y = parts[0] || 2026;
-    const m = parts[1] || 10;
-    const prevMonthStr = format(new Date(y, m - 2, 1), 'yyyy-MM');
 
     try {
-      const qCur = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', targetYearMonth));
-      const qPrev = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', prevMonthStr));
+      // OTIMIZAÇÃO FIRESTORE: Escuta em tempo real apenas os documentos agendados para a data específica (5 a 20 docs) em vez de 2 meses inteiros (~1.000 docs)
+      const qDate = query(collection(db, COLLECTIONS.RECORDS), where('plannedDate', '==', targetDate));
 
-      let curDocs: any[] = [];
-      let prevDocs: any[] = [];
-
-      const emitCombined = () => {
-        const combined = [...curDocs, ...prevDocs];
-        const list = combined
+      const unsub = onSnapshot(qDate, (snapshot) => {
+        const list = snapshot.docs
+          .map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord))
           .filter(r => (r.plannedDate || '').split('T')[0] === targetDate)
           .map(r => {
             if (Array.isArray(r.checklist)) {
@@ -1325,25 +1435,12 @@ export const dataService = {
           });
         const { deduplicated } = deduplicateRecordsList(list);
         callback(deduplicated);
-      };
-
-      const unsubCur = onSnapshot(qCur, (snapshot) => {
-        curDocs = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord));
-        emitCombined();
       }, (err) => {
-        console.warn('[Realtime Listener] Erro em subscribeRecordsByPlannedDate cur:', err);
-      });
-
-      const unsubPrev = onSnapshot(qPrev, (snapshot) => {
-        prevDocs = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord));
-        emitCombined();
-      }, (err) => {
-        console.warn('[Realtime Listener] Erro em subscribeRecordsByPlannedDate prev:', err);
+        console.warn('[Realtime Listener] Erro em subscribeRecordsByPlannedDate:', err);
       });
 
       return () => {
-        unsubCur();
-        unsubPrev();
+        unsub();
       };
     } catch (e) {
       console.warn('[Realtime Listener Setup] Falha:', e);
@@ -1356,90 +1453,93 @@ export const dataService = {
   },
 
   async getPreCompletedRecords(): Promise<MaintenanceRecord[]> {
-    try {
-      const q = query(collection(db, COLLECTIONS.RECORDS), where('status', '==', MaintenanceStatus.PRE_COMPLETED));
-      const snapshot = await getDocs(q);
-      const rawList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MaintenanceRecord));
+    return getCachedData('records_pre_completed', async () => {
+      try {
+        // OTIMIZAÇÃO FIRESTORE: Busca apenas documentos com status PRE_COMPLETED sem re-baixar o mês inteiro
+        const q = query(collection(db, COLLECTIONS.RECORDS), where('status', '==', MaintenanceStatus.PRE_COMPLETED));
+        const snapshot = await getDocs(q);
+        const rawList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MaintenanceRecord));
 
-      // Também busca atendimentos do mês corrente que possam ter sido gravados como completed sem homologação
-      const currentMonth = format(new Date(), 'yyyy-MM');
-      const qMonth = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', currentMonth));
-      const snapMonth = await getDocs(qMonth);
-      const monthDocs = snapMonth.docs.map(doc => ({ id: doc.id, ...doc.data() } as MaintenanceRecord));
+        const { deduplicated } = deduplicateRecordsList(rawList);
 
-      const combined = [...rawList, ...monthDocs];
-      const { deduplicated } = deduplicateRecordsList(combined);
+        // Apenas registros que realmente aguardam aprovação:
+        // REGRA INVIOLÁVEL: OBRIGATÓRIO ter nome, matrícula e assinatura digital para constar em aprovação!
+        return deduplicated.filter(r => {
+          const rawDate = r.completionDate || r.clientSignatureDate || r.executionDate || r.plannedDate || '';
+          const d = typeof rawDate === 'string' ? rawDate.slice(0, 10) : '';
+          const isRecent = !d || d >= '2026-09-28';
+          if (!isRecent) return false;
 
-      // Apenas registros que realmente aguardam aprovação:
-      // Deixe pendente para aprovação SOMENTE os atendimentos de ontem (28/09/2026) e hoje (29/09/2026).
-      // REGRA INVIOLÁVEL: OBRIGATÓRIO ter nome, matrícula e assinatura digital para constar em aprovação!
-      return deduplicated.filter(r => {
-        const rawDate = r.completionDate || r.clientSignatureDate || r.executionDate || r.plannedDate || '';
-        const d = typeof rawDate === 'string' ? rawDate.slice(0, 10) : '';
-        const isRecent = !d || d >= '2026-09-28';
-        if (!isRecent) return false;
+          const isApproved = Boolean(r.adminApproved || r.approvedAt || r.approvedBy);
+          if (isApproved) return false;
 
-        const isApproved = Boolean(r.adminApproved || r.approvedAt || r.approvedBy);
-        if (isApproved) return false;
+          const hasSignature = Boolean(r.clientSignature && typeof r.clientSignature === 'string' && r.clientSignature.trim().length > 10);
+          const hasSignee = Boolean(r.clientSigneeName && typeof r.clientSigneeName === 'string' && r.clientSigneeName.trim().length >= 3);
+          const hasRegistration = Boolean(r.clientSigneeRegistration && typeof r.clientSigneeRegistration === 'string' && r.clientSigneeRegistration.trim().length >= 3);
+          const isFieldFinalized = hasSignature && hasSignee && hasRegistration;
 
-        const hasSignature = Boolean(r.clientSignature && typeof r.clientSignature === 'string' && r.clientSignature.trim().length > 10);
-        const hasSignee = Boolean(r.clientSigneeName && typeof r.clientSigneeName === 'string' && r.clientSigneeName.trim().length >= 3);
-        const hasRegistration = Boolean(r.clientSigneeRegistration && typeof r.clientSigneeRegistration === 'string' && r.clientSigneeRegistration.trim().length >= 3);
-        const isFieldFinalized = hasSignature && hasSignee && hasRegistration;
+          // Sem assinatura completa, NUNCA entra na fila de aprovação
+          if (!isFieldFinalized) return false;
 
-        // Sem assinatura completa, NUNCA entra na fila de aprovação
-        if (!isFieldFinalized) return false;
+          if (r.status !== MaintenanceStatus.PRE_COMPLETED) return false;
 
-        // Somente registros com status PRE_COMPLETED entram na fila de aprovação.
-        // Se o registro foi devolvido para rascunho (status === PENDING), ele NÃO deve estar na fila.
-        if (r.status !== MaintenanceStatus.PRE_COMPLETED) return false;
-
-        return true;
-      });
-    } catch (e) {
-      handleFirestoreError(e, OperationType.LIST, COLLECTIONS.RECORDS);
-      return [];
-    }
+          return true;
+        });
+      } catch (e) {
+        handleFirestoreError(e, OperationType.LIST, COLLECTIONS.RECORDS);
+        return [];
+      }
+    }, 2 * 60 * 1000);
   },
 
   async getRecentApprovedRecords(limitCount: number = 30): Promise<MaintenanceRecord[]> {
-    try {
-      const q = query(
-        collection(db, COLLECTIONS.RECORDS),
-        where('status', '==', MaintenanceStatus.COMPLETED)
-      );
-      const snapshot = await getDocs(q);
-      const rawList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MaintenanceRecord));
-      const { deduplicated } = deduplicateRecordsList(rawList);
-      
-      // Filtra os atendimentos homologados pelo administrativo.
-      // Atendimentos anteriores a ontem já foram aprovados pelo administrativo!
-      const records = deduplicated.filter(r => {
-        if (r.status !== MaintenanceStatus.COMPLETED) return false;
-        const rawDate = r.completionDate || r.clientSignatureDate || r.executionDate || r.plannedDate || '';
-        const d = typeof rawDate === 'string' ? rawDate.slice(0, 10) : '';
-        if (d && d < '2026-09-28') return true;
+    return getCachedData(`records_approved_recent_${limitCount}`, async () => {
+      try {
+        // OTIMIZAÇÃO FIRESTORE: Consulta apenas os 3 meses mais recentes em vez de baixar todo o histórico de anos de manutenções concluídas
+        const now = new Date();
+        const m0 = format(now, 'yyyy-MM');
+        const m1 = format(new Date(now.getFullYear(), now.getMonth() - 1, 1), 'yyyy-MM');
+        const m2 = format(new Date(now.getFullYear(), now.getMonth() - 2, 1), 'yyyy-MM');
+        const recentMonths = Array.from(new Set([m0, m1, m2]));
 
-        const isFieldFinalized = Boolean(r.clientSignature || r.clientSigneeName || (r.completionDate && typeof r.completionDate === 'string' && r.completionDate.includes('T')));
-        if (isFieldFinalized) {
-          return Boolean(r.adminApproved || r.approvedAt || r.approvedBy);
-        }
-        return true;
-      });
-      
-      // Ordenação precisa do mais recente para o mais antigo:
-      // Compara completionDate, clientSignatureDate, executionDate, updatedAt, plannedDate, month
-      records.sort((a, b) => {
-        const timeA = a.completionDate || a.clientSignatureDate || a.executionDate || (a as any).updatedAt || a.plannedDate || a.month || '';
-        const timeB = b.completionDate || b.clientSignatureDate || b.executionDate || (b as any).updatedAt || b.plannedDate || b.month || '';
-        return String(timeB).localeCompare(String(timeA));
-      });
+        const q = query(
+          collection(db, COLLECTIONS.RECORDS),
+          where('month', 'in', recentMonths)
+        );
+        const snapshot = await getDocs(q);
+        const rawList = snapshot.docs
+          .map(doc => ({ id: doc.id, ...doc.data() } as MaintenanceRecord))
+          .filter(r => r.status === MaintenanceStatus.COMPLETED);
+        const { deduplicated } = deduplicateRecordsList(rawList);
+        
+        // Filtra os atendimentos homologados pelo administrativo.
+        // Atendimentos anteriores a ontem já foram aprovados pelo administrativo!
+        const records = deduplicated.filter(r => {
+          if (r.status !== MaintenanceStatus.COMPLETED) return false;
+          const rawDate = r.completionDate || r.clientSignatureDate || r.executionDate || r.plannedDate || '';
+          const d = typeof rawDate === 'string' ? rawDate.slice(0, 10) : '';
+          if (d && d < '2026-09-28') return true;
 
-      return records.slice(0, limitCount);
-    } catch (e) {
-      handleFirestoreError(e, OperationType.LIST, COLLECTIONS.RECORDS);
-      return [];
-    }
+          const isFieldFinalized = Boolean(r.clientSignature || r.clientSigneeName || (r.completionDate && typeof r.completionDate === 'string' && r.completionDate.includes('T')));
+          if (isFieldFinalized) {
+            return Boolean(r.adminApproved || r.approvedAt || r.approvedBy);
+          }
+          return true;
+        });
+        
+        // Ordenação precisa do mais recente para o mais antigo:
+        records.sort((a, b) => {
+          const timeA = a.completionDate || a.clientSignatureDate || a.executionDate || (a as any).updatedAt || a.plannedDate || a.month || '';
+          const timeB = b.completionDate || b.clientSignatureDate || b.executionDate || (b as any).updatedAt || b.plannedDate || b.month || '';
+          return String(timeB).localeCompare(String(timeA));
+        });
+
+        return records.slice(0, limitCount);
+      } catch (e) {
+        handleFirestoreError(e, OperationType.LIST, COLLECTIONS.RECORDS);
+        return [];
+      }
+    }, 10 * 60 * 1000);
   },
 
   async getAllRecords(): Promise<MaintenanceRecord[]> {
@@ -1588,12 +1688,46 @@ export const dataService = {
 
       const { id: _, ...data } = record;
       const cleanedData: any = clean({ ...data, id: docId });
+
+      // Normaliza nomes de técnicos e enriquece campos de topo para sincronização rápida com o App Android
+      if (typeof cleanedData.technician1 === 'string' && cleanedData.technician1.trim()) {
+        cleanedData.technician1 = cleanedData.technician1.trim().toUpperCase();
+      }
+      if (typeof cleanedData.technician2 === 'string' && cleanedData.technician2.trim()) {
+        cleanedData.technician2 = cleanedData.technician2.trim().toUpperCase();
+      }
+      const cachedAddressesList: Address[] = (memoryCache['addresses_all_active']?.data || memoryCache['addresses_all_all']?.data || []) as Address[];
+      const cachedClientsList: Client[] = (memoryCache['clients_all']?.data || []) as Client[];
+      const cachedAddr = record.addressId ? (cachedAddressesList.find(a => a.id === record.addressId) || (record as any).address) : (record as any).address;
+      const resolvedClientId = cachedAddr?.clientId || (record as any).clientId || (record as any).client?.id || '';
+      const cachedClient = resolvedClientId ? (cachedClientsList.find(c => c.id === resolvedClientId) || (record as any).client) : (record as any).client;
+      if (resolvedClientId && !cleanedData.clientId) {
+        cleanedData.clientId = resolvedClientId;
+      }
+      const resolvedClientName = cachedClient?.name || cachedClient?.fullName || (record as any).clientName || '';
+      if (resolvedClientName && !cleanedData.clientName) {
+        cleanedData.clientName = resolvedClientName;
+      }
+      if (cachedAddr?.street && !cleanedData.addressStreet) {
+        const num = cachedAddr.number ? `, ${cachedAddr.number}` : '';
+        const neigh = cachedAddr.neighborhood ? ` - ${cachedAddr.neighborhood}` : '';
+        cleanedData.addressStreet = `${cachedAddr.street}${num}${neigh}`.trim();
+      }
+      if (cachedAddr?.city && !cleanedData.addressCity) {
+        cleanedData.addressCity = cachedAddr.city;
+      }
       
       // REGRA MANDATÓRIA: Endereços têm estritamente UMA ÚNICA data prevista.
       // Elimina qualquer resquício de múltiplas datas programadas (plannedDates) e returnDate.
       delete cleanedData.plannedDates;
       cleanedData.returnDate = null;
       cleanedData.plannedDates = deleteField();
+      if ((data as any).itineraryOrder === null) {
+        cleanedData.itineraryOrder = deleteField();
+      }
+      if ((data as any).assignedRoute === null || (data as any).assignedRoute === '') {
+        cleanedData.assignedRoute = deleteField();
+      }
 
       // REGRA ABSOLUTA DE NEGÓCIOS DA LE FRIO:
       // Somente o sistema administrativo tem autonomia para aprovar e finalizar formalmente um atendimento preventivo.
@@ -1779,6 +1913,83 @@ export const dataService = {
       clearCache('technicians');
     } catch (e) {
       handleFirestoreError(e, OperationType.DELETE, `${COLLECTIONS.TECHNICIANS}/${id}`);
+    }
+  },
+
+  // Telemetria de Conexão de Rede dos Técnicos
+  async sendTechnicianConnectionHeartbeat(statusData: Partial<import('../types').TechnicianConnectionStatus> & { technicianId: string; technicianPin?: string }): Promise<void> {
+    if (!statusData || !statusData.technicianId) return;
+    try {
+      const primaryId = String(statusData.technicianId).trim().toUpperCase();
+      const payload = clean({
+        ...statusData,
+        technicianId: primaryId,
+        technicianName: statusData.technicianName || primaryId,
+        lastSeenAt: statusData.lastSeenAt || new Date().toISOString(),
+        updatedAt: serverTimestamp()
+      });
+
+      const primaryRef = doc(db, COLLECTIONS.TECHNICIAN_CONNECTIONS, primaryId);
+      await setDoc(primaryRef, payload, { merge: true });
+
+      // Se houver um PIN informado, salva réplica no PIN para garantir cruzamento de dados de busca
+      if (statusData.technicianPin && statusData.technicianPin.trim().toUpperCase() !== primaryId) {
+        const pinRef = doc(db, COLLECTIONS.TECHNICIAN_CONNECTIONS, statusData.technicianPin.trim().toUpperCase());
+        await setDoc(pinRef, payload, { merge: true });
+      }
+    } catch (e) {
+      console.warn('Erro ao atualizar telemetria de conexão do técnico:', e);
+    }
+  },
+
+  async getTechnicianConnectionStatuses(): Promise<import('../types').TechnicianConnectionStatus[]> {
+    try {
+      const snapshot = await getDocs(collection(db, COLLECTIONS.TECHNICIAN_CONNECTIONS));
+      return snapshot.docs.map(doc => ({ technicianId: doc.id, ...doc.data() } as any));
+    } catch (e) {
+      console.warn('Erro ao buscar estados de conexão dos técnicos:', e);
+      return [];
+    }
+  },
+
+  subscribeTechnicianConnectionStatuses(callback: (statuses: import('../types').TechnicianConnectionStatus[]) => void): () => void {
+    try {
+      const q = collection(db, COLLECTIONS.TECHNICIAN_CONNECTIONS);
+      return onSnapshot(q, (snapshot) => {
+        const items = snapshot.docs.map(doc => ({ technicianId: doc.id, ...doc.data() } as any));
+        callback(items);
+      }, (error) => {
+        console.warn('Erro ao assinar telemetria de conexão dos técnicos:', error);
+      });
+    } catch (err) {
+      console.error('Falha ao inicializar listener de conexões:', err);
+      return () => {};
+    }
+  },
+
+  async requestTechnicianPing(technicianId: string, secondaryKeys?: string[]): Promise<void> {
+    if (!technicianId) return;
+    try {
+      const keysToPing = new Set<string>();
+      keysToPing.add(String(technicianId).trim().toUpperCase());
+      if (Array.isArray(secondaryKeys)) {
+        secondaryKeys.forEach(k => {
+          if (k && k.trim()) keysToPing.add(k.trim().toUpperCase());
+        });
+      }
+
+      const pingTime = new Date().toISOString();
+      const promises = Array.from(keysToPing).map(key => {
+        const docRef = doc(db, COLLECTIONS.TECHNICIAN_CONNECTIONS, key);
+        return setDoc(docRef, {
+          pingRequestedAt: pingTime,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      });
+
+      await Promise.all(promises);
+    } catch (e) {
+      console.error('Erro ao enviar solicitação de teste de ping para o técnico:', e);
     }
   },
 
@@ -1970,12 +2181,21 @@ export const dataService = {
         const tgtRouteSet = new Set(tgtPlannings.map(p => p.routeName));
         for (const plan of srcPlannings) {
           if (plan.routeName && !tgtRouteSet.has(plan.routeName)) {
+            const { id: _oldId, createdAt: _oldCreated, updatedAt: _oldUpdated, ...restPlan } = plan as any;
             await dataService.upsertRoutePlanning({
-              ...plan,
+              ...restPlan,
               month: toMonth,
-              plannedDate: undefined,
-              returnDate: undefined,
-              routeStatus: MaintenanceStatus.PENDING
+              plannedDate: '',
+              returnDate: '',
+              routeStatus: MaintenanceStatus.PENDING,
+              routeEstimatedCost: 0,
+              routeActualCost: 0,
+              routeCostItems: [],
+              routeServiceOrdersCount: 0,
+              routePreventiveCount: 0,
+              routeServicesValue: 0,
+              routeCardId: '',
+              selectedAddressIds: []
             });
           }
         }
@@ -2362,20 +2582,38 @@ export const dataService = {
 
   async sendOSAttendedNotification(order: ServiceOrder) {
     try {
-      let techName = order.openedBy || '';
-      if (!techName || techName === 'ADMIN' || techName === 'Administrativo') {
-        if (order.authenticatedTeam) {
-          const match = order.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
-          if (match && match[1]) techName = match[1].trim();
+      let techName = '';
+      let isOpenedByAdmin = false;
+
+      // 1. Tenta obter do técnico titular da O.S.
+      if (order.technicianId && !isStaffName(order.technicianId)) {
+        techName = order.technicianId.trim().toUpperCase();
+      }
+
+      // 2. Se não tem técnico titular, tenta da equipe autenticada no app do técnico
+      if (!techName && order.authenticatedTeam) {
+        const match = order.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
+        if (match && match[1] && !isStaffName(match[1])) {
+          techName = match[1].trim().toUpperCase();
         }
       }
-      if (!techName || techName === 'ADMIN' || techName === 'Administrativo') {
-        techName = 'Técnico';
+
+      // 3. Se não tem técnico titular e openedBy não for staff/admin, usa openedBy
+      if (!techName && order.openedBy && !isStaffName(order.openedBy)) {
+        techName = order.openedBy.trim().toUpperCase();
+      }
+
+      // 4. Se foi gerado pelo administrativo / escritório
+      if (!techName) {
+        isOpenedByAdmin = true;
+        techName = (order.openedBy && order.openedBy.toUpperCase() !== 'ADMIN' && order.openedBy.toUpperCase() !== 'ADMINISTRATIVO') 
+          ? order.openedBy.trim().toUpperCase() 
+          : 'Escritório';
       }
 
       let addressStr = '';
-      let clientName = '';
-      if (order.addressId) {
+      let clientName = order.clientName || '';
+      if (order.addressId && !clientName) {
         try {
           const addrSnap = await getDoc(doc(db, COLLECTIONS.ADDRESSES, order.addressId));
           if (addrSnap.exists()) {
@@ -2396,7 +2634,13 @@ export const dataService = {
       const osCode = order.osNumber || order.id || '';
       const title = `Atendimento de Ordem de Serviço`;
       const detailInfo = clientName ? ` no cliente ${clientName}` : (addressStr ? ` (${addressStr})` : '');
-      const content = `O técnico ${techName} acabou de atender uma nova ordem de serviço #${osCode}${detailInfo}.`;
+
+      let content = '';
+      if (isOpenedByAdmin) {
+        content = `Nova ordem de serviço #${osCode} gerada pelo administrativo (${techName})${detailInfo}.`;
+      } else {
+        content = `O técnico ${techName} acabou de atender uma nova ordem de serviço #${osCode}${detailInfo}.`;
+      }
 
       const usersSnapshot = await getDocs(collection(db, COLLECTIONS.USERS));
       const users = usersSnapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile));
@@ -3047,29 +3291,50 @@ export const dataService = {
     });
   },
 
+  async getMaxEquipmentNumber(): Promise<number> {
+    try {
+      // 1. Tenta pegar do cache em memória se existir
+      const cached = memoryCache['equipments_all_active'] || memoryCache['equipments_all_all'];
+      if (cached && Array.isArray(cached.data) && cached.data.length > 0) {
+        let maxNum = 0;
+        cached.data.forEach((eq: any) => {
+          const num = parseInt(eq.id, 10);
+          if (!isNaN(num) && num > maxNum) maxNum = num;
+        });
+        if (maxNum > 0) return maxNum;
+      }
+
+      // 2. Tenta pegar via backend endpoint otimizado
+      try {
+        const res = await fetch('/api/equipments/max-number');
+        if (res.ok) {
+          const data = await res.json();
+          if (typeof data.maxNumber === 'number' && data.maxNumber > 0) {
+            return data.maxNumber;
+          }
+        }
+      } catch {}
+
+      // 3. Fallback inteligente no Firestore: busca apenas os 10 últimos documentos ordenados por __name__ desc
+      // Isso consome apenas 10 leituras em vez de 6.927!
+      const q = query(collection(db, COLLECTIONS.EQUIPMENTS), orderBy('__name__', 'desc'), limit(10));
+      const snap = await getDocs(q);
+      let maxNum = 0;
+      snap.docs.forEach((doc: any) => {
+        const num = parseInt(doc.id, 10);
+        if (!isNaN(num) && num > maxNum) maxNum = num;
+      });
+      return maxNum > 0 ? maxNum : 6927;
+    } catch (e) {
+      console.warn('Erro ao obter max equipment number:', e);
+      return 6927;
+    }
+  },
+
   async addEquipment(equipment: Omit<Equipment, 'id'>) {
     try {
-      // OTIMIZAÇÃO: Tenta encontrar o ID sequencial máximo usando o cache em memória local primeiro,
-      // economizando até milhares de leituras do Firestore em bancos de dados grandes!
-      let maxNum = 0;
-      const cached = memoryCache['equipments_all_active'] || memoryCache['equipments_all_all'];
-      if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-        const list = cached.data as Equipment[];
-        list.forEach(eq => {
-          const num = parseInt(eq.id, 10);
-          if (!isNaN(num) && num > maxNum) {
-            maxNum = num;
-          }
-        });
-      } else {
-        const allSnapshot = await getDocs(collection(db, COLLECTIONS.EQUIPMENTS));
-        allSnapshot.docs.forEach(doc => {
-          const num = parseInt(doc.id, 10);
-          if (!isNaN(num) && num > maxNum) {
-            maxNum = num;
-          }
-        });
-      }
+      // OTIMIZAÇÃO CRÍTICA FIRESTORE: Utiliza getMaxEquipmentNumber para obter o próximo ID sem scan de 6.927 documentos
+      const maxNum = await dataService.getMaxEquipmentNumber();
       const nextId = (maxNum + 1).toString().padStart(4, '0');
 
       const payload = {
@@ -3666,6 +3931,63 @@ export const dataService = {
     }
   },
 
+  async getServiceOrderByShareToken(token: string): Promise<ServiceOrder | null> {
+    try {
+      if (!token) return null;
+
+      // 1. Tenta buscar via backend endpoint seguro (utiliza Admin SDK no servidor e funciona para clientes deslogados)
+      try {
+        const apiRes = await fetch(`/api/public/os-by-token?token=${encodeURIComponent(token)}`);
+        if (apiRes.ok) {
+          const osData = await apiRes.json();
+          if (osData && osData.id) {
+            return normalizeServiceOrderStatus(osData as ServiceOrder);
+          }
+        }
+      } catch (apiErr) {
+        console.warn('[dataService] Falha ao consultar endpoint público de O.S., usando fallback do client SDK:', apiErr);
+      }
+
+      // 2. Extração direta de ID caso o token esteja no formato codificado com o ID da O.S.
+      const tokenParts = token.split('_');
+      if (token.startsWith('sign_os_OS_') && tokenParts.length >= 5) {
+        const extractedId = `OS_${tokenParts[2]}_${tokenParts[3]}`;
+        try {
+          const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, extractedId));
+          if (directSnap.exists()) {
+            return normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder);
+          }
+        } catch {}
+      }
+
+      // 3. Consulta no Firestore por shareSignatureToken
+      try {
+        const q = query(
+          collection(db, COLLECTIONS.SERVICE_ORDERS),
+          where('shareSignatureToken', '==', token)
+        );
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          const d = snap.docs[0];
+          return normalizeServiceOrderStatus({ id: d.id, ...d.data() } as ServiceOrder);
+        }
+      } catch {}
+
+      // 4. Fallback: se o token for o próprio ID da O.S.
+      try {
+        const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, token));
+        if (directSnap.exists()) {
+          return normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder);
+        }
+      } catch {}
+
+      return null;
+    } catch (e) {
+      console.error('Erro ao buscar O.S. por token de compartilhamento:', e);
+      return null;
+    }
+  },
+
   async addServiceOrder(order: ServiceOrder) {
     try {
       // PRESERVAÇÃO RIGOROSA DA DATA DE CRIAÇÃO ORIGINAL E IDENTIDADE DO TÉCNICO:
@@ -3722,13 +4044,40 @@ export const dataService = {
         updatedAt: serverTimestamp()
       });
       await setDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), cleanOrder, { merge: true });
-      await historyService.log(order.id, 'ServiceOrder', 'Upsert', order);
+
+      // Registro detalhado e legível no histórico de auditoria
+      const isFinalizeAction = normalizedInput.adminFinalized || normalizedInput.status === 'finalizada' || normalizedInput.status === 'pre_finalizada';
+      const isTechAction = Boolean(normalizedInput.techFinalized && !existingDocData?.techFinalized);
+      const actionType = isFinalizeAction ? 'Finalize' : (existingDocData ? 'Update' : 'Create');
+
+      const historySummary: any = {
+        osNumber: normalizedInput.osNumber ? `#${normalizedInput.osNumber}` : `#${order.id}`,
+        client: normalizedInput.clientName || 'Cliente',
+        address: normalizedInput.addressStreet || 'Endereço',
+        status: normalizedInput.status || 'aberta',
+        isWorkshop: normalizedInput.isWorkshop ? 'Sim (Oficina)' : 'Não',
+        totalValue: typeof normalizedInput.totalValue === 'number' ? `R$ ${normalizedInput.totalValue.toFixed(2)}` : 'R$ 0,00',
+        technician: normalizedInput.technicianId || 'Não atribuído',
+        type: normalizedInput.type || 'Manutenção Corretiva'
+      };
+
+      if (isFinalizeAction) {
+        historySummary.actionDetails = 'Finalizada formalmente pelo Administrativo';
+      } else if (isTechAction) {
+        historySummary.actionDetails = 'Atendimento concluído pelo Técnico em campo';
+      } else if (existingDocData) {
+        historySummary.actionDetails = 'Ordem de Serviço editada e salva';
+      } else {
+        historySummary.actionDetails = 'Nova Ordem de Serviço cadastrada';
+      }
+
+      await historyService.log(order.id, 'ServiceOrder', actionType, historySummary);
       clearCache('service_orders_');
 
       // Dispara notificação para o sistema administrativo quando a O.S. for atendida/finalizada por técnico
       const wasTechFinalizedBefore = Boolean(existingDocData?.techFinalized);
       const isTechFinalizedNow = Boolean(normalizedInput.techFinalized);
-      const isNewTechOrder = !existingDocData && normalizedInput.openedBy && normalizedInput.openedBy !== 'ADMIN' && normalizedInput.openedBy !== 'Administrativo';
+      const isNewTechOrder = !existingDocData && normalizedInput.openedBy && !isStaffName(normalizedInput.openedBy);
 
       if ((isTechFinalizedNow && !wasTechFinalizedBefore) || (isNewTechOrder && isTechFinalizedNow)) {
         this.sendOSAttendedNotification(normalizedInput).catch(console.error);
@@ -3747,7 +4096,21 @@ export const dataService = {
         updatedAt: serverTimestamp()
       });
       await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id), cleanData);
-      await historyService.log(id, 'ServiceOrder', 'Update', data);
+
+      const isFinalize = data.status === 'finalizada' || data.adminFinalized || data.status === 'pre_finalizada';
+      const actionName = isFinalize ? 'Finalize' : 'Update';
+
+      const historySummary: any = {};
+      if (data.osNumber) historySummary.osNumber = `#${data.osNumber}`;
+      if (data.clientName) historySummary.client = data.clientName;
+      if (data.addressStreet) historySummary.address = data.addressStreet;
+      if (data.status) historySummary.status = data.status;
+      if (data.isWorkshop !== undefined) historySummary.isWorkshop = data.isWorkshop ? 'Sim (Oficina)' : 'Não';
+      if (data.totalValue !== undefined) historySummary.totalValue = `R$ ${Number(data.totalValue).toFixed(2)}`;
+      if (data.technicianId) historySummary.technician = data.technicianId;
+      historySummary.actionDetails = isFinalize ? 'Finalização da O.S.' : 'Edição e atualização da O.S.';
+
+      await historyService.log(id, 'ServiceOrder', actionName, historySummary);
       clearCache('service_orders_');
     } catch (e) {
       handleFirestoreError(e, OperationType.UPDATE, `${COLLECTIONS.SERVICE_ORDERS}/${id}`);

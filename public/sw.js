@@ -1,4 +1,4 @@
-const CACHE_NAME = 'lefrio-cache-v1';
+const CACHE_NAME = 'lefrio-cache-v3';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',
@@ -36,12 +36,16 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Skip Firebase/Firestore/Google API calls, chrome-extensions and dev socket
+  // Skip Firebase/Firestore/Google API calls, Vite dev modules, API routes, chrome-extensions and dev socket
   if (
     url.hostname.includes('firestore.googleapis.com') ||
     url.hostname.includes('firebase') ||
     url.hostname.includes('identitytoolkit') ||
-    url.hostname.includes('localhost') && url.port === '3000' && event.request.url.includes('socket') || // ignore dev server websocket
+    url.pathname.startsWith('/src/') ||
+    url.pathname.startsWith('/node_modules/') ||
+    url.pathname.startsWith('/@') ||
+    url.pathname.startsWith('/api/') ||
+    (url.hostname.includes('localhost') && url.port === '3000' && event.request.url.includes('socket')) || // ignore dev server websocket
     event.request.url.startsWith('chrome-extension:') ||
     event.request.method !== 'GET'
   ) {

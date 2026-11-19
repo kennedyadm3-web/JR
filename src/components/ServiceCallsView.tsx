@@ -28,7 +28,8 @@ import {
   ChevronDown,
   Wrench,
   Flame,
-  Filter
+  Filter,
+  FileText
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { 
@@ -42,7 +43,7 @@ import {
   ServiceCallComment, 
   RouteConfiguration 
 } from '../types';
-import { cn } from '../lib/utils';
+import { cn, getCanonicalRouteName, normalizeRouteKey } from '../lib/utils';
 import { format, differenceInDays } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { compressImageToBase64 } from '../lib/image-utils';
@@ -124,6 +125,12 @@ export default function ServiceCallsView({
   // Lightbox in-app para fotos
   const [expandedImageUrl, setExpandedImageUrl] = useState<string | null>(null);
 
+  // Modal de Impressão: Folha de Chamados Separados por Rotas (Supervisão / Diretoria)
+  const [isRoutePrintModalOpen, setIsRoutePrintModalOpen] = useState(false);
+  const [routePrintScope, setRoutePrintScope] = useState<'pending' | 'all' | 'filtered'>('pending');
+  const [routePrintSortBy, setRoutePrintSortBy] = useState<'volume_desc' | 'route_asc'>('volume_desc');
+  const [routePrintIncludeDetails, setRoutePrintIncludeDetails] = useState(true);
+
   // Formulário do Modal Unificado
   const [formData, setFormData] = useState({
     clientId: '',
@@ -177,16 +184,15 @@ export default function ServiceCallsView({
   }, []);
 
   const availableRoutes = useMemo(() => {
-    const routeNames = new Set<string>();
+    const map = new Map<string, string>();
     addresses.forEach(addr => {
-      if (addr.route) {
-        const config = routeConfigs.find(rc => rc.id === addr.route || rc.routeName === addr.route);
-        routeNames.add(config ? config.routeName : addr.route);
-      } else {
-        routeNames.add('Sem Rota');
+      const canonical = addr.route ? getCanonicalRouteName(addr.route, routeConfigs) : 'Sem Rota';
+      const key = normalizeRouteKey(canonical);
+      if (!map.has(key)) {
+        map.set(key, canonical);
       }
     });
-    return Array.from(routeNames).sort((a, b) => {
+    return Array.from(map.values()).sort((a, b) => {
       if (a === 'Sem Rota') return 1;
       if (b === 'Sem Rota') return -1;
       return a.localeCompare(b, 'pt-BR');
@@ -291,7 +297,7 @@ export default function ServiceCallsView({
         priority: call.priority || ServiceCallPriority.MEDIUM,
         status: call.status || ServiceCallStatus.OPEN,
         isWorkshop: Boolean(call.isWorkshop),
-        resolutionNotes: call.resolutionNotes || '',
+        resolutionNotes: (call.resolutionNotes || '').toUpperCase(),
         attachmentUrl1: call.attachmentUrl1 || (call.attachmentUrl?.startsWith('data:image') ? call.attachmentUrl : '') || '',
         attachmentUrl2: call.attachmentUrl2 || '',
         attachmentUrl3: call.attachmentUrl3 || '',
@@ -534,7 +540,7 @@ export default function ServiceCallsView({
     setMessage(null);
     try {
       const resolvedDate = new Date();
-      const updatedNotes = formData.resolutionNotes.trim();
+      const updatedNotes = formData.resolutionNotes.trim().toUpperCase();
 
       await dataService.updateServiceCall(activeModalCall.id, {
         status: ServiceCallStatus.RESOLVED,
@@ -684,14 +690,119 @@ export default function ServiceCallsView({
       const matchesWorkshop = workshopFilter === 'all' || (workshopFilter === 'workshop' && Boolean(c.isWorkshop));
       
       const address = addresses.find(a => a.id === c.addressId);
-      const routeName = address 
-        ? (routeConfigs.find(rc => rc.id === address.route || rc.routeName === address.route)?.routeName || address.route || 'Sem Rota') 
+      const routeName = address?.route 
+        ? getCanonicalRouteName(address.route, routeConfigs) 
         : 'Sem Rota';
-      const matchesRoute = routeFilter === 'all' || routeName === routeFilter;
+      const matchesRoute = routeFilter === 'all' || normalizeRouteKey(routeName) === normalizeRouteKey(routeFilter);
       
       return matchesSearch && matchesStatus && matchesPriority && matchesWorkshop && matchesRoute;
     });
   }, [calls, search, statusFilter, priorityFilter, workshopFilter, routeFilter, addresses, routeConfigs]);
+
+  // Agrupamento de chamados por rota para a Folha de Impressão da Supervisão / Diretoria
+  const routePrintData = useMemo(() => {
+    const sourceCalls = routePrintScope === 'pending'
+      ? calls.filter(c => c.status === ServiceCallStatus.OPEN || c.status === ServiceCallStatus.IN_PROGRESS)
+      : routePrintScope === 'filtered'
+        ? filteredCalls
+        : calls;
+
+    const groupsMap = new Map<string, {
+      routeKey: string;
+      routeName: string;
+      calls: Array<ServiceCall & { resolvedAddressLabel: string; resolvedRouteName: string }>;
+      openCount: number;
+      inProgressCount: number;
+      resolvedCount: number;
+      cancelledCount: number;
+      highPriorityCount: number;
+      workshopCount: number;
+    }>();
+
+    sourceCalls.forEach(call => {
+      const addr = addresses.find(a => a.id === call.addressId);
+      const resolvedRouteName = addr?.route ? getCanonicalRouteName(addr.route, routeConfigs) : 'Sem Rota';
+      const routeKey = normalizeRouteKey(resolvedRouteName);
+      const resolvedAddressLabel = addr
+        ? `${addr.street}${addr.number ? `, Nº ${addr.number}` : ''}${addr.neighborhood ? ` - ${addr.neighborhood}` : ''}`
+        : (call.addressLabel || 'Endereço não informado');
+
+      if (!groupsMap.has(routeKey)) {
+        groupsMap.set(routeKey, {
+          routeKey,
+          routeName: resolvedRouteName,
+          calls: [],
+          openCount: 0,
+          inProgressCount: 0,
+          resolvedCount: 0,
+          cancelledCount: 0,
+          highPriorityCount: 0,
+          workshopCount: 0
+        });
+      }
+
+      const group = groupsMap.get(routeKey)!;
+      group.calls.push({
+        ...call,
+        resolvedAddressLabel,
+        resolvedRouteName
+      });
+
+      if (call.status === ServiceCallStatus.OPEN) group.openCount++;
+      else if (call.status === ServiceCallStatus.IN_PROGRESS) group.inProgressCount++;
+      else if (call.status === ServiceCallStatus.RESOLVED) group.resolvedCount++;
+      else if (call.status === ServiceCallStatus.CANCELLED) group.cancelledCount++;
+
+      const isActive = call.status === ServiceCallStatus.OPEN || call.status === ServiceCallStatus.IN_PROGRESS;
+      if (isActive && call.priority === ServiceCallPriority.HIGH) group.highPriorityCount++;
+      if (isActive && Boolean(call.isWorkshop)) group.workshopCount++;
+    });
+
+    // Ordenar chamados dentro de cada rota (Alta prioridade -> Oficina -> Mais antigos primeiro para priorizar fila)
+    groupsMap.forEach(group => {
+      group.calls.sort((a, b) => {
+        const aActive = a.status === ServiceCallStatus.OPEN || a.status === ServiceCallStatus.IN_PROGRESS ? 0 : 1;
+        const bActive = b.status === ServiceCallStatus.OPEN || b.status === ServiceCallStatus.IN_PROGRESS ? 0 : 1;
+        if (aActive !== bActive) return aActive - bActive;
+
+        const aHigh = a.priority === ServiceCallPriority.HIGH ? 0 : a.priority === ServiceCallPriority.MEDIUM ? 1 : 2;
+        const bHigh = b.priority === ServiceCallPriority.HIGH ? 0 : b.priority === ServiceCallPriority.MEDIUM ? 1 : 2;
+        if (aHigh !== bHigh) return aHigh - bHigh;
+
+        const aSec = a.createdAt?.seconds || 0;
+        const bSec = b.createdAt?.seconds || 0;
+        return aSec - bSec;
+      });
+    });
+
+    const groups = Array.from(groupsMap.values()).sort((a, b) => {
+      if (routePrintSortBy === 'volume_desc') {
+        if (b.calls.length !== a.calls.length) return b.calls.length - a.calls.length;
+        if (a.routeName === 'Sem Rota') return 1;
+        if (b.routeName === 'Sem Rota') return -1;
+        return a.routeName.localeCompare(b.routeName, 'pt-BR', { numeric: true });
+      }
+      if (a.routeName === 'Sem Rota') return 1;
+      if (b.routeName === 'Sem Rota') return -1;
+      return a.routeName.localeCompare(b.routeName, 'pt-BR', { numeric: true });
+    });
+
+    const totalCalls = sourceCalls.length;
+    const totalHighPriority = groups.reduce((acc, g) => acc + g.highPriorityCount, 0);
+    const totalWorkshop = groups.reduce((acc, g) => acc + g.workshopCount, 0);
+    const totalOpen = groups.reduce((acc, g) => acc + g.openCount, 0);
+    const totalInProgress = groups.reduce((acc, g) => acc + g.inProgressCount, 0);
+
+    return {
+      groups,
+      totalCalls,
+      totalRoutes: groups.length,
+      totalHighPriority,
+      totalWorkshop,
+      totalOpen,
+      totalInProgress
+    };
+  }, [calls, filteredCalls, routePrintScope, routePrintSortBy, addresses, routeConfigs]);
 
   const selectedClientAddresses = useMemo(() => {
     return addresses.filter(a => a.clientId === formData.clientId);
@@ -852,7 +963,8 @@ export default function ServiceCallsView({
   };
 
   return (
-    <div className="space-y-6 animate-in fade-in duration-300">
+    <>
+    <div className={cn("space-y-6 animate-in fade-in duration-300", isRoutePrintModalOpen && "no-print print:hidden")}>
       {/* Header Principal */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
         <div>
@@ -1194,32 +1306,45 @@ export default function ServiceCallsView({
             ))}
           </div>
 
-          {/* Toggle Grid/Table */}
-          <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl shrink-0">
+          {/* Ação Impressão por Rotas + Toggle Grid/Table */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => setViewMode('cards')}
-              className={cn(
-                "px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer",
-                viewMode === 'cards' ? "bg-white text-blue-600 shadow-2xs" : "text-gray-500 hover:text-gray-700"
-              )}
-              title="Visualização em Cards"
+              onClick={() => setIsRoutePrintModalOpen(true)}
+              className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider transition-all cursor-pointer shadow-xs h-[34px]"
+              title="Abrir folha de impressão com todos os chamados separados por rotas (para supervisão e diretoria)"
             >
-              <LayoutGrid className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider">Cards</span>
+              <FileText className="w-3.5 h-3.5 text-amber-400" />
+              <Printer className="w-3.5 h-3.5 text-white/90" />
+              <span className="hidden sm:inline">Folha por Rotas</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('table')}
-              className={cn(
-                "px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer",
-                viewMode === 'table' ? "bg-white text-blue-600 shadow-2xs" : "text-gray-500 hover:text-gray-700"
-              )}
-              title="Visualização em Tabela"
-            >
-              <List className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider">Tabela</span>
-            </button>
+
+            <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-xl shrink-0">
+              <button
+                type="button"
+                onClick={() => setViewMode('cards')}
+                className={cn(
+                  "px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer",
+                  viewMode === 'cards' ? "bg-white text-blue-600 shadow-2xs" : "text-gray-500 hover:text-gray-700"
+                )}
+                title="Visualização em Cards"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider">Cards</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('table')}
+                className={cn(
+                  "px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold transition-all cursor-pointer",
+                  viewMode === 'table' ? "bg-white text-blue-600 shadow-2xs" : "text-gray-500 hover:text-gray-700"
+                )}
+                title="Visualização em Tabela"
+              >
+                <List className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline text-[11px] font-bold uppercase tracking-wider">Tabela</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1381,8 +1506,8 @@ export default function ServiceCallsView({
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                         Solução Aplicada
                       </div>
-                      <p className="text-emerald-900 text-xs font-semibold italic line-clamp-2">
-                        "{call.resolutionNotes}"
+                      <p className="text-emerald-900 text-xs font-semibold italic line-clamp-2 uppercase">
+                        "{call.resolutionNotes.toUpperCase()}"
                       </p>
                     </div>
                   )}
@@ -2195,8 +2320,8 @@ export default function ServiceCallsView({
 
                     {activeModalCall.status === 'resolved' ? (
                       <div className="space-y-2">
-                        <p className="text-xs text-emerald-950 font-medium italic bg-white/80 p-3 rounded-xl border border-emerald-100">
-                          "{activeModalCall.resolutionNotes || 'Atendimento concluído com sucesso.'}"
+                        <p className="text-xs text-emerald-950 font-medium italic bg-white/80 p-3 rounded-xl border border-emerald-100 uppercase">
+                          "{(activeModalCall.resolutionNotes || 'ATENDIMENTO CONCLUÍDO COM SUCESSO.').toUpperCase()}"
                         </p>
                         <div className="flex items-center justify-between text-[10px] text-emerald-700">
                           <span>
@@ -2220,9 +2345,9 @@ export default function ServiceCallsView({
                         <textarea
                           rows={2}
                           value={formData.resolutionNotes}
-                          onChange={(e) => setFormData({ ...formData, resolutionNotes: e.target.value })}
-                          className="w-full px-3 py-2 bg-white border border-emerald-200 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500/20 text-xs text-gray-800 font-medium resize-none placeholder-gray-400"
-                          placeholder="Ex: Realizada carga de gás, higienização de filtros e teste de temperatura..."
+                          onChange={(e) => setFormData({ ...formData, resolutionNotes: e.target.value.toUpperCase() })}
+                          className="w-full px-3 py-2 bg-white border border-emerald-200 rounded-xl outline-none focus:ring-2 focus:ring-emerald-500/20 text-xs text-gray-800 font-medium resize-none placeholder-gray-400 uppercase font-mono tracking-wide"
+                          placeholder="EX: REALIZADA CARGA DE GÁS, HIGIENIZAÇÃO DE FILTROS E TESTE DE TEMPERATURA..."
                         />
                         <button
                           type="button"
@@ -2538,5 +2663,438 @@ export default function ServiceCallsView({
         </div>
       )}
     </div>
+
+      {/* ========================================================================= */}
+      {/* MODAL FOLHA DE IMPRESSÃO DE CHAMADOS POR ROTAS (SUPERVISÃO / DIRETORIA)   */}
+      {/* ========================================================================= */}
+      {isRoutePrintModalOpen && (
+        <div className="print-modal-container fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
+          <style>{`
+            @media print {
+              @page {
+                size: A4 portrait;
+                margin: 8mm 10mm !important;
+              }
+              .no-print, .print\\:hidden {
+                display: none !important;
+                visibility: hidden !important;
+                height: 0 !important;
+                overflow: hidden !important;
+              }
+              html, body, #root, #root > div, main, main > div, .print-modal-container {
+                background: #ffffff !important;
+                color: #000000 !important;
+                height: auto !important;
+                min-height: auto !important;
+                max-height: none !important;
+                overflow: visible !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                display: block !important;
+                position: static !important;
+                transform: none !important;
+                box-shadow: none !important;
+              }
+              #routes-print-area {
+                width: 100% !important;
+                max-width: none !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                border: none !important;
+                box-shadow: none !important;
+              }
+              #routes-print-area table {
+                page-break-inside: auto !important;
+              }
+              #routes-print-area thead {
+                display: table-header-group !important;
+              }
+              #routes-print-area tr {
+                break-inside: avoid !important;
+                page-break-inside: avoid !important;
+              }
+              .route-section-header {
+                break-after: avoid !important;
+                page-break-after: avoid !important;
+              }
+            }
+          `}</style>
+
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-5xl max-h-[94vh] flex flex-col overflow-hidden print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:block">
+            {/* Barra de Controles do Modal (Oculta na Impressão) */}
+            <div className="p-4 sm:p-5 bg-slate-50 border-b border-slate-200 flex flex-col gap-3 shrink-0 no-print print:hidden">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-slate-900 text-amber-400 flex items-center justify-center shadow-xs shrink-0">
+                    <Printer className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm sm:text-base font-black text-slate-900 uppercase tracking-tight">
+                      Folha de Impressão — Chamados por Rota de Atendimento
+                    </h3>
+                    <p className="text-[11px] text-slate-500 font-medium">
+                      Visão logística consolidada para supervisão e diretoria traçarem os próximos atendimentos.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      window.focus();
+                      setTimeout(() => window.print(), 150);
+                    }}
+                    disabled={routePrintData.totalCalls === 0}
+                    className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-2 shadow-md shadow-blue-200 cursor-pointer transition-all"
+                  >
+                    <Printer className="w-4 h-4" />
+                    Imprimir Folha (A4)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsRoutePrintModalOpen(false)}
+                    className="px-3.5 py-2.5 bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-xl text-xs font-bold cursor-pointer transition-all"
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </div>
+
+              {/* Opções de Filtro e Ordenação da Folha */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-200/70">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mr-1">Exibir:</span>
+                  {[
+                    { id: 'pending', label: `Pendentes / Em Aberto (${stats.open + stats.inProgress})` },
+                    { id: 'all', label: `Todos os Chamados (${calls.length})` },
+                    { id: 'filtered', label: `Filtro da Tela (${filteredCalls.length})` }
+                  ].map(opt => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setRoutePrintScope(opt.id as any)}
+                      className={cn(
+                        "px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all border cursor-pointer",
+                        routePrintScope === opt.id
+                          ? "bg-slate-900 text-white border-slate-900 shadow-2xs"
+                          : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRoutePrintSortBy(prev => prev === 'volume_desc' ? 'route_asc' : 'volume_desc')}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-bold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 cursor-pointer flex items-center gap-1.5"
+                    title="Alternar ordenação das rotas"
+                  >
+                    <span>Ordenação:</span>
+                    <span className="text-blue-700 font-black">
+                      {routePrintSortBy === 'volume_desc' ? 'Maior Volume de Chamados' : 'Ordem das Rotas'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setRoutePrintIncludeDetails(prev => !prev)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-lg text-[11px] font-bold border cursor-pointer transition-all",
+                      routePrintIncludeDetails
+                        ? "bg-blue-50 text-blue-700 border-blue-200"
+                        : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                    )}
+                  >
+                    {routePrintIncludeDetails ? '✓ Resumo + Lista Detalhada' : 'Somente Resumo por Rota'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Área da Folha A4 Imprimível */}
+            <div className="flex-1 overflow-y-auto p-4 sm:p-8 bg-slate-100 print:p-0 print:m-0 print:bg-white print:overflow-visible print:block">
+              <div
+                id="routes-print-area"
+                className="bg-white border border-slate-300 shadow-sm mx-auto p-6 sm:p-8 print:p-0 print:border-none print:shadow-none text-slate-900"
+                style={{ maxWidth: '210mm', width: '100%' }}
+              >
+                {/* Cabeçalho Institucional da Folha */}
+                <div className="flex items-start justify-between border-b-2 border-slate-900 pb-3 mb-4">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      LE FRIO REFRIGERAÇÃO E COMÉRCIO LTDA • LOGÍSTICA E SUPERVISÃO
+                    </div>
+                    <h1 className="text-lg sm:text-xl font-black uppercase tracking-tight text-slate-950 mt-0.5 leading-tight">
+                      MAPA DE CHAMADOS POR ROTA DE ATENDIMENTO
+                    </h1>
+                    <p className="text-[11px] font-semibold text-slate-600 mt-0.5">
+                      Escopo:{' '}
+                      <strong className="text-slate-900">
+                        {routePrintScope === 'pending'
+                          ? 'Chamados Pendentes e Em Andamento'
+                          : routePrintScope === 'filtered'
+                            ? 'Conforme Filtros Aplicados na Tela'
+                            : 'Todos os Chamados Registrados'}
+                      </strong>
+                    </p>
+                  </div>
+                  <div className="text-right text-[10px] text-slate-600 font-semibold leading-snug shrink-0">
+                    <div>Emissão: <strong className="text-slate-900">{format(new Date(), "dd/MM/yyyy 'às' HH:mm")}</strong></div>
+                    <div>Emitido por: <strong className="text-slate-900 uppercase">{userProfile?.name || 'Administração'}</strong></div>
+                  </div>
+                </div>
+
+                {/* Indicadores Totais da Folha */}
+                <div className="grid grid-cols-4 gap-2.5 mb-5">
+                  <div className="border border-slate-300 rounded-lg p-2.5 bg-slate-50 text-center">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-500 block">Total de Chamados</span>
+                    <span className="text-xl font-black text-slate-950">{routePrintData.totalCalls}</span>
+                  </div>
+                  <div className="border border-slate-300 rounded-lg p-2.5 bg-slate-50 text-center">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-slate-500 block">Rotas Envolvidas</span>
+                    <span className="text-xl font-black text-blue-800">{routePrintData.totalRoutes}</span>
+                  </div>
+                  <div className="border border-red-300 rounded-lg p-2.5 bg-red-50/70 text-center">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-red-700 block">Alta Prioridade</span>
+                    <span className="text-xl font-black text-red-700">{routePrintData.totalHighPriority}</span>
+                  </div>
+                  <div className="border border-purple-300 rounded-lg p-2.5 bg-purple-50/70 text-center">
+                    <span className="text-[9px] font-black uppercase tracking-wider text-purple-800 block">Em Oficina</span>
+                    <span className="text-xl font-black text-purple-800">{routePrintData.totalWorkshop}</span>
+                  </div>
+                </div>
+
+                {routePrintData.totalCalls === 0 ? (
+                  <div className="border-2 border-dashed border-slate-300 rounded-xl p-10 text-center text-slate-500 text-xs font-bold">
+                    Nenhum chamado encontrado para o filtro selecionado.
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {/* BLOCO 1: QUADRO RESUMO QUANTITATIVO POR ROTA */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <h2 className="text-xs font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                          <MapPin className="w-3.5 h-3.5 text-slate-700" />
+                          1. Resumo Quantitativo por Rota (Visão Rápida de Logística)
+                        </h2>
+                        <span className="text-[9px] font-bold uppercase text-slate-500">
+                          Ordenado por {routePrintSortBy === 'volume_desc' ? 'Maior Demanda' : 'Ordem da Rota'}
+                        </span>
+                      </div>
+                      <table className="w-full border-collapse border border-slate-400 text-[10px]">
+                        <thead>
+                          <tr className="bg-slate-900 text-white uppercase text-[9px] tracking-wider">
+                            <th className="py-1.5 px-2.5 text-left border border-slate-700">Rota de Atendimento</th>
+                            <th className="py-1.5 px-2 text-center border border-slate-700 w-20">Qtd. Total</th>
+                            <th className="py-1.5 px-2 text-center border border-slate-700 w-20">Pendentes</th>
+                            <th className="py-1.5 px-2 text-center border border-slate-700 w-24">Em Andamento</th>
+                            <th className="py-1.5 px-2 text-center border border-slate-700 w-24">Alta Prior.</th>
+                            <th className="py-1.5 px-2 text-center border border-slate-700 w-20">Oficina</th>
+                            {routePrintScope === 'all' && (
+                              <th className="py-1.5 px-2 text-center border border-slate-700 w-20">Concluídos</th>
+                            )}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {routePrintData.groups.map((group, idx) => (
+                            <tr key={group.routeKey} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+                              <td className="py-1.5 px-2.5 font-extrabold text-slate-900 border border-slate-300 uppercase">
+                                {group.routeName}
+                              </td>
+                              <td className="py-1.5 px-2 text-center font-black text-slate-950 border border-slate-300 bg-slate-100/80 text-[11px]">
+                                {group.calls.length}
+                              </td>
+                              <td className="py-1.5 px-2 text-center font-bold text-slate-700 border border-slate-300">
+                                {group.openCount}
+                              </td>
+                              <td className="py-1.5 px-2 text-center font-bold text-blue-700 border border-slate-300">
+                                {group.inProgressCount}
+                              </td>
+                              <td className={cn(
+                                "py-1.5 px-2 text-center font-black border border-slate-300",
+                                group.highPriorityCount > 0 ? "text-red-700 bg-red-50" : "text-slate-400"
+                              )}>
+                                {group.highPriorityCount}
+                              </td>
+                              <td className={cn(
+                                "py-1.5 px-2 text-center font-black border border-slate-300",
+                                group.workshopCount > 0 ? "text-purple-800 bg-purple-50" : "text-slate-400"
+                              )}>
+                                {group.workshopCount}
+                              </td>
+                              {routePrintScope === 'all' && (
+                                <td className="py-1.5 px-2 text-center font-bold text-emerald-700 border border-slate-300">
+                                  {group.resolvedCount}
+                                </td>
+                              )}
+                            </tr>
+                          ))}
+                        </tbody>
+                        <tfoot>
+                          <tr className="bg-slate-200 font-black text-slate-950 uppercase text-[10px]">
+                            <td className="py-1.5 px-2.5 border border-slate-400">TOTAL GERAL ({routePrintData.totalRoutes} ROTAS)</td>
+                            <td className="py-1.5 px-2 text-center border border-slate-400">{routePrintData.totalCalls}</td>
+                            <td className="py-1.5 px-2 text-center border border-slate-400">{routePrintData.totalOpen}</td>
+                            <td className="py-1.5 px-2 text-center border border-slate-400">{routePrintData.totalInProgress}</td>
+                            <td className="py-1.5 px-2 text-center border border-slate-400 text-red-700">{routePrintData.totalHighPriority}</td>
+                            <td className="py-1.5 px-2 text-center border border-slate-400 text-purple-800">{routePrintData.totalWorkshop}</td>
+                            {routePrintScope === 'all' && (
+                              <td className="py-1.5 px-2 text-center border border-slate-400 text-emerald-800">
+                                {routePrintData.groups.reduce((acc, g) => acc + g.resolvedCount, 0)}
+                              </td>
+                            )}
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+
+                    {/* BLOCO 2: DETALHAMENTO DOS CHAMADOS POR ROTA */}
+                    {routePrintIncludeDetails && (
+                      <div className="space-y-4">
+                        <h2 className="text-xs font-black uppercase tracking-wider text-slate-900 border-b border-slate-300 pb-1">
+                          2. Detalhamento dos Chamados por Rota
+                        </h2>
+
+                        {routePrintData.groups.map((group) => (
+                          <div key={group.routeKey} className="space-y-0">
+                            {/* Faixa Título da Rota */}
+                            <div className="route-section-header bg-slate-800 text-white px-3 py-1.5 rounded-t-md flex items-center justify-between border border-slate-800">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] font-black uppercase tracking-wide">
+                                  ROTA: {group.routeName}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-[9px] font-black uppercase">
+                                <span className="bg-white text-slate-900 px-2 py-0.5 rounded">
+                                  {group.calls.length} {group.calls.length === 1 ? 'CHAMADO' : 'CHAMADOS'}
+                                </span>
+                                {group.highPriorityCount > 0 && (
+                                  <span className="bg-red-600 text-white px-2 py-0.5 rounded">
+                                    {group.highPriorityCount} ALTA PRIOR.
+                                  </span>
+                                )}
+                                {group.workshopCount > 0 && (
+                                  <span className="bg-purple-600 text-white px-2 py-0.5 rounded">
+                                    {group.workshopCount} OFICINA
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Tabela de Chamados da Rota */}
+                            <table className="w-full border-collapse border border-slate-300 text-[9.5px]">
+                              <thead>
+                                <tr className="bg-slate-100 text-slate-700 uppercase text-[8.5px] font-black tracking-wider">
+                                  <th className="py-1 px-2 text-center border border-slate-300 w-7">#</th>
+                                  <th className="py-1 px-2 text-left border border-slate-300 w-24">Data / Prev.</th>
+                                  <th className="py-1 px-2 text-left border border-slate-300 w-56">Cliente / Local de Atendimento</th>
+                                  <th className="py-1 px-2 text-center border border-slate-300 w-24">Situação</th>
+                                  <th className="py-1 px-2 text-left border border-slate-300">Descrição do Problema / Observações</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {group.calls.map((call, idx) => {
+                                  const openDateStr = call.createdAt?.seconds
+                                    ? format(new Date(call.createdAt.seconds * 1000), 'dd/MM/yy')
+                                    : '-';
+                                  const daysOpen = call.createdAt?.seconds && call.status !== ServiceCallStatus.RESOLVED && call.status !== ServiceCallStatus.CANCELLED
+                                    ? differenceInDays(new Date(), new Date(call.createdAt.seconds * 1000))
+                                    : null;
+
+                                  return (
+                                    <tr key={call.id} className={call.priority === ServiceCallPriority.HIGH && call.status !== ServiceCallStatus.RESOLVED ? 'bg-red-50/40' : 'bg-white'}>
+                                      <td className="py-1.5 px-2 text-center font-bold text-slate-500 border border-slate-300 align-top">
+                                        {idx + 1}
+                                      </td>
+                                      <td className="py-1.5 px-2 border border-slate-300 align-top">
+                                        <div className="font-bold text-slate-800">{openDateStr}</div>
+                                        {daysOpen !== null && (
+                                          <div className={cn("text-[8px] font-black", daysOpen >= 7 ? "text-red-700" : "text-amber-700")}>
+                                            {daysOpen}d aberto
+                                          </div>
+                                        )}
+                                        {call.forecastDate && call.status !== ServiceCallStatus.RESOLVED && (
+                                          <div className="text-[8px] font-bold text-blue-700 mt-0.5">
+                                            Prev: {format(new Date(call.forecastDate + 'T12:00:00'), 'dd/MM')}
+                                          </div>
+                                        )}
+                                      </td>
+                                      <td className="py-1.5 px-2 border border-slate-300 align-top">
+                                        <div className="font-black text-slate-900 uppercase leading-tight">
+                                          {call.clientName}
+                                        </div>
+                                        <div className="text-[8.5px] text-slate-600 font-medium leading-snug mt-0.5">
+                                          {call.resolvedAddressLabel}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-2 text-center border border-slate-300 align-top">
+                                        <div className="flex flex-col items-center gap-0.5">
+                                          <span className={cn(
+                                            "px-1.5 py-0.2 rounded text-[8px] font-black uppercase border",
+                                            call.status === ServiceCallStatus.RESOLVED ? "bg-emerald-50 text-emerald-800 border-emerald-300" :
+                                            call.status === ServiceCallStatus.IN_PROGRESS ? "bg-blue-50 text-blue-800 border-blue-300" :
+                                            call.status === ServiceCallStatus.CANCELLED ? "bg-slate-100 text-slate-600 border-slate-300" :
+                                            "bg-amber-50 text-amber-900 border-amber-300"
+                                          )}>
+                                            {call.status === ServiceCallStatus.RESOLVED ? 'Resolvido' :
+                                             call.status === ServiceCallStatus.IN_PROGRESS ? 'Andamento' :
+                                             call.status === ServiceCallStatus.CANCELLED ? 'Cancelado' : 'Pendente'}
+                                          </span>
+                                          <span className={cn(
+                                            "px-1.5 py-0.2 rounded text-[7.5px] font-black uppercase",
+                                            call.priority === ServiceCallPriority.HIGH ? "bg-red-600 text-white" :
+                                            call.priority === ServiceCallPriority.MEDIUM ? "bg-slate-200 text-slate-800" :
+                                            "bg-slate-100 text-slate-500"
+                                          )}>
+                                            {call.priority === ServiceCallPriority.HIGH ? 'Alta Prior.' :
+                                             call.priority === ServiceCallPriority.MEDIUM ? 'Média' : 'Baixa'}
+                                          </span>
+                                          {call.isWorkshop && (
+                                            <span className="px-1.5 py-0.2 rounded text-[7.5px] font-black uppercase bg-purple-100 text-purple-900 border border-purple-300">
+                                              Oficina
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td className="py-1.5 px-2 border border-slate-300 align-top">
+                                        <div className="font-semibold text-slate-800 leading-snug whitespace-pre-wrap">
+                                          {call.description}
+                                        </div>
+                                        {call.status === ServiceCallStatus.RESOLVED && call.resolutionNotes && (
+                                          <div className="text-[8.5px] text-emerald-800 font-bold mt-0.5 italic uppercase">
+                                            Solução: {call.resolutionNotes.toUpperCase()}
+                                          </div>
+                                        )}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Campo de Anotações Manuais da Supervisão / Diretoria na Folha Impressa */}
+                    <div className="border border-slate-300 rounded-md p-3 mt-4 bg-slate-50/40">
+                      <div className="text-[9px] font-black uppercase tracking-wider text-slate-600 mb-4">
+                        Observações / Direcionamento de Equipes (Supervisão / Diretoria):
+                      </div>
+                      <div className="border-b border-dashed border-slate-300 h-5" />
+                      <div className="border-b border-dashed border-slate-300 h-5" />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

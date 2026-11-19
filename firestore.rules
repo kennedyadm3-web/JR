@@ -189,8 +189,15 @@ service cloud.firestore {
 
     // 20. Service Orders (Ordens de Serviço)
     match /serviceOrders/{orderId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn();
+      // Leitura permitida para usuários autenticados OU para visualização pública de O.S. com token de assinatura
+      allow read: if isSignedIn() || (resource != null && resource.data.shareSignatureToken != null);
+      // Atualização permitida para usuários autenticados OU para coleta da assinatura digital externa via token
+      allow update: if isSignedIn() || (
+        resource != null && 
+        resource.data.shareSignatureToken != null &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clientSignature', 'clientSignatureDate', 'clientSigneeName', 'clientSigneeRegistration', 'clientRepresentative', 'clientRepresentativeMatricula', 'status', 'updatedAt'])
+      );
+      allow create, delete: if isSignedIn();
     }
 
     // 21. Service Catalog (Catálogo de Produtos e Serviços e Tabela de Preços por Cliente)

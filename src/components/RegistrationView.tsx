@@ -27,14 +27,20 @@ import {
   Sparkles,
   ArrowRight,
   Phone,
-  ChevronDown
+  ChevronDown,
+  Wifi,
+  WifiOff,
+  Activity,
+  Signal,
+  Globe,
+  Smartphone
 } from 'lucide-react';
 import { dataService, normalizeAddressText } from '../services/dataService';
-import { Client, Address, Technician, RouteConfiguration, TravelCard, Equipment, RouteType, UserRole, UserProfile } from '../types';
+import { Client, Address, Technician, RouteConfiguration, TravelCard, Equipment, RouteType, UserRole, UserProfile, TechnicianConnectionStatus } from '../types';
 import { db } from '../lib/firebase';
-import { writeBatch, collection, getDocs, doc, serverTimestamp } from 'firebase/firestore';
+import { writeBatch, collection, getDocs, doc, serverTimestamp, query, where } from 'firebase/firestore';
 import { SEB_EQUIPMENTS } from '../lib/seb-equipments';
-import { cn } from '../lib/utils';
+import { cn, getCanonicalRouteName, normalizeRouteKey } from '../lib/utils';
 import * as XLSX from 'xlsx';
 
 const getMapsUrl = (coordinates: string) => {
@@ -46,6 +52,79 @@ const getMapsUrl = (coordinates: string) => {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(trimmed)}`;
 };
 
+export function getTechnicianConnectionBadgeInfo(status?: TechnicianConnectionStatus) {
+  if (!status || !status.lastSeenAt) {
+    return {
+      label: 'Sem histórico de sinal',
+      color: 'bg-slate-50 text-slate-500 border-slate-200',
+      dotColor: 'bg-slate-400',
+      isOnline: false,
+      diffText: 'Nunca medido',
+      netType: 'desconhecido',
+      pingMs: undefined
+    };
+  }
+
+  const lastSeenDate = new Date(status.lastSeenAt);
+  const diffSec = Math.max(0, Math.floor((Date.now() - lastSeenDate.getTime()) / 1000));
+
+  let diffText = '';
+  if (diffSec < 60) diffText = `Sinal há ${diffSec}s`;
+  else if (diffSec < 3600) diffText = `Sinal há ${Math.floor(diffSec / 60)}m`;
+  else diffText = `Sinal há ${Math.floor(diffSec / 3600)}h`;
+
+  const isRecent = diffSec < 150; // Respondeu nos últimos 2.5 min
+
+  if (!status.isOnline || !isRecent) {
+    return {
+      label: isRecent ? 'Dispositivo Offline' : `Offline (${diffText})`,
+      color: 'bg-red-50 text-red-700 border-red-200',
+      dotColor: 'bg-red-500',
+      isOnline: false,
+      diffText,
+      netType: status.effectiveType || 'offline',
+      pingMs: status.pingMs
+    };
+  }
+
+  const netType = (status.effectiveType || '4g').toUpperCase();
+  const pingStr = status.pingMs ? `${status.pingMs}ms` : '';
+
+  if (netType === '4G' || netType === 'WIFI' || (status.pingMs && status.pingMs < 200)) {
+    return {
+      label: `Conexão Ótima (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+      color: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+      dotColor: 'bg-emerald-500 animate-pulse',
+      isOnline: true,
+      diffText,
+      netType,
+      pingMs: status.pingMs
+    };
+  }
+
+  if (netType === '3G' || (status.pingMs && status.pingMs < 500)) {
+    return {
+      label: `Sinal Instável (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+      color: 'bg-amber-50 text-amber-800 border-amber-200',
+      dotColor: 'bg-amber-500 animate-pulse',
+      isOnline: true,
+      diffText,
+      netType,
+      pingMs: status.pingMs
+    };
+  }
+
+  return {
+    label: `Conexão Lenta (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+    color: 'bg-orange-50 text-orange-800 border-orange-200',
+    dotColor: 'bg-orange-500',
+    isOnline: true,
+    diffText,
+    netType,
+    pingMs: status.pingMs
+  };
+}
+
 interface RegistrationViewProps {
   userRole?: UserRole;
   userProfile?: UserProfile;
@@ -54,13 +133,13 @@ interface RegistrationViewProps {
 export default function RegistrationView({ userRole, userProfile }: RegistrationViewProps = {}) {
   const isAssistant = userRole === UserRole.ASSISTANT;
   const [activeTab, setActiveTab] = useState<'overview' | 'clients' | 'addresses' | 'techs' | 'cards' | 'equipments'>(() => {
-    if (userRole === UserRole.ASSISTANT) return 'equipments';
+    if (userRole === UserRole.ASSISTANT) return 'addresses';
     return 'overview';
   });
 
   useEffect(() => {
-    if (isAssistant && activeTab !== 'equipments') {
-      setActiveTab('equipments');
+    if (isAssistant && activeTab !== 'equipments' && activeTab !== 'addresses') {
+      setActiveTab('addresses');
     }
   }, [isAssistant, activeTab]);
   const [clients, setClients] = useState<Client[]>([]);
@@ -74,6 +153,24 @@ export default function RegistrationView({ userRole, userProfile }: Registration
   const [loading, setLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+
+  // Estados da Telemetria de Conexão dos Técnicos
+  const [techConnections, setTechConnections] = useState<Record<string, TechnicianConnectionStatus>>({});
+  const [testingPingTech, setTestingPingTech] = useState<string | null>(null);
+  const [selectedTechTelemetry, setSelectedTechTelemetry] = useState<{ tech: Technician; conn?: TechnicianConnectionStatus } | null>(null);
+
+  useEffect(() => {
+    const unsubscribe = dataService.subscribeTechnicianConnectionStatuses((statuses) => {
+      const map: Record<string, TechnicianConnectionStatus> = {};
+      statuses.forEach(s => {
+        if (s.technicianId) {
+          map[s.technicianId.toUpperCase()] = s;
+        }
+      });
+      setTechConnections(map);
+    });
+    return () => unsubscribe();
+  }, []);
 
   const [confirmModal, setConfirmModal] = useState<{
     id: string;
@@ -572,20 +669,12 @@ export default function RegistrationView({ userRole, userProfile }: Registration
     setIsSubmitting(true);
     setMessage(null);
     try {
-      // 1. Obter número máximo de ID existente para continuar a contagem e filtrar os equipamentos já existentes daquele endereço
-      const allSnapshot = await getDocs(collection(db, 'equipments'));
-      let maxNum = 0;
-      const docsToDelete: any[] = [];
-
-      allSnapshot.docs.forEach(doc => {
-        const num = parseInt(doc.id, 10);
-        if (!isNaN(num) && num > maxNum) {
-          maxNum = num;
-        }
-        if (doc.data().addressId === selectedAddressForEquip) {
-          docsToDelete.push(doc);
-        }
-      });
+      // 1. Obter número máximo de ID existente sem scan de todo o banco e buscar apenas os equipamentos daquele endereço
+      const [maxNum, addressEquipsSnap] = await Promise.all([
+        dataService.getMaxEquipmentNumber(),
+        getDocs(query(collection(db, 'equipments'), where('addressId', '==', selectedAddressForEquip)))
+      ]);
+      const docsToDelete: any[] = addressEquipsSnap.docs;
 
       // 2. Excluir todos os equipamentos já existentes daquele endereço (limite de 400 por batch)
       if (docsToDelete.length > 0) {
@@ -615,6 +704,9 @@ export default function RegistrationView({ userRole, userProfile }: Registration
             brand: eq.brand,
             btus: eq.btus,
             id: nextId,
+            status: 'active',
+            active: true,
+            isDeactivated: false,
             createdAt: serverTimestamp()
           });
           currentIdNum++;
@@ -624,6 +716,20 @@ export default function RegistrationView({ userRole, userProfile }: Registration
 
       // 2. Sincronizar o contador de máquinas do endereço
       await dataService.syncAddressMachinesCount(selectedAddressForEquip);
+
+      // Limpa cache de equipamentos para garantir busca atualizada
+      dataService.clearCache('equipments_');
+
+      // Busca e atualiza a lista de equipamentos do endereço na UI de forma imediata
+      const freshEquips = await dataService.getEquipments(selectedAddressForEquip, true);
+      if (freshEquips && Array.isArray(freshEquips)) {
+        setEquipments(prev => {
+          const map = new Map<string, Equipment>();
+          prev.forEach(e => map.set(e.id, e));
+          freshEquips.forEach(e => map.set(e.id, e));
+          return Array.from(map.values());
+        });
+      }
 
       // 3. Recarregar todos os dados na UI
       await loadData();
@@ -661,6 +767,39 @@ export default function RegistrationView({ userRole, userProfile }: Registration
       return () => clearTimeout(timer);
     }
   }, [message]);
+
+  // Sincronização e busca reativa de equipamentos ao selecionar endereço ou cliente
+  useEffect(() => {
+    if (activeTab === 'equipments') {
+      if (selectedAddressForEquip) {
+        dataService.getEquipments(selectedAddressForEquip, true).then(addrEqs => {
+          if (addrEqs && Array.isArray(addrEqs)) {
+            setEquipments(prev => {
+              const map = new Map<string, Equipment>();
+              prev.forEach(e => map.set(e.id, e));
+              addrEqs.forEach(e => map.set(e.id, e));
+              return Array.from(map.values());
+            });
+          }
+        }).catch(err => console.warn('Erro ao carregar equipamentos do endereço:', err));
+      } else if (selectedClientForEquip) {
+        const clientAddrs = addresses.filter(a => a.clientId === selectedClientForEquip);
+        if (clientAddrs.length > 0) {
+          Promise.all(clientAddrs.map(a => dataService.getEquipments(a.id, true)))
+            .then(results => {
+              const flat = results.flat();
+              setEquipments(prev => {
+                const map = new Map<string, Equipment>();
+                prev.forEach(e => map.set(e.id, e));
+                flat.forEach(e => map.set(e.id, e));
+                return Array.from(map.values());
+              });
+            })
+            .catch(err => console.warn('Erro ao carregar equipamentos das filiais do cliente:', err));
+        }
+      }
+    }
+  }, [selectedAddressForEquip, selectedClientForEquip, activeTab, addresses]);
 
   const handleImportSEB = async () => {
     setIsSubmitting(true);
@@ -736,15 +875,8 @@ export default function RegistrationView({ userRole, userProfile }: Registration
         return;
       }
 
-      // 4. Batch set dos 113 equipamentos para evitar race conditions de ID
-      const allSnapshot = await getDocs(collection(db, 'equipments'));
-      let maxNum = 0;
-      allSnapshot.docs.forEach(doc => {
-        const num = parseInt(doc.id, 10);
-        if (!isNaN(num) && num > maxNum) {
-          maxNum = num;
-        }
-      });
+      // 4. Batch set dos 113 equipamentos para evitar race conditions de ID sem scan de todo o banco
+      const maxNum = await dataService.getMaxEquipmentNumber();
 
       const batch = writeBatch(db);
       let currentIdNum = maxNum + 1;
@@ -798,7 +930,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
         dataService.getRouteConfigs().catch(err => { console.error('Error loading route configs:', err); return []; }),
         dataService.getInactiveClients().catch(err => { console.error('Error loading inactive clients:', err); return []; }),
         dataService.getTravelCards().catch(err => { console.error('Error loading travel cards:', err); return []; }),
-        dataService.getEquipments().catch(err => { console.error('Error loading equipments:', err); return []; })
+        dataService.getEquipments(selectedAddressForEquip || undefined).catch(err => { console.error('Error loading equipments:', err); return []; })
       ]);
       setClients(c);
       setAddresses(a);
@@ -806,7 +938,13 @@ export default function RegistrationView({ userRole, userProfile }: Registration
       setRouteConfigs(rc);
       setInactiveClients(ic);
       setCards(cd || []);
-      setEquipments(eq || []);
+      
+      setEquipments(prev => {
+        const map = new Map<string, Equipment>();
+        prev.forEach(e => map.set(e.id, e));
+        (eq || []).forEach(e => map.set(e.id, e));
+        return Array.from(map.values());
+      });
     } catch (error) {
       console.error('Error loading data:', error);
     } finally {
@@ -865,10 +1003,11 @@ export default function RegistrationView({ userRole, userProfile }: Registration
     setIsSubmitting(true);
     setMessage(null);
     try {
+      const targetAddressId = selectedAddressForEquip;
       // REGRA: O campo patrimônio é o ÚNICO que pode ficar em branco no cadastro de uma máquina,
       // pois nem toda máquina possui numeração de patrimônio.
       const equipData = {
-        addressId: selectedAddressForEquip,
+        addressId: targetAddressId,
         name: newEquipName.trim(),
         sector: newEquipSector.trim(),
         patrimony: newEquipPatrimony.trim(), // Aceita vazio se não possuir numeração
@@ -885,6 +1024,20 @@ export default function RegistrationView({ userRole, userProfile }: Registration
         setMessage({ text: 'Equipamento cadastrado com sucesso!', type: 'success' });
       }
       handleCancelEdit();
+
+      // Recarrega e mescla imediatamente os equipamentos do endereço para atualização instantânea da UI
+      if (targetAddressId) {
+        dataService.clearCache('equipments_');
+        const freshEquips = await dataService.getEquipments(targetAddressId, true);
+        if (freshEquips && Array.isArray(freshEquips)) {
+          setEquipments(prev => {
+            const map = new Map<string, Equipment>();
+            prev.forEach(e => map.set(e.id, e));
+            freshEquips.forEach(e => map.set(e.id, e));
+            return Array.from(map.values());
+          });
+        }
+      }
       await loadData();
     } catch (error: any) {
       console.error('Error adding equipment:', error);
@@ -1021,11 +1174,12 @@ export default function RegistrationView({ userRole, userProfile }: Registration
     setIsSubmitting(true);
     setMessage(null);
     try {
+      const canonicalRoute = getCanonicalRouteName(newAddrRoute, routeConfigs);
       if (editingId) {
         await dataService.updateAddress(editingId, {
           street: newAddrStreet.trim().toUpperCase(),
           clientId: newAddrClientId,
-          route: newAddrRoute.trim().toUpperCase(),
+          route: canonicalRoute,
           totalMachines: newAddrMachines,
           coordinates: newAddrCoordinates.trim().toUpperCase(),
           cep: newAddrCep.trim().toUpperCase(),
@@ -1039,7 +1193,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
         await dataService.addAddress({ 
           street: newAddrStreet.trim().toUpperCase(), 
           clientId: newAddrClientId, 
-          route: newAddrRoute.trim().toUpperCase(), 
+          route: canonicalRoute, 
           totalMachines: newAddrMachines,
           coordinates: newAddrCoordinates.trim().toUpperCase(),
           cep: newAddrCep.trim().toUpperCase(),
@@ -1261,7 +1415,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
     setEditingId(addr.id);
     setActiveTab('addresses');
     setNewAddrStreet(addr.street);
-    setNewAddrRoute(addr.route);
+    setNewAddrRoute(addr.route ? getCanonicalRouteName(addr.route, routeConfigs) : '');
     setNewAddrClientId(addr.clientId);
     setNewAddrMachines(addr.totalMachines);
     setNewAddrCoordinates(addr.coordinates || '');
@@ -1343,10 +1497,34 @@ export default function RegistrationView({ userRole, userProfile }: Registration
 
   const totalMachinesCount = addresses.reduce((acc, curr) => acc + (curr.totalMachines || 0), 0);
 
-  const availableRoutes = Array.from(new Set([
-    ...routeConfigs.map(rc => rc.id || rc.routeName),
-    ...addresses.map(a => a.route)
-  ])).filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR', { numeric: true }));
+  const availableRoutes = useMemo(() => {
+    const map = new Map<string, string>();
+    
+    // 1. Prioriza as configurações oficiais de rota cadastradas
+    routeConfigs.forEach(rc => {
+      const raw = rc.routeName || rc.id;
+      if (raw && raw.trim()) {
+        const canonical = getCanonicalRouteName(raw, routeConfigs);
+        const key = normalizeRouteKey(canonical);
+        if (canonical && canonical !== 'Sem Rota' && !map.has(key)) {
+          map.set(key, canonical);
+        }
+      }
+    });
+
+    // 2. Inclui rotas que existam nos endereços caso não estejam no routeConfigs
+    addresses.forEach(a => {
+      if (a.route && a.route.trim()) {
+        const canonical = getCanonicalRouteName(a.route, routeConfigs);
+        const key = normalizeRouteKey(canonical);
+        if (canonical && canonical !== 'Sem Rota' && !map.has(key)) {
+          map.set(key, canonical);
+        }
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b, 'pt-BR', { numeric: true }));
+  }, [routeConfigs, addresses]);
 
   return (
     <div className="flex flex-col h-full gap-6">
@@ -1410,7 +1588,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
           <button 
             onClick={() => { if (!isAssistant) { setActiveTab('overview'); handleCancelEdit(); } }}
             disabled={isAssistant}
-            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
+            title={isAssistant ? "Acesso disponível para Endereços e Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
               activeTab === 'overview' ? "bg-gray-900 text-white shadow-lg shadow-gray-200" : "text-gray-500 hover:bg-gray-50",
@@ -1423,7 +1601,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
           <button 
             onClick={() => { if (!isAssistant) { setActiveTab('clients'); handleCancelEdit(); } }}
             disabled={isAssistant}
-            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
+            title={isAssistant ? "Acesso disponível para Endereços e Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
               activeTab === 'clients' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
@@ -1434,13 +1612,10 @@ export default function RegistrationView({ userRole, userProfile }: Registration
             Clientes
           </button>
           <button 
-            onClick={() => { if (!isAssistant) { setActiveTab('addresses'); handleCancelEdit(); } }}
-            disabled={isAssistant}
-            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
+            onClick={() => { setActiveTab('addresses'); handleCancelEdit(); }}
             className={cn(
-              "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
-              activeTab === 'addresses' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
-              isAssistant && "opacity-35 cursor-not-allowed hover:bg-transparent text-gray-300"
+              "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2 cursor-pointer",
+              activeTab === 'addresses' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50"
             )}
           >
             <MapPin className="w-4 h-4" />
@@ -1449,7 +1624,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
           <button 
             onClick={() => { if (!isAssistant) { setActiveTab('techs'); handleCancelEdit(); } }}
             disabled={isAssistant}
-            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
+            title={isAssistant ? "Acesso disponível para Endereços e Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
               activeTab === 'techs' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
@@ -1462,7 +1637,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
           <button 
             onClick={() => { if (!isAssistant) { setActiveTab('cards'); handleCancelEdit(); } }}
             disabled={isAssistant}
-            title={isAssistant ? "Acesso restrito apenas para Equipamentos" : undefined}
+            title={isAssistant ? "Acesso disponível para Endereços e Equipamentos" : undefined}
             className={cn(
               "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
               activeTab === 'cards' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50",
@@ -1475,7 +1650,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
           <button 
             onClick={() => { setActiveTab('equipments'); handleCancelEdit(); }}
             className={cn(
-              "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2",
+              "px-6 py-2.5 rounded-xl text-sm font-semibold transition-all flex items-center gap-2 cursor-pointer",
               activeTab === 'equipments' ? "bg-blue-600 text-white shadow-lg shadow-blue-200" : "text-gray-500 hover:bg-gray-50"
             )}
           >
@@ -1627,8 +1802,8 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                   {availableRoutes.map(route => (
                     <option key={route} value={route}>{route}</option>
                   ))}
-                  {/* Se o usuário estiver editando e a rota não estiver na lista (improvável mas possível), mostrar ela */}
-                  {newAddrRoute && !availableRoutes.includes(newAddrRoute) && (
+                  {/* Se o usuário estiver editando e a rota gravada tiver grafia legada diferente, mostrar a opção legada preservando o valor */}
+                  {newAddrRoute && !availableRoutes.some(r => normalizeRouteKey(r) === normalizeRouteKey(newAddrRoute)) && (
                     <option value={newAddrRoute}>{newAddrRoute}</option>
                   )}
                 </select>
@@ -2395,45 +2570,117 @@ export default function RegistrationView({ userRole, userProfile }: Registration
               );
             })}
 
-            {activeTab === 'techs' && filteredTechs.map(tech => (
-              <div key={tech.id} className="p-4 flex items-center justify-between hover:bg-gray-50 bg-white transition-all group">
-                <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 bg-purple-50 rounded-lg flex items-center justify-center text-purple-600">
-                    <User className="w-5 h-5" />
+            {activeTab === 'techs' && filteredTechs.map(tech => {
+              const normName = normalizeAddressText(tech.name);
+              const normFull = normalizeAddressText(tech.fullName || '');
+              const pin = (tech.pin || '').trim().toUpperCase();
+
+              const connStatus = Object.values(techConnections).find(c => {
+                if (!c) return false;
+                const cId = (c.technicianId || '').trim().toUpperCase();
+                const cName = (c.technicianName || '').trim().toUpperCase();
+                const normCId = normalizeAddressText(cId);
+                const normCName = normalizeAddressText(cName);
+
+                return (
+                  (pin && (cId === pin || normCId === pin)) ||
+                  (normName && (normCId === normName || normCName === normName)) ||
+                  (normFull && (normCId === normFull || normCName === normFull)) ||
+                  (tech.id && cId === tech.id.toUpperCase())
+                );
+              });
+
+              const badge = getTechnicianConnectionBadgeInfo(connStatus);
+
+              return (
+                <div key={tech.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-gray-50 bg-white transition-all group border-b border-gray-100 last:border-none">
+                  <div className="flex items-start gap-4">
+                    <div className="w-10 h-10 bg-purple-50 rounded-lg flex items-center justify-center text-purple-600 shrink-0 mt-0.5">
+                      <User className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-bold text-gray-900">{tech.name}</h4>
+                        {tech.role && <span className="text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">{tech.role}</span>}
+                      </div>
+                      {tech.fullName && <p className="text-xs font-semibold text-gray-700 mt-0.5">{tech.fullName}</p>}
+                      <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 font-medium mt-1">
+                        {tech.phone && <span className="flex items-center gap-1 text-slate-600">📱 {tech.phone}</span>}
+                        {tech.cpf && <span className="flex items-center gap-1 text-slate-500">📄 CPF: {tech.cpf}</span>}
+                        {tech.pin ? (
+                          <span className="text-xs text-gray-500 font-mono">PIN: <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{tech.pin}</span></span>
+                        ) : (
+                          <span className="text-xs text-amber-600 italic">Sem PIN</span>
+                        )}
+                      </div>
+
+                      {/* Badge de Telemetria e Botão de Teste ao Vivo */}
+                      <div className="flex flex-wrap items-center gap-2 mt-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedTechTelemetry({ tech, conn: connStatus })}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all cursor-pointer shadow-2xs hover:shadow-xs",
+                            badge.color
+                          )}
+                          title="Clique para ver o relatório completo de telemetria da rede deste técnico"
+                        >
+                          <span className={cn("w-2 h-2 rounded-full shrink-0", badge.dotColor)} />
+                          <span>{badge.label}</span>
+                          <span className="text-[10px] opacity-75 font-normal ml-0.5">• {badge.diffText}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={testingPingTech === tech.id}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            setTestingPingTech(tech.id);
+                            
+                            const secondaryKeys = [tech.pin, tech.id, tech.fullName].filter(Boolean) as string[];
+                            await dataService.requestTechnicianPing(tech.name, secondaryKeys);
+                            
+                            setTimeout(() => {
+                              setTestingPingTech(null);
+                            }, 3500);
+                          }}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-extrabold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition-all cursor-pointer shadow-2xs disabled:opacity-50"
+                          title="Envia uma solicitação de ping instantâneo em tempo real para o PWA do técnico"
+                        >
+                          {testingPingTech === tech.id ? (
+                            <>
+                              <div className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin shrink-0" />
+                              <span>Solicitando Ping ao Vivo...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Activity className="w-3.5 h-3.5 text-blue-600" />
+                              <span>⚡ Testar Conexão</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h4 className="font-bold text-gray-900">{tech.name}</h4>
-                      {tech.role && <span className="text-[10px] font-bold text-purple-700 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">{tech.role}</span>}
-                    </div>
-                    {tech.fullName && <p className="text-xs font-semibold text-gray-700 mt-0.5">{tech.fullName}</p>}
-                    <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 font-medium mt-1">
-                      {tech.phone && <span className="flex items-center gap-1 text-slate-600">📱 {tech.phone}</span>}
-                      {tech.cpf && <span className="flex items-center gap-1 text-slate-500">📄 CPF: {tech.cpf}</span>}
-                      {tech.pin ? (
-                        <span className="text-xs text-gray-500 font-mono">PIN: <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">{tech.pin}</span></span>
-                      ) : (
-                        <span className="text-xs text-amber-600 italic">Sem PIN</span>
-                      )}
-                    </div>
+                  <div className="flex items-center gap-2 sm:opacity-0 group-hover:opacity-100 transition-all shrink-0 self-end sm:self-center">
+                    <button 
+                      onClick={() => startEditTech(tech)}
+                      className="p-2 hover:bg-gray-100 text-gray-400 hover:text-blue-600 rounded-lg transition-all"
+                      title="Editar Técnico"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => startDeleteTech(tech)}
+                      className="p-2 hover:bg-gray-100 text-gray-400 hover:text-red-600 rounded-lg transition-all"
+                      title="Excluir Técnico"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-all">
-                  <button 
-                    onClick={() => startEditTech(tech)}
-                    className="p-2 hover:bg-white hover:shadow text-gray-400 hover:text-blue-600 rounded-lg transition-all"
-                  >
-                    <Edit3 className="w-4 h-4" />
-                  </button>
-                  <button 
-                    onClick={() => startDeleteTech(tech)}
-                    className="p-2 hover:bg-white hover:shadow text-gray-400 hover:text-red-600 rounded-lg transition-all"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             {activeTab === 'cards' && filteredCards.map(card => (
               <div key={card.id} className="p-4 flex items-center justify-between hover:bg-gray-50 bg-white transition-all group">
@@ -2649,7 +2896,20 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                 <div className="divide-y divide-gray-100">
                   {equipments
                     .filter(eq => {
-                      if (selectedAddressForEquip && eq.addressId !== selectedAddressForEquip) return false;
+                      if (selectedAddressForEquip) {
+                        const isDirectMatch = eq.addressId === selectedAddressForEquip;
+                        if (!isDirectMatch) {
+                          const selectedAddr = addresses.find(a => a.id === selectedAddressForEquip);
+                          const eqAddr = addresses.find(a => a.id === eq.addressId);
+                          const isSameStreet = Boolean(
+                            selectedAddr && 
+                            eqAddr && 
+                            selectedAddr.clientId === eqAddr.clientId && 
+                            normalizeAddressText(selectedAddr.street) === normalizeAddressText(eqAddr.street)
+                          );
+                          if (!isSameStreet) return false;
+                        }
+                      }
                       if (selectedClientForEquip && !selectedAddressForEquip) {
                         const addr = addresses.find(a => a.id === eq.addressId);
                         if (!addr || addr.clientId !== selectedClientForEquip) return false;
@@ -2732,6 +2992,134 @@ export default function RegistrationView({ userRole, userProfile }: Registration
           </div>
         </div>
       </div>
+
+      {/* Modal de Relatório de Telemetria de Conexão do Técnico */}
+      {selectedTechTelemetry && (() => {
+        const { tech, conn } = selectedTechTelemetry;
+        const badge = getTechnicianConnectionBadgeInfo(conn);
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col">
+              <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white font-bold">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm leading-tight flex items-center gap-2">
+                      Diagnóstico de Conexão em Tempo Real
+                    </h3>
+                    <p className="text-xs text-slate-300 font-medium mt-0.5">
+                      Técnico: <strong className="text-white font-bold">{tech.name}</strong> {tech.fullName ? `(${tech.fullName})` : ''}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedTechTelemetry(null)}
+                  className="p-1.5 hover:bg-white/10 rounded-lg text-slate-400 hover:text-white transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                {/* Status Principal */}
+                <div className={cn("p-4 rounded-xl border flex items-center justify-between gap-3", badge.color)}>
+                  <div className="flex items-center gap-3">
+                    <span className={cn("w-3 h-3 rounded-full shrink-0", badge.dotColor)} />
+                    <div>
+                      <h4 className="font-extrabold text-sm">{badge.label}</h4>
+                      <p className="text-xs opacity-80 mt-0.5 font-medium">{badge.diffText}</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={testingPingTech === tech.id}
+                    onClick={async () => {
+                      setTestingPingTech(tech.id);
+                      await dataService.requestTechnicianPing(tech.name);
+                      setTimeout(() => setTestingPingTech(null), 3000);
+                    }}
+                    className="px-3 py-1.5 bg-white text-slate-800 font-extrabold text-xs rounded-lg border shadow-2xs hover:bg-slate-50 transition-all shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {testingPingTech === tech.id ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-slate-800 border-t-transparent rounded-full animate-spin" />
+                        <span>Medindo...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Activity className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Medir Agora</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Grid de Métricas de Conexão */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">Status da Rede</span>
+                    <span className="text-xs font-bold text-slate-800 mt-1 flex items-center gap-1.5">
+                      {conn?.isOnline ? <Wifi className="w-4 h-4 text-emerald-600" /> : <WifiOff className="w-4 h-4 text-red-500" />}
+                      {conn?.isOnline ? 'On-line (Conectado)' : 'Off-line (Sem Sinal)'}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">Tecnologia de Sinal</span>
+                    <span className="text-xs font-bold text-slate-800 mt-1 flex items-center gap-1.5">
+                      <Signal className="w-4 h-4 text-blue-600" />
+                      {(conn?.effectiveType || 'Desconhecido').toUpperCase()}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">Latência / Ping Servidor</span>
+                    <span className="text-xs font-bold text-slate-800 mt-1 flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 text-purple-600" />
+                      {conn?.pingMs !== undefined ? `${conn.pingMs} ms` : (conn?.rttMs ? `~${conn.rttMs} ms` : 'Não medido')}
+                    </span>
+                  </div>
+
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">Fila Offline Pendente</span>
+                    <span className="text-xs font-bold text-slate-800 mt-1 flex items-center gap-1.5">
+                      <Box className="w-4 h-4 text-amber-600" />
+                      {conn?.pendingOfflineCount !== undefined ? `${conn.pendingOfflineCount} registros` : '0 pendências'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Detalhes de Hardware / Dispositivo */}
+                {conn?.deviceInfo && (
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                    <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block mb-1">Dispositivo e Plataforma</span>
+                    <p className="text-xs font-medium text-slate-600 truncate flex items-center gap-1.5">
+                      <Smartphone className="w-4 h-4 text-slate-500 shrink-0" />
+                      {conn.deviceInfo}
+                    </p>
+                  </div>
+                )}
+
+                <div className="p-3 bg-blue-50/70 border border-blue-100 rounded-xl text-xs text-blue-900 leading-relaxed">
+                  💡 <strong>Análise do Sistema</strong>: Se a latência estiver alta (&gt; 400ms) ou o sinal for 3G/2G, eventuais atrasos do técnico ao enviar planilhas ou fotos se devem à oscilação da operadora móvel no local do atendimento. O app PWA continua funcionando normalmente salvando em modo offline.
+                </div>
+              </div>
+
+              <div className="p-4 bg-slate-50 border-t border-slate-200 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setSelectedTechTelemetry(null)}
+                  className="px-5 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs uppercase rounded-xl transition-all shadow-sm cursor-pointer"
+                >
+                  Fechar Diagnóstico
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Confirmation Modal */}
       {confirmModal && (

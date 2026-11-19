@@ -63,7 +63,7 @@ import { format, parseISO } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import ExcelJS from 'exceljs';
 import { cn, generateInitialOsNumber, matchesTechnician } from '../lib/utils';
-import { buildTechnicianIndex, normalizeTechString } from '../lib/technicianIndex';
+import { buildTechnicianIndex, normalizeTechString, isStaffName } from '../lib/technicianIndex';
 
 const formatDateSafe = (dateStr: string | null | undefined, formatStr: string = 'dd/MM/yyyy'): string => {
   if (!dateStr) return '';
@@ -335,6 +335,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   const [updatingOrder, setUpdatingOrder] = useState(false);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
+  const [isTabletMode, setIsTabletMode] = useState(() => {
+    const isOffice = userRole === UserRole.ADMIN || userRole === UserRole.ASSISTANT;
+    return !isOffice;
+  });
+  const [visibleDemandLimit, setVisibleDemandLimit] = useState<number>(80);
+  const lastSyncTimestampRef = useRef<number>(Date.now());
+  const loadedItineraryKeyRef = useRef<string>('');
+  const loadedApprovedRef = useRef<boolean>(false);
 
   // Monitorar se a internet caiu ou voltou para dar visibilidade de salvamento offline ao técnico
   useEffect(() => {
@@ -348,6 +356,86 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
+
+  // Telemetria passiva e contínua de conexão restrita ao modo Tablet/Técnico (evita leituras e escritas desnecessárias no modo Administrativo)
+  useEffect(() => {
+    if (!isTabletMode && userRole !== UserRole.TECHNICIAN) return;
+    if (!selectedTech || !selectedTech.trim()) return;
+    const currentTech = selectedTech.trim().toUpperCase();
+
+    const techObj = techs.find(t => t.name.toUpperCase() === currentTech || t.id.toUpperCase() === currentTech);
+    const techPin = techObj?.pin;
+
+    const runTechHeartbeat = async () => {
+      try {
+        const isOnline = navigator.onLine;
+        const navConn = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
+        
+        let effectiveType = navConn?.effectiveType || (isOnline ? '4g' : 'offline');
+        let rttMs = navConn?.rtt;
+        let downlinkMbps = navConn?.downlink;
+
+        let pingMs: number | undefined = undefined;
+        if (isOnline) {
+          const startTime = performance.now();
+          try {
+            await fetch('/api/equipments/cache-clear', { method: 'POST', cache: 'no-store' });
+            pingMs = Math.round(performance.now() - startTime);
+          } catch {
+            pingMs = undefined;
+          }
+        }
+
+        let pendingOfflineCount = 0;
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            const queueStr = localStorage.getItem('lefrio_offline_queue') || '[]';
+            const parsedQueue = JSON.parse(queueStr);
+            if (Array.isArray(parsedQueue)) pendingOfflineCount = parsedQueue.length;
+          } catch {}
+        }
+
+        await dataService.sendTechnicianConnectionHeartbeat({
+          technicianId: currentTech,
+          technicianName: techObj?.name || currentTech,
+          technicianPin: techPin,
+          isOnline,
+          effectiveType,
+          rttMs,
+          downlinkMbps,
+          pingMs,
+          lastSeenAt: new Date().toISOString(),
+          pendingOfflineCount,
+          deviceInfo: `${navigator.platform || ''} • Tablet PWA`
+        });
+      } catch (err) {
+        console.warn('Erro ao atualizar heartbeat de conexão do técnico no tablet:', err);
+      }
+    };
+
+    runTechHeartbeat();
+    const interval = setInterval(runTechHeartbeat, 30000);
+
+    const unsubscribePing = dataService.subscribeTechnicianConnectionStatuses((statuses) => {
+      const myStatus = statuses.find(s => {
+        if (!s) return false;
+        const cId = (s.technicianId || '').toUpperCase();
+        const cName = (s.technicianName || '').toUpperCase();
+        return cId === currentTech || cName === currentTech || (techPin && cId === techPin.toUpperCase());
+      });
+      if (myStatus && myStatus.pingRequestedAt) {
+        const reqTime = new Date(myStatus.pingRequestedAt).getTime();
+        if (Date.now() - reqTime < 15000) {
+          runTechHeartbeat();
+        }
+      }
+    });
+
+    return () => {
+      clearInterval(interval);
+      unsubscribePing();
+    };
+  }, [selectedTech, techs, isTabletMode, userRole]);
 
   // NEW: Checklist and Signatures states
   const [activeChecklistRecord, setActiveChecklistRecord] = useState<MaintenanceRecord | null>(null);
@@ -558,11 +646,6 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       }
     }
   }, [userRole, userProfile, techs, authTech]);
-
-  const [isTabletMode, setIsTabletMode] = useState(() => {
-    const isOffice = userRole === UserRole.ADMIN || userRole === UserRole.ASSISTANT;
-    return !isOffice;
-  });
 
   // Ref para armazenar em cache a última coordenada obtida de forma assíncrona/offline
   const lastCoordinatesRef = useRef<{ latitude: number; longitude: number; accuracy: number; timestamp: number } | null>(
@@ -848,14 +931,40 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     localStorage.setItem('tech_demand_selected_week', String(selectedWeek));
   }, [selectedWeek]);
 
-  // Load monthly records whenever the month state or itinerary date changes
+  // Resetar paginação visual da tabela de Demanda Semanal ao trocar filtros
+  useEffect(() => {
+    setVisibleDemandLimit(80);
+  }, [month, selectedTech, selectedWeek, executionFilter, pautaSearchTerm]);
+
+  // Carrega os dados base do mês selecionado ao abrir a página ou trocar de mês
   useEffect(() => {
     loadData();
-  }, [month, itineraryDate]);
+  }, [month]);
 
-  // Assinatura em tempo real para o Roteiro do Dia: reflete no mesmo segundo no celular qualquer alteração no cronograma
+  // Carrega dados específicos do Roteiro Diário apenas quando a aba Roteiro Diário ou o modo Tablet estiver ativo
+  useEffect(() => {
+    if (activeTab !== 'itinerary' && !isTabletMode && userRole !== UserRole.TECHNICIAN) return;
+    loadItinerarySpecificData();
+  }, [activeTab, itineraryDate, isTabletMode, userRole, selectedTech, authTech]);
+
+  // Carrega o histórico de aprovados apenas quando o usuário abre a aba Aprovação
+  useEffect(() => {
+    if (activeTab !== 'approval') return;
+    if (loadedApprovedRef.current && recentApprovedRecords.length > 0) return;
+    loadedApprovedRef.current = true;
+    dataService.getRecentApprovedRecords(30)
+      .then(appvd => {
+        if (appvd && appvd.length > 0) {
+          setRecentApprovedRecords(appvd);
+        }
+      })
+      .catch(err => console.error('Error loading approved records on demand:', err));
+  }, [activeTab]);
+
+  // Assinatura em tempo real para o Roteiro do Dia: ativa somente na aba Roteiro Diário ou modo Tablet/Técnico
   useEffect(() => {
     if (!itineraryDate) return;
+    if (activeTab !== 'itinerary' && !isTabletMode && userRole !== UserRole.TECHNICIAN) return;
 
     const unsubscribe = dataService.subscribeRecordsByPlannedDate(itineraryDate, (realtimeRecords) => {
       if (realtimeRecords && realtimeRecords.length > 0) {
@@ -870,53 +979,21 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     return () => {
       unsubscribe();
     };
-  }, [itineraryDate]);
+  }, [itineraryDate, activeTab, isTabletMode, userRole]);
 
-  // Sincronização automática de equipamentos caso novos equipamentos sejam cadastrados para endereços do roteiro
+  // Sincronização automática com cooldown de 5 minutos quando o usuário volta ao app (evita recarregar tudo ao alternar janelas)
   useEffect(() => {
-    if (!records || records.length === 0) return;
-    const addressIdsToRefresh = new Set<string>();
-
-    for (const rec of records) {
-      if (!rec.addressId) continue;
-      const addrId = rec.addressId;
-      if (refreshedAddressIdsRef.current.has(addrId)) continue;
-
-      const inMemoryCount = equipments.filter(eq => eq && eq.addressId === addrId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated).length;
-      const liveAddr = addresses.find(a => a && a.id === addrId) || (rec as any).address;
-      const expectedCount = liveAddr?.totalMachines || 0;
-      
-      if (expectedCount > inMemoryCount) {
-        addressIdsToRefresh.add(addrId);
-      }
-    }
-
-    if (addressIdsToRefresh.size > 0) {
-      Array.from(addressIdsToRefresh).forEach(aid => refreshedAddressIdsRef.current.add(aid));
-
-      Promise.all(
-        Array.from(addressIdsToRefresh).map(aid => 
-          dataService.getEquipments(aid, false).catch(() => [])
-        )
-      ).then(results => {
-        const freshList = results.flat().filter(e => e && e.status !== 'deactivated' && e.active !== false && !e.isDeactivated);
-        if (freshList.length > 0) {
-          setEquipments(prev => {
-            const map = new Map<string, Equipment>();
-            prev.forEach(e => { if (e?.id) map.set(e.id, e); });
-            freshList.forEach(e => { if (e?.id) map.set(e.id, e); });
-            return Array.from(map.values());
-          });
-        }
-      });
-    }
-  }, [records]);
-
-  // Sincronização automática quando o técnico volta ao app / desbloqueia o celular
-  useEffect(() => {
+    const SYNC_COOLDOWN_MS = 5 * 60 * 1000;
     const handleSyncOnVisible = () => {
       if (document.visibilityState === 'visible') {
-        loadData(true);
+        const now = Date.now();
+        if (now - lastSyncTimestampRef.current >= SYNC_COOLDOWN_MS) {
+          lastSyncTimestampRef.current = now;
+          loadData(false);
+          if (activeTab === 'itinerary' || isTabletMode || userRole === UserRole.TECHNICIAN) {
+            loadItinerarySpecificData(true);
+          }
+        }
       }
     };
     window.addEventListener('focus', handleSyncOnVisible);
@@ -925,90 +1002,131 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       window.removeEventListener('focus', handleSyncOnVisible);
       document.removeEventListener('visibilitychange', handleSyncOnVisible);
     };
-  }, [month, itineraryDate]);
+  }, [month, itineraryDate, activeTab, isTabletMode, userRole]);
 
-  const loadData = async (forceBypassCache: boolean = false) => {
-    setLoading(true);
-    if (forceBypassCache) {
-      dataService.clearCache('records_');
-    }
+  const loadItinerarySpecificData = async (forceRefresh: boolean = false) => {
+    const itineraryMonth = itineraryDate ? itineraryDate.substring(0, 7) : month;
+    const techKey = (isTabletMode && authTech ? (authTech.name || authTech.fullName) : selectedTech || '').trim();
+    const requestKey = `${itineraryDate}_${techKey}_${itineraryMonth}`;
+    if (!forceRefresh && loadedItineraryKeyRef.current === requestKey) return;
+    loadedItineraryKeyRef.current = requestKey;
+
     try {
-      const itineraryMonth = itineraryDate ? itineraryDate.substring(0, 7) : month;
-      const parts = itineraryMonth.split('-').map(Number);
-      const iy = parts[0] || 2026;
-      const im = parts[1] || 10;
-      const prevItineraryMonth = format(new Date(iy, im - 2, 1), 'yyyy-MM');
-      const nextItineraryMonth = format(new Date(iy, im, 1), 'yyyy-MM');
-
-      const monthsToFetch = new Set<string>([month, itineraryMonth, prevItineraryMonth, nextItineraryMonth]);
-
-      // Busca dados com sincronização dedicada para o roteiro do técnico
-      const itineraryFetchPromise = fetch(`/api/tech-demand/itinerary?date=${itineraryDate || ''}&tech=${encodeURIComponent(activeTechFilter || '')}&month=${itineraryMonth}`)
+      const itineraryFetchPromise = fetch(`/api/tech-demand/itinerary?date=${itineraryDate || ''}&tech=${encodeURIComponent(techKey)}&month=${itineraryMonth}`)
         .then(r => r.json())
         .catch(err => { console.warn('[Itinerary API] Erro ao buscar roteiro otimizado:', err); return null; });
 
-      const [monthRecordsArrays, pre, appvd, a, c, t, eq, settings, rByDate, orders, apiItinerary, soSettings] = await Promise.all([
-        Promise.all(Array.from(monthsToFetch).map(m => 
-          dataService.getRecords(m, { lightweight: true }).catch(err => { console.error('Error loading records for month:', m, err); return []; })
-        )),
-        dataService.getPreCompletedRecords().catch(err => { console.error('Error loading pre-completed records:', err); return []; }),
-        dataService.getRecentApprovedRecords(30).catch(err => { console.error('Error loading approved records:', err); return []; }),
-        dataService.getAddresses().catch(err => { console.error('Error loading addresses:', err); return []; }),
-        dataService.getClients().catch(err => { console.error('Error loading clients:', err); return []; }),
-        dataService.getTechnicians().catch(err => { console.error('Error loading technicians:', err); return []; }),
-        dataService.getEquipments().catch(err => { console.error('Error loading equipments:', err); return []; }),
-        dataService.getDeviceSettings().catch(err => { console.error('Error loading device settings:', err); return null; }),
-        itineraryDate ? dataService.getRecordsByPlannedDate(itineraryDate).catch(err => { console.error('Error loading records by date:', err); return []; }) : Promise.resolve([]),
-        dataService.getServiceOrders().catch(err => { console.error('Error loading service orders:', err); return []; }),
-        itineraryFetchPromise,
-        dataService.getServiceOrderSettings().catch(err => { console.warn('Error loading service order settings:', err); return null; })
+      const [rByDate, orders, apiItinerary] = await Promise.all([
+        itineraryDate ? dataService.getRecordsByPlannedDate(itineraryDate).catch(() => []) : Promise.resolve([]),
+        dataService.getServiceOrders().catch(() => []),
+        itineraryFetchPromise
       ]);
-      
-      const flatMonthRecords = monthRecordsArrays.flat();
-      const apiRecords = apiItinerary?.success ? (apiItinerary.records || []) : [];
-      const allLoadedRecords = [...apiRecords, ...flatMonthRecords, ...(rByDate || []), ...(pre || []), ...(appvd || [])].filter(Boolean);
-      const { deduplicated } = dataService.deduplicateRecordsList(allLoadedRecords);
-      const combinedRecords = deduplicated;
 
-      // Mescla endereços e clientes trazidos da API de itinerário se não estiverem na lista principal
+      const apiRecords = apiItinerary?.success ? (apiItinerary.records || []) : [];
       const apiAddresses = apiItinerary?.success ? (apiItinerary.addresses || []) : [];
       const apiClients = apiItinerary?.success ? (apiItinerary.clients || []) : [];
       const apiOrders = apiItinerary?.success ? (apiItinerary.serviceOrders || []) : [];
       const apiTechs = apiItinerary?.success ? (apiItinerary.techs || []) : [];
       const apiEquipments = apiItinerary?.success ? (apiItinerary.equipments || []) : [];
 
-      const mergedAddressesMap = new Map<string, Address>();
-      (a || []).forEach((addr: Address) => { if (addr?.id) mergedAddressesMap.set(addr.id, addr); });
-      apiAddresses.forEach((addr: Address) => { if (addr?.id && !mergedAddressesMap.has(addr.id)) mergedAddressesMap.set(addr.id, addr); });
+      if (apiRecords.length > 0 || (rByDate && rByDate.length > 0)) {
+        setRecords(prev => {
+          const allLoaded = [...apiRecords, ...(rByDate || []), ...prev].filter(Boolean);
+          const { deduplicated } = dataService.deduplicateRecordsList(allLoaded);
+          return deduplicated;
+        });
+      }
 
-      const mergedClientsMap = new Map<string, Client>();
-      (c || []).forEach((cli: Client) => { if (cli?.id) mergedClientsMap.set(cli.id, cli); });
-      apiClients.forEach((cli: Client) => { if (cli?.id && !mergedClientsMap.has(cli.id)) mergedClientsMap.set(cli.id, cli); });
+      if (apiAddresses.length > 0) {
+        setAddresses(prev => {
+          const map = new Map<string, Address>();
+          prev.forEach(a => { if (a?.id) map.set(a.id, a); });
+          apiAddresses.forEach((a: Address) => { if (a?.id && !map.has(a.id)) map.set(a.id, a); });
+          return Array.from(map.values());
+        });
+      }
 
-      const mergedOrdersMap = new Map<string, ServiceOrder>();
-      (orders || []).forEach((os: ServiceOrder) => { if (os?.id) mergedOrdersMap.set(os.id, os); });
-      apiOrders.forEach((os: ServiceOrder) => { if (os?.id && !mergedOrdersMap.has(os.id)) mergedOrdersMap.set(os.id, os); });
+      if (apiClients.length > 0) {
+        setClients(prev => {
+          const map = new Map<string, Client>();
+          prev.forEach(c => { if (c?.id) map.set(c.id, c); });
+          apiClients.forEach((c: Client) => { if (c?.id && !map.has(c.id)) map.set(c.id, c); });
+          return Array.from(map.values());
+        });
+      }
 
-      const mergedTechsMap = new Map<string, Technician>();
-      (t || []).forEach((tech: Technician) => { if (tech?.id) mergedTechsMap.set(tech.id, tech); });
-      apiTechs.forEach((tech: Technician) => { if (tech?.id && !mergedTechsMap.has(tech.id)) mergedTechsMap.set(tech.id, tech); });
+      if ((orders && orders.length > 0) || apiOrders.length > 0) {
+        setServiceOrders(prev => {
+          const map = new Map<string, ServiceOrder>();
+          prev.forEach(o => { if (o?.id) map.set(o.id, o); });
+          (orders || []).forEach((o: ServiceOrder) => { if (o?.id) map.set(o.id, o); });
+          apiOrders.forEach((o: ServiceOrder) => { if (o?.id && !map.has(o.id)) map.set(o.id, o); });
+          const finalOrders = Array.from(map.values());
+          try {
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('lefrio_cached_service_orders', JSON.stringify(finalOrders));
+            }
+          } catch {}
+          return finalOrders;
+        });
+      }
 
-      const mergedEquipmentsMap = new Map<string, Equipment>();
-      (eq || []).forEach((equip: Equipment) => { if (equip?.id) mergedEquipmentsMap.set(equip.id, equip); });
-      apiEquipments.forEach((equip: Equipment) => { if (equip?.id && !mergedEquipmentsMap.has(equip.id)) mergedEquipmentsMap.set(equip.id, equip); });
+      if (apiTechs.length > 0) {
+        setTechs(prev => {
+          const map = new Map<string, Technician>();
+          prev.forEach(t => { if (t?.id) map.set(t.id, t); });
+          apiTechs.forEach((t: Technician) => { if (t?.id && !map.has(t.id)) map.set(t.id, t); });
+          return Array.from(map.values());
+        });
+      }
 
-      const finalAddresses = Array.from(mergedAddressesMap.values());
-      const finalClients = Array.from(mergedClientsMap.values());
-      const finalTechs = Array.from(mergedTechsMap.values());
-      const finalEquipments = Array.from(mergedEquipmentsMap.values());
-      const finalOrders = Array.from(mergedOrdersMap.values());
+      if (apiEquipments.length > 0) {
+        setEquipments(prev => {
+          const map = new Map<string, Equipment>();
+          prev.forEach(e => { if (e?.id) map.set(e.id, e); });
+          apiEquipments.forEach((e: Equipment) => { if (e?.id && !map.has(e.id)) map.set(e.id, e); });
+          return Array.from(map.values());
+        });
+      }
+    } catch (err) {
+      console.warn('Erro ao carregar dados complementares do roteiro diário:', err);
+    }
+  };
 
-      setRecords(combinedRecords);
-      setRecentApprovedRecords(appvd || []);
-      setAddresses(finalAddresses);
-      setClients(finalClients);
-      setTechs(finalTechs);
-      setEquipments(finalEquipments);
+  const loadData = async (forceBypassCache: boolean = false) => {
+    setLoading(true);
+    lastSyncTimestampRef.current = Date.now();
+    if (forceBypassCache) {
+      dataService.clearCache('records_');
+      loadedItineraryKeyRef.current = '';
+      loadedApprovedRef.current = false;
+    }
+    try {
+      // OTIMIZAÇÃO CRÍTICA: Carrega apenas o mês selecionado e os metadados essenciais na abertura
+      const [monthRecords, pre, a, c, t, settings, soSettings] = await Promise.all([
+        dataService.getRecords(month, { lightweight: true }).catch(err => { console.error('Error loading records for month:', month, err); return []; }),
+        dataService.getPreCompletedRecords().catch(err => { console.error('Error loading pre-completed records:', err); return []; }),
+        dataService.getAddresses().catch(err => { console.error('Error loading addresses:', err); return []; }),
+        dataService.getClients().catch(err => { console.error('Error loading clients:', err); return []; }),
+        dataService.getTechnicians().catch(err => { console.error('Error loading technicians:', err); return []; }),
+        dataService.getDeviceSettings().catch(err => { console.error('Error loading device settings:', err); return null; }),
+        dataService.getServiceOrderSettings().catch(err => { console.warn('Error loading service order settings:', err); return null; })
+      ]);
+
+      const allLoadedRecords = [...(monthRecords || []), ...(pre || [])].filter(Boolean);
+      const { deduplicated } = dataService.deduplicateRecordsList(allLoadedRecords);
+      const combinedRecords = deduplicated;
+
+      setRecords(prev => {
+        if (!forceBypassCache && prev.length > 0) {
+          const merged = [...combinedRecords, ...prev.filter(r => r.month !== month)];
+          return dataService.deduplicateRecordsList(merged).deduplicated;
+        }
+        return combinedRecords;
+      });
+      setAddresses(a || []);
+      setClients(c || []);
+      setTechs(t || []);
       setDeviceSettings(settings);
       if (soSettings) {
         setServiceOrderSettings(soSettings);
@@ -1018,15 +1136,20 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
           }
         } catch (e) {}
       }
-      setServiceOrders(finalOrders);
+
+      // Se já estiver na aba de Roteiro ou Aprovação durante um force refresh, atualiza seus dados específicos
+      if (activeTab === 'itinerary' || isTabletMode || userRole === UserRole.TECHNICIAN) {
+        loadItinerarySpecificData(forceBypassCache);
+      } else if (activeTab === 'approval' && forceBypassCache) {
+        dataService.getRecentApprovedRecords(30).then(appvd => setRecentApprovedRecords(appvd || [])).catch(() => {});
+      }
 
       // Persiste cache para acesso offline instantâneo no aplicativo Android/Tablet do técnico
       try {
         if (typeof window !== 'undefined') {
           localStorage.setItem('lefrio_cached_records', JSON.stringify(combinedRecords.slice(0, 500)));
-          localStorage.setItem('lefrio_cached_addresses', JSON.stringify(finalAddresses));
-          localStorage.setItem('lefrio_cached_clients', JSON.stringify(finalClients));
-          localStorage.setItem('lefrio_cached_service_orders', JSON.stringify(finalOrders));
+          localStorage.setItem('lefrio_cached_addresses', JSON.stringify(a || []));
+          localStorage.setItem('lefrio_cached_clients', JSON.stringify(c || []));
         }
       } catch (e) {
         console.warn('Erro ao salvar cache local de endereços e roteiro:', e);
@@ -1093,6 +1216,41 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     }
   };
 
+  // Índices Map O(1) em memória para evitar buscas lineares O(N * M) em cada linha da tabela
+  const addressMap = useMemo(() => {
+    const map = new Map<string, Address>();
+    addresses.forEach(a => {
+      if (a && a.id) {
+        map.set(a.id, a);
+        map.set(a.id.trim().toLowerCase(), a);
+      }
+    });
+    return map;
+  }, [addresses]);
+
+  const clientMap = useMemo(() => {
+    const map = new Map<string, Client>();
+    clients.forEach(c => {
+      if (c && c.id) {
+        map.set(c.id, c);
+        map.set(c.id.trim().toLowerCase(), c);
+      }
+    });
+    return map;
+  }, [clients]);
+
+  const equipmentsByAddressMap = useMemo(() => {
+    const map = new Map<string, Equipment[]>();
+    equipments.forEach(eq => {
+      if (!eq || !eq.addressId || eq.status === 'deactivated' || eq.active === false || eq.isDeactivated) return;
+      const aid = String(eq.addressId).trim();
+      const list = map.get(aid) || [];
+      list.push(eq);
+      map.set(aid, list);
+    });
+    return map;
+  }, [equipments]);
+
   // Calculate stats for weekly/monthly pauta view
   const { weekTotal, weekCompleted, monthTotal, monthCompleted } = useMemo(() => {
     let w = 0;
@@ -1100,10 +1258,10 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     let m = 0;
     let mc = 0;
     records.forEach(r => {
-      if (!r || isOSRecord(r)) return;
+      if (!r || isOSRecord(r) || (r.month && r.month !== month)) return;
       const matchTech = !selectedTech || (r.technician1 === selectedTech || r.technician2 === selectedTech);
       if (matchTech) {
-        const addr = addresses.find(a => a.id === r.addressId);
+        const addr = r.addressId ? addressMap.get(r.addressId) : undefined;
         const machines = addr?.totalMachines || 0;
         m += machines;
         if (r.status === MaintenanceStatus.COMPLETED) {
@@ -1118,12 +1276,13 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       }
     });
     return { weekTotal: w, weekCompleted: wc, monthTotal: m, monthCompleted: mc };
-  }, [records, addresses, selectedTech, selectedWeek]);
+  }, [records, addressMap, selectedTech, selectedWeek, month]);
 
-  // Filter records for monthly/weekly demand view
+  // Filter records for monthly/weekly demand view (using O(1) Maps)
   const filteredRecords = useMemo(() => {
+    const term = pautaSearchTerm.trim().toLowerCase();
     return records.filter(r => {
-      if (!r || isOSRecord(r)) return false;
+      if (!r || isOSRecord(r) || (r.month && r.month !== month)) return false;
       const matchTech = !selectedTech || (r.technician1 === selectedTech || r.technician2 === selectedTech);
       const matchWeek = selectedWeek === 'all' || r.scheduledWeek === selectedWeek;
       
@@ -1135,10 +1294,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
       if (!matchTech || !matchWeek || !matchExecution) return false;
 
-      if (pautaSearchTerm.trim()) {
-        const term = pautaSearchTerm.toLowerCase().trim();
-        const addr = addresses.find(a => a.id === r.addressId);
-        const client = clients.find(c => c.id === addr?.clientId);
+      if (term) {
+        const addr = r.addressId ? addressMap.get(r.addressId) : undefined;
+        const client = addr?.clientId ? clientMap.get(addr.clientId) : undefined;
         const clientMatch = client?.name?.toLowerCase().includes(term);
         const streetMatch = addr?.street?.toLowerCase().includes(term);
         const routeMatch = addr?.route?.toLowerCase().includes(term);
@@ -1148,8 +1306,8 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
       return true;
     }).map(r => {
-      const addr = addresses.find(a => a.id === r.addressId);
-      const client = clients.find(c => c.id === addr?.clientId);
+      const addr = r.addressId ? addressMap.get(r.addressId) : undefined;
+      const client = addr?.clientId ? clientMap.get(addr.clientId) : undefined;
       return { ...r, address: addr, client };
     }).sort((a, b) => {
       if (selectedWeek === 'all') {
@@ -1161,7 +1319,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       const dateB = b.plannedDate ? new Date(b.plannedDate).getTime() : Infinity;
       return dateA - dateB;
     });
-  }, [records, addresses, clients, selectedTech, selectedWeek, executionFilter, pautaSearchTerm]);
+  }, [records, addressMap, clientMap, selectedTech, selectedWeek, executionFilter, pautaSearchTerm, month]);
 
   // NEW: Filter records by expiration settings if in tablet mode to keep the system light (preventives only)
   const itineraryFilteredRecords = useMemo(() => {
@@ -1400,15 +1558,16 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     };
   }, [itineraryRecords]);
 
-  // Busca resiliente e sob demanda de equipamentos para todos os endereços do roteiro ativo
+  // Busca resiliente e sob demanda de equipamentos para os endereços do roteiro ativo (somente na aba Roteiro Diário ou modo Tablet)
   useEffect(() => {
+    if (activeTab !== 'itinerary' && !isTabletMode && userRole !== UserRole.TECHNICIAN) return;
     if (!itineraryRecords || itineraryRecords.length === 0) return;
     
     // Identifica endereços no roteiro cujas máquinas ainda não estão carregadas em memória nem foram consultadas
     const neededAddressIds = Array.from(new Set(
       itineraryRecords
         .map(r => r.addressId)
-        .filter((addrId): addrId is string => Boolean(addrId) && !fetchedRouteAddressIdsRef.current.has(addrId) && !equipments.some(e => e.addressId === addrId))
+        .filter((addrId): addrId is string => Boolean(addrId) && !fetchedRouteAddressIdsRef.current.has(addrId) && !equipmentsByAddressMap.has(String(addrId).trim()))
     ));
 
     if (neededAddressIds.length === 0) return;
@@ -1433,7 +1592,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     return () => {
       isMounted = false;
     };
-  }, [itineraryRecords, equipments]);
+  }, [activeTab, isTabletMode, userRole, itineraryRecords, equipmentsByAddressMap]);
 
   // Calculate technicians' route counts (both primary and assistant roles) for the day to display in the sidebar
   const techStatsForDay = useMemo(() => {
@@ -1491,7 +1650,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     });
   }, [techs, techStatsForDay]);
 
-  // NEW: Move daily itinerary item (up/down reorder for both preventives and service orders)
+  // NEW: Move daily itinerary item (up/down reorder for both preventives and service orders - optimized to only write changed items)
   const handleMoveItem = async (index: number, direction: 'up' | 'down') => {
     if (isReadOnly || updatingOrder) return;
     const targetIndex = direction === 'up' ? index - 1 : index + 1;
@@ -1505,25 +1664,47 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       reorderedList[index] = reorderedList[targetIndex];
       reorderedList[targetIndex] = temp;
 
-      // Map sequential 1-based order index
-      const promises = reorderedList.map((item, idx) => {
+      const osOrderUpdates = new Map<string, number>();
+      const recOrderUpdates = new Map<string, number>();
+      const promises: Promise<any>[] = [];
+
+      reorderedList.forEach((item, idx) => {
         const sequentialOrder = idx + 1;
-        
+        const previousOrder = item.itineraryOrder;
+        const hasOrderChanged = previousOrder !== sequentialOrder;
+
         if (item.itemType === 'service_order' && item.serviceOrder) {
-          setServiceOrders(prev => prev.map(o => o.id === item.serviceOrder!.id ? { ...o, itineraryOrder: sequentialOrder } : o));
-          return dataService.updateServiceOrder(item.serviceOrder.id, {
-            itineraryOrder: sequentialOrder
-          });
+          osOrderUpdates.set(item.serviceOrder.id, sequentialOrder);
+          if (hasOrderChanged) {
+            promises.push(
+              dataService.updateServiceOrder(item.serviceOrder.id, {
+                itineraryOrder: sequentialOrder
+              })
+            );
+          }
         } else {
-          setRecords(prev => prev.map(r => r.id === item.id ? { ...r, itineraryOrder: sequentialOrder } : r));
-          return dataService.upsertRecord({
-            ...item,
-            itineraryOrder: sequentialOrder
-          });
+          recOrderUpdates.set(item.id, sequentialOrder);
+          if (hasOrderChanged) {
+            promises.push(
+              dataService.upsertRecord({
+                ...item,
+                itineraryOrder: sequentialOrder
+              })
+            );
+          }
         }
       });
 
-      await Promise.all(promises);
+      if (osOrderUpdates.size > 0) {
+        setServiceOrders(prev => prev.map(o => osOrderUpdates.has(o.id) ? { ...o, itineraryOrder: osOrderUpdates.get(o.id)! } : o));
+      }
+      if (recOrderUpdates.size > 0) {
+        setRecords(prev => prev.map(r => recOrderUpdates.has(r.id) ? { ...r, itineraryOrder: recOrderUpdates.get(r.id)! } : r));
+      }
+
+      if (promises.length > 0) {
+        await Promise.all(promises);
+      }
     } catch (e) {
       console.error('Erro ao reordenar roteiro no Firestore:', e);
     } finally {
@@ -1743,6 +1924,33 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       setRecords(prev => prev.map(r => r.id === activeApprovalRecord.id ? { ...r, ...updatesToPersist } : r));
     }
   }, [activeApprovalRecord?.id]);
+
+  // Busca garantida e imediata dos equipamentos (e fotos completas se necessário) apenas do atendimento selecionado para Homologação
+  useEffect(() => {
+    if (!activeApprovalRecord?.addressId) return;
+    const addrId = activeApprovalRecord.addressId;
+    
+    dataService.getEquipments(addrId, false).then(addrEqs => {
+      if (addrEqs && addrEqs.length > 0) {
+        setEquipments(prev => {
+          const map = new Map<string, Equipment>();
+          prev.forEach(e => { if (e?.id) map.set(e.id, e); });
+          addrEqs.forEach(e => { if (e?.id) map.set(e.id, e); });
+          return Array.from(map.values());
+        });
+      }
+    }).catch(err => console.warn('Erro ao carregar equipamentos para homologação:', err));
+
+    // Garante o carregamento completo do registro selecionado (incluindo fotos do checklist) caso tenha vindo da listagem leve
+    if (activeApprovalRecord.id) {
+      dataService.getRecordById(activeApprovalRecord.id).then(fullRec => {
+        if (fullRec) {
+          setRecords(prev => prev.map(r => r.id === fullRec.id ? fullRec : r));
+          setRecentApprovedRecords(prev => prev.map(r => r.id === fullRec.id ? fullRec : r));
+        }
+      }).catch(() => {});
+    }
+  }, [activeApprovalRecord?.addressId, activeApprovalRecord?.id]);
 
   // Toggle checklist status for equipment in the active approval record
   const handleToggleApprovalMachine = async (record: MaintenanceRecord, eqId: string) => {
@@ -2880,7 +3088,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       const updatedOrder: ServiceOrder = {
         ...activeOSForTech,
         technicianId: targetTechId || activeOSForTech.technicianId,
-        openedBy: activeOSForTech.openedBy && activeOSForTech.openedBy !== 'Administrativo' ? activeOSForTech.openedBy : targetTechName,
+        openedBy: activeOSForTech.openedBy && !isStaffName(activeOSForTech.openedBy) ? activeOSForTech.openedBy : targetTechName,
         authenticatedTeam: activeOSForTech.authenticatedTeam || `Técnico: ${targetTechName}`,
         diagnosis: techOSDiagnosis,
         solution: techOSSolution,
@@ -2915,8 +3123,11 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   };
 
   const handlePrint = () => {
+    if (filteredRecords.length > visibleDemandLimit) {
+      setVisibleDemandLimit(filteredRecords.length);
+    }
     window.focus();
-    setTimeout(() => window.print(), 200);
+    setTimeout(() => window.print(), 250);
   };
 
   return (
@@ -3221,13 +3432,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-150 text-xs">
-                      {filteredRecords.map((record, index) => {
+                      {filteredRecords.slice(0, visibleDemandLimit).map((record, index) => {
                         const recAddrId = String(record.addressId || '').trim();
-                        const liveAddr = addresses.find(a => a && a.id === recAddrId) || record.address;
+                        const liveAddr = addressMap.get(recAddrId) || record.address;
                         const targetMachines = liveAddr?.totalMachines || 0;
-                        const addressEquips = equipments.filter(eq => eq && String(eq.addressId || '').trim() === recAddrId && eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
-                        const isGenericOnly = !record.isTemporaryRoute && targetMachines > 0 && addressEquips.length === 0;
-                        const isPartialEquips = !record.isTemporaryRoute && targetMachines > 0 && addressEquips.length > 0 && addressEquips.length < targetMachines;
+                        const hasLoadedAddrEquips = equipmentsByAddressMap.has(recAddrId);
+                        const addressEquips = equipmentsByAddressMap.get(recAddrId) || [];
+                        const isGenericOnly = !record.isTemporaryRoute && targetMachines > 0 && hasLoadedAddrEquips && addressEquips.length === 0;
+                        const isPartialEquips = !record.isTemporaryRoute && targetMachines > 0 && hasLoadedAddrEquips && addressEquips.length > 0 && addressEquips.length < targetMachines;
                         const isCompleted = record.status === MaintenanceStatus.COMPLETED;
 
                         return (
@@ -3353,6 +3565,29 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                       })}
                     </tbody>
                   </table>
+                  {filteredRecords.length > visibleDemandLimit && (
+                    <div className="bg-slate-50 border-t border-slate-200 px-4 py-3 flex flex-col sm:flex-row items-center justify-between gap-3 print:hidden">
+                      <span className="text-xs font-semibold text-slate-600">
+                        Exibindo <strong className="text-slate-900">{visibleDemandLimit}</strong> de <strong className="text-slate-900">{filteredRecords.length}</strong> endereços
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setVisibleDemandLimit(prev => Math.min(prev + 80, filteredRecords.length))}
+                          className="px-3.5 py-1.5 text-xs font-bold bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 rounded-lg transition-all cursor-pointer shadow-2xs"
+                        >
+                          Carregar +80 endereços
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setVisibleDemandLimit(filteredRecords.length)}
+                          className="px-3.5 py-1.5 text-xs font-bold bg-blue-600 text-white hover:bg-blue-700 rounded-lg transition-all cursor-pointer shadow-2xs"
+                        >
+                          Mostrar Todos ({filteredRecords.length})
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
               
@@ -5282,7 +5517,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                                 };
                               });
 
-                            if (allPhotos.length === 0) {
+                            const hasOtherPhotos = Boolean(record.otherPhotos && record.otherPhotos.length > 0);
+
+                            if (allPhotos.length === 0 && !hasOtherPhotos) {
                               return (
                                 <p className="text-xs font-semibold text-slate-400 italic">
                                   Nenhuma foto anexada pelo técnico neste atendimento.
@@ -5291,39 +5528,86 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                             }
 
                             return (
-                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                                {allPhotos.map((item, idx) => (
-                                  <div key={idx} className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3 shadow-2xs">
-                                    <div className="border-b border-slate-100 pb-2">
-                                      <span className="text-[9px] font-black text-amber-600 uppercase tracking-wider block">
-                                        Etiqueta: {item.equipment?.label || 'Sem Etiqueta'}
+                              <div className="space-y-4">
+                                {allPhotos.length > 0 && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                                    {allPhotos.map((item, idx) => (
+                                      <div key={idx} className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-3 shadow-2xs">
+                                        <div className="border-b border-slate-100 pb-2">
+                                          <span className="text-[9px] font-black text-amber-600 uppercase tracking-wider block">
+                                            Etiqueta: {item.equipment?.label || 'Sem Etiqueta'}
+                                          </span>
+                                          <span className="text-xs font-bold text-slate-800 block truncate" title={`${item.equipment?.sector || 'Sem Setor'} - ${item.equipment?.name}`}>
+                                            {item.equipment?.sector || 'Sem Setor'} - {item.equipment?.name}
+                                          </span>
+                                          {item.notes && (
+                                            <p className="text-[10px] text-slate-500 italic mt-1 leading-snug">
+                                              Obs: {item.notes}
+                                            </p>
+                                          )}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                          {item.photos.map((photo, photoIdx) => (
+                                            <div 
+                                              key={photoIdx} 
+                                              onClick={() => openPhotoPreview({
+                                                src: photo,
+                                                title: item.equipment?.name ? `Equipamento: ${item.equipment.name}` : 'Equipamento',
+                                                subtitle: `${item.equipment?.sector || 'Sem Setor'} • ${item.equipment?.brand || ''} ${item.equipment?.btus ? `• ${formatBtus(item.equipment.btus)} BTUs` : ''}`,
+                                                notes: item.notes,
+                                                label: item.equipment?.label || 'Sem Etiqueta'
+                                              })}
+                                              className="relative aspect-square bg-slate-100 border border-slate-200 rounded-xl overflow-hidden group cursor-pointer shadow-2xs hover:shadow-md transition-all hover:scale-[1.02]"
+                                              title="Clique para ampliar a foto"
+                                            >
+                                              <img
+                                                src={photo}
+                                                alt={`Foto do Equipamento ${item.equipment?.label || ''}`}
+                                                className="w-full h-full object-cover group-hover:brightness-95 transition-all"
+                                                referrerPolicy="no-referrer"
+                                              />
+                                              <div className="absolute inset-0 bg-slate-900/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 p-2">
+                                                <button
+                                                  type="button"
+                                                  className="text-white font-bold text-[10px] bg-black/80 hover:bg-black px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 shadow-md transform group-hover:scale-105 transition-all cursor-pointer"
+                                                >
+                                                  <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
+                                                  <span>Ampliar</span>
+                                                </button>
+                                              </div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+
+                                {/* Seção Outros nas Fotos de Aprovação */}
+                                {hasOtherPhotos && (
+                                  <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3">
+                                    <div className="border-b border-slate-100 pb-2 flex items-center justify-between">
+                                      <span className="text-xs font-black text-amber-800 uppercase tracking-wider flex items-center gap-2">
+                                        <Camera className="w-4 h-4 text-amber-500" />
+                                        Outros - Fotos Gerais do Cliente / Instalações ({record.otherPhotos!.length})
                                       </span>
-                                      <span className="text-xs font-bold text-slate-800 block truncate" title={`${item.equipment?.sector || 'Sem Setor'} - ${item.equipment?.name}`}>
-                                        {item.equipment?.sector || 'Sem Setor'} - {item.equipment?.name}
-                                      </span>
-                                      {item.notes && (
-                                        <p className="text-[10px] text-slate-500 italic mt-1 leading-snug">
-                                          Obs: {item.notes}
-                                        </p>
-                                      )}
                                     </div>
-                                    <div className="grid grid-cols-2 gap-2">
-                                      {item.photos.map((photo, photoIdx) => (
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                      {record.otherPhotos!.map((photo, photoIdx) => (
                                         <div 
                                           key={photoIdx} 
                                           onClick={() => openPhotoPreview({
                                             src: photo,
-                                            title: item.equipment?.name ? `Equipamento: ${item.equipment.name}` : 'Equipamento',
-                                            subtitle: `${item.equipment?.sector || 'Sem Setor'} • ${item.equipment?.brand || ''} ${item.equipment?.btus ? `• ${formatBtus(item.equipment.btus)} BTUs` : ''}`,
-                                            notes: item.notes,
-                                            label: item.equipment?.label || 'Sem Etiqueta'
+                                            title: 'Outros - Foto Geral do Cliente',
+                                            subtitle: 'Registro fotográfico geral das instalações',
+                                            label: 'OUTROS'
                                           })}
                                           className="relative aspect-square bg-slate-100 border border-slate-200 rounded-xl overflow-hidden group cursor-pointer shadow-2xs hover:shadow-md transition-all hover:scale-[1.02]"
                                           title="Clique para ampliar a foto"
                                         >
                                           <img
                                             src={photo}
-                                            alt={`Foto do Equipamento ${item.equipment?.label || ''}`}
+                                            alt={`Foto Geral ${photoIdx + 1}`}
                                             className="w-full h-full object-cover group-hover:brightness-95 transition-all"
                                             referrerPolicy="no-referrer"
                                           />
@@ -5340,7 +5624,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                                       ))}
                                     </div>
                                   </div>
-                                ))}
+                                )}
                               </div>
                             );
                           })()}

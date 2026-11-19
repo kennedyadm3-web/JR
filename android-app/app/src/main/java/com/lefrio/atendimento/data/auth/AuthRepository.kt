@@ -165,6 +165,7 @@ class AuthRepository(private val context: Context) {
 
         // Tenta sincronização com o Firestore
         try {
+            FirebaseConfig.ensureAuthenticated()
             val firestore = FirebaseConfig.getFirestore()
             val snap = firestore.collection("technicians").get().await()
             if (!snap.isEmpty) {

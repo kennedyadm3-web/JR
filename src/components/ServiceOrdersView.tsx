@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { AnimatePresence } from 'motion/react';
 import { 
   FileText, Plus, Search, Filter, Edit, Edit3, Trash2, Printer, 
   X, Save, Calendar, User, Building, MapPin, Wind, 
@@ -9,7 +10,7 @@ import {
 } from 'lucide-react';
 import ExcelJS from 'exceljs';
 import { cn, generateInitialOsNumber, sortOrdersByCreationDateDesc } from '../lib/utils';
-import { buildTechnicianIndex, normalizeTechString } from '../lib/technicianIndex';
+import { buildTechnicianIndex, normalizeTechString, isStaffName } from '../lib/technicianIndex';
 import { dataService } from '../services/dataService';
 import { CompanyLogo, getCompanyConfigFromCache } from './CompanyLogo';
 import { Client, Address, Equipment, Technician, ServiceOrder, ServiceOrderItem, UserRole, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, MaintenanceRecord, JettingControl, MaintenanceStatus, TechOSDraft, ServiceCall, ServiceCallStatus } from '../types';
@@ -591,6 +592,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     };
   }, [managerClientId]);
 
+  const [workshopOnlyFilter, setWorkshopOnlyFilter] = useState<boolean>(false);
+
   // Estados de Paginação para a Tabela Principal de O.S.
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(25);
@@ -599,7 +602,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   // Resetar página atual da tabela principal ao alterar termos de busca, filtros ou tamanho de página
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, statusFilter, startDateFilter, endDateFilter, itemsPerPage, managerClientId]);
+  }, [searchTerm, statusFilter, workshopOnlyFilter, startDateFilter, endDateFilter, itemsPerPage, managerClientId]);
 
   // Estados de Filtro para Relatório Avançado
   const [reportStartDate, setReportStartDate] = useState('');
@@ -609,12 +612,58 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [reportStatus, setReportStatus] = useState('all');
   const [reportCompany, setReportCompany] = useState('all');
   const [reportType, setReportType] = useState('all');
+  const [reportWorkshopFilter, setReportWorkshopFilter] = useState<'all' | 'workshop_only' | 'standard_only'>('all');
   const [reportGeneralNotes, setReportGeneralNotes] = useState('');
   
   // Controle de Modais / Form
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<ServiceOrder | null>(null);
+
+  // Modal de Compartilhamento de Link de Assinatura Externa (48h)
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareLinkOS, setShareLinkOS] = useState<ServiceOrder | null>(null);
+  const [shareUrl, setShareUrl] = useState('');
+  const [shareExpiresAt, setShareExpiresAt] = useState('');
+  const [isCopied, setIsCopied] = useState(false);
+
+  const handleGenerateShareLink = async (os: ServiceOrder) => {
+    try {
+      let token = os.shareSignatureToken;
+      let expiresAt = os.shareSignatureExpiresAt;
+      const now = Date.now();
+
+      // Se não houver token ou se o token atual já tiver expirado, cria um novo
+      if (!token || !expiresAt || new Date(expiresAt).getTime() < now) {
+        token = `sign_os_${os.id}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        expiresAt = new Date(now + 48 * 60 * 60 * 1000).toISOString();
+
+        await dataService.updateServiceOrder(os.id, {
+          shareSignatureToken: token,
+          shareSignatureCreatedAt: new Date().toISOString(),
+          shareSignatureExpiresAt: expiresAt
+        });
+
+        // Atualiza a lista local de O.S.
+        setOrders(prev => prev.map(o => o.id === os.id ? {
+          ...o,
+          shareSignatureToken: token,
+          shareSignatureCreatedAt: new Date().toISOString(),
+          shareSignatureExpiresAt: expiresAt
+        } : o));
+      }
+
+      const generatedUrl = `${window.location.origin}${window.location.pathname}?signToken=${token}`;
+      setShareUrl(generatedUrl);
+      setShareExpiresAt(expiresAt);
+      setShareLinkOS(os);
+      setShareModalOpen(true);
+      setIsCopied(false);
+    } catch (err: any) {
+      console.error('Erro ao gerar link de assinatura:', err);
+      alert('Erro ao gerar link de assinatura: ' + (err?.message || ''));
+    }
+  };
   
   // Lote de O.S. (Jetting Control)
   const [batchQueue, setBatchQueue] = useState<{jettingControl: JettingControl, machineName: string, originalIndex: number, eqKey: string}[]>([]);
@@ -752,6 +801,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [formEquipmentId, setFormEquipmentId] = useState('');
   const [formStatus, setFormStatus] = useState<ServiceOrder['status']>('aberta');
   const [formType, setFormType] = useState('MANUTENCAO CORRETIVA CONTRATO');
+  const [formIsWorkshop, setFormIsWorkshop] = useState<boolean>(false);
   const [formOpenedAt, setFormOpenedAt] = useState('');
   const [formOpenedBy, setFormOpenedBy] = useState(() => {
     if (userRole !== UserRole.TECHNICIAN && userProfile?.name) {
@@ -1559,6 +1609,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setMachineSearchFeedback(null);
     setFormStatus('aberta');
     setFormType('MANUTENCAO CORRETIVA CONTRATO');
+    setFormIsWorkshop(false);
     setFormOpenedAt(todayStr);
     setFormOpenedBy(responsibleOpeningName.toUpperCase());
     setFormFinishedAt('');
@@ -1805,6 +1856,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormEquipmentId(initialEqId);
     setFormStatus(order.status);
     setFormType(order.type);
+    setFormIsWorkshop(Boolean(order.isWorkshop));
     
     // Converte datas para input datetime-local
     const formatForInput = (d: any) => {
@@ -1842,7 +1894,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     
     // Encontra o técnico correspondente (por ID, Nome, Resp. Abertura ou Equipe Autenticada)
     let resolvedTech1Id = '';
-    if (order.technicianId) {
+    if (order.technicianId && !isStaffName(order.technicianId)) {
       const matchTech = technicians.find(t => 
         t.id === order.technicianId || 
         t.name.trim().toLowerCase() === order.technicianId.trim().toLowerCase()
@@ -1850,15 +1902,13 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       resolvedTech1Id = matchTech ? matchTech.id : order.technicianId;
     }
 
-    if (!resolvedTech1Id && order.openedBy && order.openedBy !== 'ADMIN' && order.openedBy !== 'Administrativo') {
+    if (!resolvedTech1Id && order.openedBy && !isStaffName(order.openedBy)) {
       const matchOpener = technicians.find(t => 
         t.id === order.openedBy || 
         t.name.trim().toLowerCase() === order.openedBy.trim().toLowerCase()
       );
       if (matchOpener) {
         resolvedTech1Id = matchOpener.id;
-      } else {
-        resolvedTech1Id = order.openedBy;
       }
     }
 
@@ -2093,6 +2143,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         ? (finalFinishedAt || new Date().toISOString()) 
         : (selectedOrder?.adminFinalizedAt || undefined),
       type: formType ? formType.toUpperCase() : '',
+      isWorkshop: formIsWorkshop,
       openedAt: formOpenedAt ? new Date(formOpenedAt).toISOString() : new Date().toISOString(),
       openedBy: formOpenedBy ? formOpenedBy.toUpperCase() : '',
       finishedAt: finalFinishedAt ? new Date(finalFinishedAt).toISOString() : undefined,
@@ -2664,8 +2715,76 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   // Baixar Ordem de Serviço em Formato Excel
   const downloadOsExcel = async (order: ServiceOrder) => {
     try {
+      // Garante que todos os dados da O.S. (incluindo assinaturas e anexos fotográficos) estejam completos
+      let effectiveOrder: ServiceOrder = { ...order };
+
+      // 1. Verifica assinatura/dados no selectedOrder e nos estados do formulário (mesmo se o modal de impressão estiver aberto)
+      if (selectedOrder && (selectedOrder.id === order.id || (order.osNumber && order.osNumber !== '00000' && selectedOrder.osNumber === order.osNumber))) {
+        effectiveOrder = {
+          ...selectedOrder,
+          ...effectiveOrder,
+          clientSignature: effectiveOrder.clientSignature || selectedOrder.clientSignature || formClientSignature,
+          techSignature: effectiveOrder.techSignature || selectedOrder.techSignature || formTechSignature,
+          clientSignatureDate: effectiveOrder.clientSignatureDate || selectedOrder.clientSignatureDate || formClientSignatureDate,
+          clientRepresentative: effectiveOrder.clientRepresentative || selectedOrder.clientRepresentative || formRepresentative,
+          clientRepresentativeMatricula: effectiveOrder.clientRepresentativeMatricula || selectedOrder.clientRepresentativeMatricula || formRepresentativeMatricula,
+          photos: (effectiveOrder.photos && effectiveOrder.photos.length > 0)
+            ? effectiveOrder.photos
+            : ((selectedOrder.photos && selectedOrder.photos.length > 0) ? selectedOrder.photos : formPhotos)
+        };
+      }
+
+      // 2. Verifica na lista em memória (orders) caso haja outro registro da mesma O.S. com assinatura preenchida
+      if (!effectiveOrder.clientSignature || !effectiveOrder.photos || effectiveOrder.photos.length === 0) {
+        const matchedInList = orders.find(o =>
+          (o.id === effectiveOrder.id || (effectiveOrder.osNumber && effectiveOrder.osNumber !== '00000' && o.osNumber === effectiveOrder.osNumber)) &&
+          (o.clientSignature || (o.photos && o.photos.length > 0))
+        );
+        if (matchedInList) {
+          effectiveOrder = {
+            ...matchedInList,
+            ...effectiveOrder,
+            clientSignature: effectiveOrder.clientSignature || matchedInList.clientSignature,
+            techSignature: effectiveOrder.techSignature || matchedInList.techSignature,
+            clientSignatureDate: effectiveOrder.clientSignatureDate || matchedInList.clientSignatureDate,
+            clientRepresentative: effectiveOrder.clientRepresentative || matchedInList.clientRepresentative,
+            clientRepresentativeMatricula: effectiveOrder.clientRepresentativeMatricula || matchedInList.clientRepresentativeMatricula,
+            photos: (effectiveOrder.photos && effectiveOrder.photos.length > 0) ? effectiveOrder.photos : (matchedInList.photos || [])
+          };
+        }
+      }
+
+      // 3. Busca direta no Firestore caso assinatura ou fotos ainda não estejam em memória
+      if (effectiveOrder.id && (!effectiveOrder.clientSignature || !effectiveOrder.photos || effectiveOrder.photos.length === 0)) {
+        try {
+          const freshOrder = await dataService.getServiceOrder(effectiveOrder.id);
+          if (freshOrder) {
+            effectiveOrder = {
+              ...freshOrder,
+              ...effectiveOrder,
+              clientSignature: effectiveOrder.clientSignature || freshOrder.clientSignature || (freshOrder as any).signature,
+              techSignature: effectiveOrder.techSignature || freshOrder.techSignature,
+              clientSignatureDate: effectiveOrder.clientSignatureDate || freshOrder.clientSignatureDate,
+              clientRepresentative: effectiveOrder.clientRepresentative || freshOrder.clientRepresentative || freshOrder.clientSigneeName,
+              clientRepresentativeMatricula: effectiveOrder.clientRepresentativeMatricula || freshOrder.clientRepresentativeMatricula || freshOrder.clientSigneeRegistration,
+              photos: (effectiveOrder.photos && effectiveOrder.photos.length > 0) ? effectiveOrder.photos : (freshOrder.photos || [])
+            };
+          }
+        } catch (fetchErr) {
+          console.warn('Aviso ao buscar O.S. complementar para Excel:', fetchErr);
+        }
+      }
+
+      // 4. Fallback adicional: se o modal de pré-visualização A4 estiver aberto, verifica a imagem de assinatura já renderizada no DOM
+      if (!effectiveOrder.clientSignature && typeof document !== 'undefined') {
+        const domClientSig = document.querySelector('#print-area img[alt="Assinatura Cliente"]') as HTMLImageElement | null;
+        if (domClientSig?.src) {
+          effectiveOrder.clientSignature = domClientSig.src;
+        }
+      }
+
       const workbook = new ExcelJS.Workbook();
-      const displayOsNum = order.osNumber || (order.id && !order.id.startsWith('OS_') ? order.id : '00000');
+      const displayOsNum = effectiveOrder.osNumber || (effectiveOrder.id && !effectiveOrder.id.startsWith('OS_') ? effectiveOrder.id : '00000');
       const worksheet = workbook.addWorksheet(`OS ${displayOsNum}`);
 
       // Set column widths so we have a solid 12-column grid layout like the PDF
@@ -2686,10 +2805,220 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
       worksheet.views = [{ showGridLines: true }];
       
-      const printCompany = getActiveCompanyForOrder(order.serviceCompany);
-      const themeColor = order.serviceCompany === 'alclima' ? '90EE90' : '9cbdde'; // ARGB format (omitting first FF because we can use solid pattern with hex)
+      const printCompany = getActiveCompanyForOrder(effectiveOrder.serviceCompany);
+      const themeColor = effectiveOrder.serviceCompany === 'alclima' ? '90EE90' : '9cbdde';
       
       const colLetter = (colIdx: number) => String.fromCharCode(65 + colIdx - 1);
+
+      // Utilitário assíncrono que carrega qualquer imagem (base64, SVG ou URL) e calcula as dimensões exatas mantendo a proporção original sem achatar
+      const prepareImageForExcel = (
+        src: string,
+        maxWidth: number,
+        maxHeight: number,
+        options?: { transparentBg?: boolean }
+      ): Promise<{ base64: string; width: number; height: number } | null> => {
+        return new Promise((resolve) => {
+          if (!src || typeof src !== 'string') {
+            resolve(null);
+            return;
+          }
+          const trimmedSrc = src.trim();
+          const img = new Image();
+          if (trimmedSrc.startsWith('http://') || trimmedSrc.startsWith('https://')) {
+            img.crossOrigin = 'anonymous';
+          }
+          img.onload = () => {
+            try {
+              const natW = img.naturalWidth || img.width || maxWidth;
+              const natH = img.naturalHeight || img.height || maxHeight;
+              const scale = Math.min(maxWidth / natW, maxHeight / natH);
+              const finalW = Math.max(1, Math.round(natW * scale));
+              const finalH = Math.max(1, Math.round(natH * scale));
+
+              // Renderiza em 2x no canvas para máxima nitidez no Excel
+              const dpr = 2;
+              const canvas = document.createElement('canvas');
+              canvas.width = finalW * dpr;
+              canvas.height = finalH * dpr;
+              const ctx = canvas.getContext('2d');
+              if (!ctx) {
+                resolve(null);
+                return;
+              }
+              if (!options?.transparentBg) {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+              }
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              const dataUrl = canvas.toDataURL('image/png');
+              const base64Clean = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+              resolve({ base64: base64Clean, width: finalW, height: finalH });
+            } catch (e) {
+              console.warn('Erro ao converter imagem no canvas para Excel:', e);
+              if (trimmedSrc.startsWith('data:image/')) {
+                const b64 = trimmedSrc.split(',')[1];
+                if (b64) {
+                  resolve({ base64: b64, width: maxWidth, height: maxHeight });
+                  return;
+                }
+              }
+              resolve(null);
+            }
+          };
+          img.onerror = () => {
+            if (trimmedSrc.startsWith('data:image/')) {
+              const b64 = trimmedSrc.split(',')[1];
+              if (b64) {
+                resolve({ base64: b64, width: maxWidth, height: maxHeight });
+                return;
+              }
+            }
+            resolve(null);
+          };
+          if (trimmedSrc.startsWith('data:') || trimmedSrc.startsWith('http') || trimmedSrc.startsWith('/')) {
+            img.src = trimmedSrc;
+          } else {
+            img.src = `data:image/png;base64,${trimmedSrc}`;
+          }
+        });
+      };
+
+      // Utilitário especializado para Assinatura Digital: recorta automaticamente as bordas vazias do quadro (auto-crop),
+      // reforça a nitidez do traço da caneta e renderiza em alta definição sobre fundo branco puro para garantir 100% de visibilidade no Excel
+      const prepareSignatureForExcel = (
+        src: string,
+        maxWidth: number,
+        maxHeight: number
+      ): Promise<{ base64: string; width: number; height: number } | null> => {
+        return new Promise((resolve) => {
+          if (!src || typeof src !== 'string' || src.trim().length === 0) {
+            resolve(null);
+            return;
+          }
+          const trimmedSrc = src.trim();
+          const fallbackBase64 = () => {
+            if (trimmedSrc.startsWith('data:image/')) {
+              const b64 = trimmedSrc.split(',')[1];
+              if (b64) return { base64: b64, width: Math.min(maxWidth, 160), height: maxHeight };
+            } else if (!trimmedSrc.startsWith('http') && !trimmedSrc.startsWith('/')) {
+              return { base64: trimmedSrc, width: Math.min(maxWidth, 160), height: maxHeight };
+            }
+            return null;
+          };
+
+          const img = new Image();
+          if (trimmedSrc.startsWith('http://') || trimmedSrc.startsWith('https://')) {
+            img.crossOrigin = 'anonymous';
+          }
+          img.onload = () => {
+            try {
+              const natW = img.naturalWidth || img.width || 800;
+              const natH = img.naturalHeight || img.height || 320;
+
+              const srcCanvas = document.createElement('canvas');
+              srcCanvas.width = natW;
+              srcCanvas.height = natH;
+              const srcCtx = srcCanvas.getContext('2d');
+              if (!srcCtx) {
+                resolve(fallbackBase64());
+                return;
+              }
+              srcCtx.drawImage(img, 0, 0, natW, natH);
+
+              let minX = 0;
+              let minY = 0;
+              let maxX = natW - 1;
+              let maxY = natH - 1;
+
+              try {
+                const imgData = srcCtx.getImageData(0, 0, natW, natH);
+                const data = imgData.data;
+                let foundMinX = natW;
+                let foundMinY = natH;
+                let foundMaxX = 0;
+                let foundMaxY = 0;
+                let hasInk = false;
+
+                for (let y = 0; y < natH; y++) {
+                  for (let x = 0; x < natW; x++) {
+                    const idx = (y * natW + x) * 4;
+                    const r = data[idx];
+                    const g = data[idx + 1];
+                    const b = data[idx + 2];
+                    const a = data[idx + 3];
+
+                    // Detecta pixels de tinta (não transparentes e não brancos)
+                    if (a > 15 && (r < 245 || g < 245 || b < 245)) {
+                      hasInk = true;
+                      if (x < foundMinX) foundMinX = x;
+                      if (x > foundMaxX) foundMaxX = x;
+                      if (y < foundMinY) foundMinY = y;
+                      if (y > foundMaxY) foundMaxY = y;
+
+                      // Reforça a opacidade e contraste do traço para não sumir ao redimensionar no Excel
+                      data[idx] = Math.min(r, 30);
+                      data[idx + 1] = Math.min(g, 58);
+                      data[idx + 2] = Math.min(b, 138);
+                      data[idx + 3] = Math.min(255, Math.max(a * 2, 235));
+                    }
+                  }
+                }
+
+                if (hasInk && foundMaxX >= foundMinX && foundMaxY >= foundMinY) {
+                  srcCtx.putImageData(imgData, 0, 0);
+                  const padX = Math.max(8, Math.round((foundMaxX - foundMinX) * 0.06));
+                  const padY = Math.max(6, Math.round((foundMaxY - foundMinY) * 0.12));
+                  minX = Math.max(0, foundMinX - padX);
+                  minY = Math.max(0, foundMinY - padY);
+                  maxX = Math.min(natW - 1, foundMaxX + padX);
+                  maxY = Math.min(natH - 1, foundMaxY + padY);
+                }
+              } catch (cropErr) {
+                console.warn('Aviso ao recortar área útil da assinatura:', cropErr);
+              }
+
+              const cropW = Math.max(1, maxX - minX + 1);
+              const cropH = Math.max(1, maxY - minY + 1);
+              const scale = Math.min(maxWidth / cropW, maxHeight / cropH);
+              const finalW = Math.max(40, Math.round(cropW * scale));
+              const finalH = Math.max(18, Math.round(cropH * scale));
+
+              const dpr = 2;
+              const outCanvas = document.createElement('canvas');
+              outCanvas.width = finalW * dpr;
+              outCanvas.height = finalH * dpr;
+              const outCtx = outCanvas.getContext('2d');
+              if (!outCtx) {
+                resolve(fallbackBase64());
+                return;
+              }
+
+              // Fundo branco puro para garantir contraste perfeito da assinatura em qualquer versão do Excel
+              outCtx.fillStyle = '#FFFFFF';
+              outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
+              outCtx.imageSmoothingEnabled = true;
+              outCtx.imageSmoothingQuality = 'high';
+              outCtx.drawImage(srcCanvas, minX, minY, cropW, cropH, 0, 0, outCanvas.width, outCanvas.height);
+
+              const dataUrl = outCanvas.toDataURL('image/png');
+              const base64Clean = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+              resolve({ base64: base64Clean, width: finalW, height: finalH });
+            } catch (err) {
+              console.warn('Erro ao processar assinatura no canvas, usando base64 direto:', err);
+              resolve(fallbackBase64());
+            }
+          };
+          img.onerror = () => {
+            resolve(fallbackBase64());
+          };
+
+          if (trimmedSrc.startsWith('data:') || trimmedSrc.startsWith('http') || trimmedSrc.startsWith('/')) {
+            img.src = trimmedSrc;
+          } else {
+            img.src = `data:image/png;base64,${trimmedSrc}`;
+          }
+        });
+      };
 
       // Helper to write a merged label/value block with thin borders
       const writeMergedLabelField = (startRow: number, startCol: number, endRow: number, endCol: number, label: string, value: string) => {
@@ -2706,7 +3035,6 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         };
         cell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
         
-        // Apply borders
         for (let r = startRow; r <= endRow; r++) {
           for (let c = startCol; c <= endCol; c++) {
             worksheet.getCell(r, c).border = {
@@ -2742,196 +3070,77 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
       };
 
-      // Gerar Logo Base64 dinamicamente usando Canvas HTML5 (ou usar imagem anexada se houver)
-      const getCompanyLogoBase64 = (companyKey: string): string => {
+      // Obtém o SVG/URL oficial da logo exatamente igual ao componente CompanyLogo (proporção fiel sem achatar)
+      const getCompanyLogoSource = (companyKey?: string): string => {
+        const compFromSettings = osSettings?.companies?.find(c => c.id === companyKey);
+        if (compFromSettings?.logoUrl) return compFromSettings.logoUrl;
         const cached = getCompanyConfigFromCache(companyKey);
-        if (cached?.logoUrl) {
-          return cached.logoUrl;
+        if (cached?.logoUrl) return cached.logoUrl;
+
+        const isAlClima = (companyKey || '').toLowerCase().includes('clima');
+        if (isAlClima) {
+          const svgAlClima = `<svg xmlns="http://www.w3.org/2000/svg" width="280" height="230" viewBox="0 0 140 115">
+            <rect width="140" height="115" rx="6" fill="#143e1d" />
+            <path d="M 10,35 L 10,105 L 130,105 L 130,35" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.6" />
+            <path d="M 10,35 L 35,35 M 105,35 L 130,35" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.6" />
+            <g transform="translate(64, 28) scale(1.2)" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" fill="none">
+              <circle cx="0" cy="0" r="1.5" fill="#ffffff" stroke="none" />
+              <line x1="0" y1="-18" x2="0" y2="18" />
+              <line x1="-18" y1="0" x2="18" y2="0" />
+              <line x1="-12.7" y1="-12.7" x2="12.7" y2="12.7" />
+              <line x1="-12.7" y1="12.7" x2="12.7" y2="-12.7" />
+              <path d="M -4,-12 L 0,-16 L 4,-12" />
+              <path d="M -3,-7 L 0,-10 L 3,-7" />
+              <path d="M -4,12 L 0,16 L 4,12" />
+              <path d="M -3,7 L 0,10 L 3,7" />
+              <path d="M -12,-4 L -16,0 L -12,4" />
+              <path d="M -7,-3 L -10,0 L -7,3" />
+              <path d="M 12,-4 L 16,0 L 12,4" />
+              <path d="M 7,-3 L 10,0 L 7,3" />
+            </g>
+            <g transform="translate(86, 10) scale(0.75)">
+              <rect x="0" y="0" width="8" height="24" rx="4" fill="none" stroke="#ffffff" stroke-width="1.8" />
+              <circle cx="4" cy="24" r="6" fill="#39e75f" stroke="#ffffff" stroke-width="1.8" />
+              <line x1="4" y1="10" x2="4" y2="21" stroke="#39e75f" stroke-width="3" stroke-linecap="round" />
+            </g>
+            <g transform="translate(15, 80)">
+              <text x="0" y="0" font-family="Arial, sans-serif" font-weight="900" font-size="21" fill="#ffffff" letter-spacing="0.5">AL</text>
+              <text x="32" y="0" font-family="Arial, sans-serif" font-weight="900" font-size="21" fill="#2fe058" letter-spacing="0.5">CLIMA</text>
+            </g>
+            <text x="70" y="98" text-anchor="middle" font-family="Arial, sans-serif" font-weight="700" font-size="6" fill="#ffffff" letter-spacing="3.2" opacity="0.9">REFRIGERAÇÃO</text>
+          </svg>`;
+          return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgAlClima)}`;
         }
 
-        const canvas = document.createElement('canvas');
-        canvas.width = 280;
-        canvas.height = 200;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return '';
-
-        if (companyKey === 'lefrio') {
-          // Design do logo Le Frio
-          ctx.fillStyle = '#FFFFFF';
-          ctx.fillRect(0, 0, 280, 200);
-
-          // Ondas em #68B7F2
-          ctx.strokeStyle = '#68B7F2';
-          ctx.lineWidth = 10;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-          
-          const drawWave = (yOffset: number) => {
-            ctx.beginPath();
-            ctx.moveTo(65, yOffset);
-            ctx.bezierCurveTo(105, yOffset - 35, 175, yOffset + 35, 215, yOffset);
-            ctx.stroke();
-          };
-          drawWave(25);
-          drawWave(48);
-          drawWave(71);
-          drawWave(94);
-
-          // Letras LE FRIO em #3556A8
-          ctx.strokeStyle = '#3556A8';
-          ctx.lineWidth = 10;
-          ctx.lineCap = 'round';
-          ctx.lineJoin = 'round';
-
-          // L
-          ctx.beginPath();
-          ctx.moveTo(35, 125);
-          ctx.lineTo(35, 175);
-          ctx.lineTo(55, 175);
-          ctx.stroke();
-
-          // E
-          ctx.beginPath();
-          ctx.moveTo(85, 125);
-          ctx.lineTo(65, 125);
-          ctx.lineTo(65, 175);
-          ctx.lineTo(85, 175);
-          ctx.moveTo(65, 150);
-          ctx.lineTo(80, 150);
-          ctx.stroke();
-
-          // F
-          ctx.beginPath();
-          ctx.moveTo(105, 175);
-          ctx.lineTo(105, 125);
-          ctx.lineTo(125, 125);
-          ctx.moveTo(105, 150);
-          ctx.lineTo(120, 150);
-          ctx.stroke();
-
-          // R
-          ctx.beginPath();
-          ctx.moveTo(140, 175);
-          ctx.lineTo(140, 125);
-          ctx.lineTo(158, 125);
-          ctx.bezierCurveTo(172, 125, 172, 150, 158, 150);
-          ctx.lineTo(140, 150);
-          ctx.moveTo(154, 150);
-          ctx.lineTo(168, 175);
-          ctx.stroke();
-
-          // I
-          ctx.beginPath();
-          ctx.moveTo(185, 125);
-          ctx.lineTo(185, 175);
-          ctx.stroke();
-
-          // O
-          ctx.beginPath();
-          ctx.moveTo(215, 130);
-          ctx.lineTo(235, 130);
-          ctx.bezierCurveTo(248, 130, 248, 170, 235, 170);
-          ctx.lineTo(215, 170);
-          ctx.bezierCurveTo(202, 170, 202, 130, 215, 130);
-          ctx.closePath();
-          ctx.stroke();
-        } else {
-          // Design do logo Al Clima
-          ctx.fillStyle = '#143e1d';
-          ctx.beginPath();
-          if (ctx.roundRect) {
-            ctx.roundRect(0, 0, 280, 200, 12);
-          } else {
-            ctx.rect(0, 0, 280, 200);
-          }
-          ctx.fill();
-
-          // Moldura branca fina
-          ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.moveTo(20, 70);
-          ctx.lineTo(20, 180);
-          ctx.lineTo(260, 180);
-          ctx.lineTo(260, 70);
-          ctx.stroke();
-
-          ctx.beginPath();
-          ctx.moveTo(20, 70);
-          ctx.lineTo(70, 70);
-          ctx.moveTo(210, 70);
-          ctx.lineTo(260, 70);
-          ctx.stroke();
-
-          // Floco de Neve hexagonal no topo centro (x=115, y=56)
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 3;
-          ctx.lineCap = 'round';
-          
-          const cx = 115;
-          const cy = 56;
-          
-          for (let i = 0; i < 8; i++) {
-            const angle = (i * Math.PI) / 4;
-            const x2 = cx + Math.cos(angle) * 30;
-            const y2 = cy + Math.sin(angle) * 30;
-            ctx.beginPath();
-            ctx.moveTo(cx, cy);
-            ctx.lineTo(x2, y2);
-            ctx.stroke();
-
-            const xSmall = cx + Math.cos(angle) * 20;
-            const ySmall = cy + Math.sin(angle) * 20;
-            const angleLeft = angle + Math.PI / 4;
-            const angleRight = angle - Math.PI / 4;
-            ctx.beginPath();
-            ctx.moveTo(xSmall, ySmall);
-            ctx.lineTo(xSmall + Math.cos(angleLeft) * 8, ySmall + Math.sin(angleLeft) * 8);
-            ctx.moveTo(xSmall, ySmall);
-            ctx.lineTo(xSmall + Math.cos(angleRight) * 8, ySmall + Math.sin(angleRight) * 8);
-            ctx.stroke();
-          }
-
-          // Ponto central
-          ctx.fillStyle = '#ffffff';
-          ctx.beginPath();
-          ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
-          ctx.fill();
-
-          // Termômetro no topo direito
-          ctx.strokeStyle = '#ffffff';
-          ctx.lineWidth = 3;
-          ctx.fillStyle = '#39e75f';
-          ctx.beginPath();
-          ctx.arc(190, 24, 10, 0, 2 * Math.PI);
-          ctx.fill();
-          ctx.stroke();
-
-          ctx.beginPath();
-          if (ctx.roundRect) {
-            ctx.roundRect(184, 4, 12, 16, 6);
-          } else {
-            ctx.rect(184, 4, 12, 16);
-          }
-          ctx.stroke();
-
-          // Texto AL CLIMA
-          ctx.fillStyle = '#ffffff';
-          ctx.font = 'bold 36px Arial';
-          ctx.fillText('AL', 35, 140);
-          ctx.fillStyle = '#2fe058';
-          ctx.fillText('CLIMA', 95, 140);
-
-          // Texto REFRIGERAÇÃO
-          ctx.fillStyle = '#ffffff';
-          ctx.font = 'bold 12px Arial';
-          ctx.fillText('REFRIGERAÇÃO', 70, 168);
-        }
-
-        return canvas.toDataURL('image/png');
+        const svgLeFrio = `<svg xmlns="http://www.w3.org/2000/svg" width="280" height="200" viewBox="0 0 140 100">
+          <rect width="140" height="100" fill="#ffffff" />
+          <g fill="none" stroke="#68B7F2" stroke-width="6.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M 29,8 Q 50,0.8 71,8 T 113,8" />
+            <path d="M 29,20 Q 50,12 71,20 T 113,20" />
+            <path d="M 29,32 Q 50,23.2 71,32 T 113,32" />
+            <path d="M 29,44 Q 50,34.4 71,44 T 113,44" />
+          </g>
+          <g fill="none" stroke="#3556A8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M 16,60 L 16,90 L 29,90" />
+            <path d="M 49,60 L 37,60 L 37,90 L 49,90" />
+            <path d="M 37,75 L 46,75" />
+            <path d="M 57,90 L 57,60 L 69,60" />
+            <path d="M 57,75 L 66,75" />
+            <path d="M 77,90 L 77,60 L 86,60 A 7.5,7.5 0 0,1 86,75 L 77,75" />
+            <path d="M 83,75 L 89,90" />
+            <path d="M 99,60 L 99,90" />
+            <path d="M 114,60 L 120,60 A 6,6 0 0,1 126,66 L 126,84 A 6,6 0 0,1 120,90 L 114,90 A 6,6 0 0,1 108,84 L 108,66 A 6,6 0 0,1 114,60 Z" />
+          </g>
+        </svg>`;
+        return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgLeFrio)}`;
       };
 
       // --- ROW 1-4: COMPANY HEADER ---
+      // Define a altura das linhas 1 a 4 ANTES de inserir a imagem para evitar que o Excel achate a logo
+      for (let r = 1; r <= 4; r++) {
+        worksheet.getRow(r).height = 16;
+      }
+
       worksheet.mergeCells('A1:B4');
       const logoCell = worksheet.getCell('A1');
       logoCell.fill = {
@@ -2941,16 +3150,18 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       };
 
       try {
-        const logoDataUrl = getCompanyLogoBase64(order.serviceCompany);
-        const logoImageId = workbook.addImage({
-          base64: logoDataUrl.split(',')[1],
-          extension: 'png',
-        });
-        worksheet.addImage(logoImageId, {
-          tl: { col: 0.2, row: 0.25 },
-          ext: { width: 118, height: 84 },
-          editAs: 'oneCell'
-        } as any);
+        const logoSrc = getCompanyLogoSource(effectiveOrder.serviceCompany);
+        const preparedLogo = await prepareImageForExcel(logoSrc, 96, 68);
+        if (preparedLogo) {
+          const logoImageId = workbook.addImage({
+            base64: preparedLogo.base64,
+            extension: 'png',
+          });
+          worksheet.addImage(logoImageId, {
+            tl: { col: 0.25, row: 0.2 },
+            ext: { width: preparedLogo.width, height: preparedLogo.height }
+          } as any);
+        }
       } catch (err) {
         console.error("Erro ao inserir logo no Excel:", err);
       }
@@ -2959,7 +3170,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       worksheet.mergeCells('C1:L1');
       const compNameCell = worksheet.getCell('C1');
       compNameCell.value = printCompany?.fullName?.toUpperCase();
-      compNameCell.font = { bold: false, size: 8.5, name: 'Arial', color: { argb: 'FF000000' } };
+      compNameCell.font = { bold: true, size: 9, name: 'Arial', color: { argb: 'FF000000' } };
       compNameCell.alignment = { vertical: 'middle', horizontal: 'left' };
 
       worksheet.mergeCells('C2:L2');
@@ -2980,15 +3191,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       compContactCell.font = { size: 8, name: 'Arial', color: { argb: 'FF000000' } };
       compContactCell.alignment = { vertical: 'middle', horizontal: 'left' };
 
-      // Set explicit compact row heights for company header block
-      for (let r = 1; r <= 4; r++) {
-        worksheet.getRow(r).height = 13;
-      }
-
       // --- ROW 5: TITLE ---
       worksheet.mergeCells('A5:H5');
       const titleCell = worksheet.getCell('A5');
-      titleCell.value = `ORDEM DE SERVIÇO: ${order.osNumber || (order.id && !order.id.startsWith('OS_') ? order.id : '00000')}`;
+      titleCell.value = `ORDEM DE SERVIÇO: ${displayOsNum}`;
       titleCell.font = { bold: true, size: 11, name: 'Arial', color: { argb: 'FF000000' } };
       titleCell.alignment = { vertical: 'middle', horizontal: 'left' };
 
@@ -3008,22 +3214,22 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       worksheet.getRow(8).height = 22;
 
       // --- ROW 9: CLIENT LINE 1 (Razão Social & CNPJ) ---
-      const clientObj = clients.find(c => c.id === order.clientId);
-      const clientName = clientObj?.fullName || clientObj?.name || order.clientName;
-      const clientCnpj = clientObj?.cnpj || order.clientCnpj || '-';
+      const clientObj = clients.find(c => c.id === effectiveOrder.clientId);
+      const clientName = clientObj?.fullName || clientObj?.name || effectiveOrder.clientName;
+      const clientCnpj = clientObj?.cnpj || effectiveOrder.clientCnpj || '-';
       writeMergedLabelField(9, 1, 9, 8, 'Razão Social', clientName);
       writeMergedLabelField(9, 9, 9, 12, 'CNPJ', clientCnpj);
       worksheet.getRow(9).height = 20;
 
       // --- ROW 10: CLIENT LINE 2 (E-mail & Telefone) ---
-      const clientEmail = clientObj?.email || order.clientEmail || '-';
-      const clientPhone = clientObj?.phone || order.clientPhone || '-';
+      const clientEmail = clientObj?.email || effectiveOrder.clientEmail || '-';
+      const clientPhone = clientObj?.phone || effectiveOrder.clientPhone || '-';
       writeMergedLabelField(10, 1, 10, 8, 'E-mail', clientEmail);
       writeMergedLabelField(10, 9, 10, 12, 'Telefone', clientPhone);
       worksheet.getRow(10).height = 20;
 
       // --- ROW 11: CLIENT LINE 3 (Endereço) ---
-      const addrObj = addresses.find(a => a.id === order.addressId);
+      const addrObj = addresses.find(a => a.id === effectiveOrder.addressId);
       const computedAddress = addrObj 
         ? [
             addrObj.street,
@@ -3034,7 +3240,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             addrObj.state || '',
             addrObj.cep ? `CEP: ${addrObj.cep}` : ''
           ].filter(Boolean).join(' - ')
-        : (order.clientAddress || clientObj?.fullAddress || '-');
+        : (effectiveOrder.clientAddress || clientObj?.fullAddress || '-');
       writeMergedLabelField(11, 1, 11, 12, 'Endereço', computedAddress);
       worksheet.getRow(11).height = 20;
 
@@ -3043,33 +3249,33 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       worksheet.getRow(13).height = 10;
 
       // --- ROW 14: SECTION HEADER "OS: [número]" ---
-      writeSectionHeader(14, `OS: ${order.osNumber || (order.id && !order.id.startsWith('OS_') ? order.id : '00000')}`);
+      writeSectionHeader(14, `OS: ${displayOsNum}`);
       worksheet.getRow(14).height = 22;
 
       // --- ROW 15: OS LINE 1 (Situação & Tipo) ---
-      writeMergedLabelField(15, 1, 15, 4, 'Situação', getStatusLabel(order.status).toUpperCase());
-      writeMergedLabelField(15, 5, 15, 12, 'Tipo', order.type);
+      writeMergedLabelField(15, 1, 15, 4, 'Situação', getStatusLabel(effectiveOrder.status).toUpperCase());
+      writeMergedLabelField(15, 5, 15, 12, 'Tipo', effectiveOrder.type);
       worksheet.getRow(15).height = 20;
 
       // --- ROW 16: OS LINE 2 (Datas e OS Externa) ---
-      const openedAtStr = order.openedAt ? new Date(order.openedAt).toLocaleString('pt-BR') : '-';
-      const executionAtStr = (order.finishedAt || order.updatedAt) ? new Date(order.finishedAt || order.updatedAt).toLocaleString('pt-BR') : '-';
+      const openedAtStr = effectiveOrder.openedAt ? new Date(effectiveOrder.openedAt).toLocaleString('pt-BR') : '-';
+      const executionAtStr = (effectiveOrder.finishedAt || effectiveOrder.updatedAt) ? new Date(effectiveOrder.finishedAt || effectiveOrder.updatedAt).toLocaleString('pt-BR') : '-';
       writeMergedLabelField(16, 1, 16, 3, 'Data Abertura', openedAtStr);
-      writeMergedLabelField(16, 4, 16, 6, 'Resp. Abertura', order.openedBy || '-');
+      writeMergedLabelField(16, 4, 16, 6, 'Resp. Abertura', effectiveOrder.openedBy || '-');
       writeMergedLabelField(16, 7, 16, 9, 'Execução', executionAtStr);
-      writeMergedLabelField(16, 10, 16, 12, 'OS Externa', order.externalOs || '-');
+      writeMergedLabelField(16, 10, 16, 12, 'OS Externa', effectiveOrder.externalOs || '-');
       worksheet.getRow(16).height = 20;
 
       // --- ROW 17: OS LINE 3 (Descrição do Problema) ---
-      writeMergedLabelField(17, 1, 17, 12, 'Descrição do Problema', order.description);
+      writeMergedLabelField(17, 1, 17, 12, 'Descrição do Problema', effectiveOrder.description);
       worksheet.getRow(17).height = 20;
 
       // --- ROW 18: OS LINE 4 (Diagnóstico) ---
-      writeMergedLabelField(18, 1, 18, 12, 'Diagnóstico', order.diagnosis || '-');
+      writeMergedLabelField(18, 1, 18, 12, 'Diagnóstico', effectiveOrder.diagnosis || '-');
       worksheet.getRow(18).height = 20;
 
       // --- ROW 19: OS LINE 5 (Solução) ---
-      writeMergedLabelField(19, 1, 19, 12, 'Solução', order.solution || '-');
+      writeMergedLabelField(19, 1, 19, 12, 'Solução', effectiveOrder.solution || '-');
       worksheet.getRow(19).height = 20;
 
       // Add empty spacing rows with comfortable shorter heights to separate OS data and Details
@@ -3081,14 +3287,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       worksheet.getRow(22).height = 22;
 
       // --- ROW 23: DETALHES LINE 1 (Equipamento & Marca) ---
-      writeMergedLabelField(23, 1, 23, 6, 'Equipamento', order.equipmentName || '-');
-      writeMergedLabelField(23, 7, 23, 12, 'Marca', order.equipmentBrand || '-');
+      writeMergedLabelField(23, 1, 23, 6, 'Equipamento', effectiveOrder.equipmentName || '-');
+      writeMergedLabelField(23, 7, 23, 12, 'Marca', effectiveOrder.equipmentBrand || '-');
       worksheet.getRow(23).height = 20;
 
       // --- ROW 24: DETALHES LINE 2 (Setor, BTUs, Patrimônio) ---
-      writeMergedLabelField(24, 1, 24, 4, 'Setor', order.equipmentSector || '-');
-      writeMergedLabelField(24, 5, 24, 8, 'BTUs', order.equipmentBtus || '-');
-      writeMergedLabelField(24, 9, 24, 12, 'Patrimônio / Tombamento', order.equipmentPatrimony || '-');
+      writeMergedLabelField(24, 1, 24, 4, 'Setor', effectiveOrder.equipmentSector || '-');
+      writeMergedLabelField(24, 5, 24, 8, 'BTUs', effectiveOrder.equipmentBtus || '-');
+      writeMergedLabelField(24, 9, 24, 12, 'Patrimônio / Tombamento', effectiveOrder.equipmentPatrimony || '-');
       worksheet.getRow(24).height = 20;
 
       // Add empty spacing rows with comfortable shorter heights to separate Details and tables
@@ -3098,8 +3304,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       let currentRow = 27;
 
       // --- SERVICES TABLE (if present) ---
-      if (order.services && order.services.length > 0) {
-        // Section Header Row
+      if (effectiveOrder.services && effectiveOrder.services.length > 0) {
         worksheet.mergeCells(`A${currentRow}:L${currentRow}`);
         const headerCell = worksheet.getCell(`A${currentRow}`);
         headerCell.value = 'DESCRIÇÃO DOS SERVIÇOS';
@@ -3120,7 +3325,6 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
         currentRow++;
 
-        // Table Header
         const headers = [
           { text: 'Código', startCol: 1, endCol: 1 },
           { text: 'Descrição dos Serviços', startCol: 2, endCol: 7 },
@@ -3162,45 +3366,36 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
         currentRow++;
 
-        // Row details
-        order.services.forEach(srv => {
-          // Code
+        effectiveOrder.services.forEach(srv => {
           worksheet.getCell(`A${currentRow}`).value = srv.code;
           worksheet.getCell(`A${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
 
-          // Description
           worksheet.mergeCells(`B${currentRow}:G${currentRow}`);
           const descCell = worksheet.getCell(`B${currentRow}`);
           descCell.value = srv.description;
           descCell.font = { bold: false, size: 8, name: 'Arial' };
           descCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
 
-          // Unit
           worksheet.getCell(`H${currentRow}`).value = srv.unit;
           worksheet.getCell(`H${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
 
-          // Qty
           worksheet.getCell(`I${currentRow}`).value = srv.quantity;
           worksheet.getCell(`I${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
           worksheet.getCell(`I${currentRow}`).numFmt = '#,##0';
 
-          // Unit value
           worksheet.getCell(`J${currentRow}`).value = srv.unitValue;
           worksheet.getCell(`J${currentRow}`).numFmt = '"R$"#,##0.00';
           worksheet.getCell(`J${currentRow}`).alignment = { vertical: 'middle', horizontal: 'right' };
 
-          // Discount
           worksheet.getCell(`K${currentRow}`).value = srv.discountPercent / 100;
           worksheet.getCell(`K${currentRow}`).numFmt = '0.0%';
           worksheet.getCell(`K${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
 
-          // Total value
           worksheet.getCell(`L${currentRow}`).value = srv.totalValue;
           worksheet.getCell(`L${currentRow}`).numFmt = '"R$"#,##0.00';
           worksheet.getCell(`L${currentRow}`).font = { bold: true, size: 8, name: 'Arial' };
           worksheet.getCell(`L${currentRow}`).alignment = { vertical: 'middle', horizontal: 'right' };
 
-          // Borders & standard fonts
           for (let c = 1; c <= 12; c++) {
             const cell = worksheet.getCell(currentRow, c);
             if (c !== 2 && c !== 12) {
@@ -3216,14 +3411,12 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           currentRow++;
         });
 
-        // Spacing row
         worksheet.addRow([]);
         currentRow++;
       }
 
       // --- PRODUCTS TABLE (if present) ---
-      if (order.products && order.products.length > 0) {
-        // Section Header Row
+      if (effectiveOrder.products && effectiveOrder.products.length > 0) {
         worksheet.mergeCells(`A${currentRow}:L${currentRow}`);
         const headerCell = worksheet.getCell(`A${currentRow}`);
         headerCell.value = 'DESCRIÇÃO DOS PRODUTOS';
@@ -3244,7 +3437,6 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
         currentRow++;
 
-        // Table Header
         const headers = [
           { text: 'Código', startCol: 1, endCol: 1 },
           { text: 'Descrição dos Produtos', startCol: 2, endCol: 7 },
@@ -3286,45 +3478,36 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
         currentRow++;
 
-        // Row details
-        order.products.forEach(prod => {
-          // Code
+        effectiveOrder.products.forEach(prod => {
           worksheet.getCell(`A${currentRow}`).value = prod.code;
           worksheet.getCell(`A${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
 
-          // Description
           worksheet.mergeCells(`B${currentRow}:G${currentRow}`);
           const descCell = worksheet.getCell(`B${currentRow}`);
           descCell.value = prod.description;
           descCell.font = { bold: false, size: 8, name: 'Arial' };
           descCell.alignment = { vertical: 'middle', horizontal: 'left', wrapText: true };
 
-          // Unit
           worksheet.getCell(`H${currentRow}`).value = prod.unit;
           worksheet.getCell(`H${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
 
-          // Qty
           worksheet.getCell(`I${currentRow}`).value = prod.quantity;
           worksheet.getCell(`I${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
           worksheet.getCell(`I${currentRow}`).numFmt = '#,##0.00';
 
-          // Unit value
           worksheet.getCell(`J${currentRow}`).value = prod.unitValue;
           worksheet.getCell(`J${currentRow}`).numFmt = '"R$"#,##0.00';
           worksheet.getCell(`J${currentRow}`).alignment = { vertical: 'middle', horizontal: 'right' };
 
-          // Discount
           worksheet.getCell(`K${currentRow}`).value = prod.discountPercent / 100;
           worksheet.getCell(`K${currentRow}`).numFmt = '0.0%';
           worksheet.getCell(`K${currentRow}`).alignment = { vertical: 'middle', horizontal: 'center' };
 
-          // Total value
           worksheet.getCell(`L${currentRow}`).value = prod.totalValue;
           worksheet.getCell(`L${currentRow}`).numFmt = '"R$"#,##0.00';
           worksheet.getCell(`L${currentRow}`).font = { bold: true, size: 8, name: 'Arial' };
           worksheet.getCell(`L${currentRow}`).alignment = { vertical: 'middle', horizontal: 'right' };
 
-          // Borders & standard fonts
           for (let c = 1; c <= 12; c++) {
             const cell = worksheet.getCell(currentRow, c);
             if (c !== 2 && c !== 12) {
@@ -3340,7 +3523,6 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           currentRow++;
         });
 
-        // Spacing row
         worksheet.addRow([]);
         currentRow++;
       }
@@ -3358,7 +3540,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       };
 
       const totalValueCell = worksheet.getCell(`L${currentRow}`);
-      totalValueCell.value = order.totalValue;
+      totalValueCell.value = effectiveOrder.totalValue;
       totalValueCell.font = { bold: true, size: 10, name: 'Arial', color: { argb: 'FF000000' } };
       totalValueCell.alignment = { vertical: 'middle', horizontal: 'right' };
       totalValueCell.numFmt = '"R$"#,##0.00';
@@ -3376,77 +3558,293 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           right: { style: 'thin', color: { argb: 'FF000000' } }
         };
       }
-      // Add 4 empty spacing rows before signatures section
-      for (let s = 0; s < 4; s++) {
-        currentRow++;
-        worksheet.getRow(currentRow).height = 12;
-      }
+
+      // Espaçamento antes do bloco de assinaturas
+      currentRow++;
+      worksheet.getRow(currentRow).height = 12;
       currentRow++;
 
-      // --- SIGNATURES SECTION ---
-      worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
-      const clientSignUnderline = worksheet.getCell(`A${currentRow}`);
-      clientSignUnderline.border = { bottom: { style: 'thin', color: { argb: 'FF000000' } } };
+      // --- SIGNATURES SECTION (COM ASSINATURA DIGITAL DO CLIENTE E AUTENTICAÇÃO DA EQUIPE) ---
+      const pTech1 = technicians.find(t => t.id === effectiveOrder.technicianId);
+      const pTech2 = effectiveOrder.technician2Id ? technicians.find(t => t.id === effectiveOrder.technician2Id) : null;
+      const techNames = [pTech1?.name || effectiveOrder.technicianId, pTech2?.name || effectiveOrder.technician2Id].filter(Boolean).join(' / ');
+      const authDate = effectiveOrder.finishedAt ? new Date(effectiveOrder.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
 
+      // Linha de autenticação da equipe no topo direito (igual à pré-visualização A4)
       worksheet.mergeCells(`G${currentRow}:L${currentRow}`);
-      const providerSignUnderline = worksheet.getCell(`G${currentRow}`);
-      providerSignUnderline.border = { bottom: { style: 'thin', color: { argb: 'FF000000' } } };
-      
-      currentRow++;
+      const providerAuthTopCell = worksheet.getCell(`G${currentRow}`);
+      providerAuthTopCell.value = `Equipe autenticada no aplicativo JDSmartOS (APP: ${authDate} ${techNames})`;
+      providerAuthTopCell.font = { italic: true, bold: true, size: 7.5, name: 'Arial', color: { argb: 'FF334155' } };
+      providerAuthTopCell.alignment = { vertical: 'middle', horizontal: 'center' };
+      worksheet.getRow(currentRow).height = 16;
 
-      // Signatures text
+      // Reserva 3 linhas mescladas e inicializadas (igual ao bloco da logo e anexos) ANTES de ancorar a imagem da assinatura
+      const sigImageStartRow = currentRow + 1;
+      const sigImageEndRow = sigImageStartRow + 2;
+      for (let r = sigImageStartRow; r <= sigImageEndRow; r++) {
+        worksheet.getRow(r).height = 18;
+      }
+
+      // Mescla os blocos de assinatura (A..F para Cliente e G..L para Prestadora) e aplica fundo branco + linha de assinatura inferior
+      worksheet.mergeCells(`A${sigImageStartRow}:F${sigImageEndRow}`);
+      worksheet.mergeCells(`G${sigImageStartRow}:L${sigImageEndRow}`);
+      for (let r = sigImageStartRow; r <= sigImageEndRow; r++) {
+        for (let c = 1; c <= 12; c++) {
+          const sigCell = worksheet.getCell(r, c);
+          sigCell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFFFFFFF' }
+          };
+          if (r === sigImageEndRow) {
+            sigCell.border = {
+              bottom: { style: 'thin', color: { argb: 'FF000000' } }
+            };
+          }
+        }
+      }
+
+      // Insere a imagem da Assinatura Digital do Cliente (Colunas A..F)
+      if (effectiveOrder.clientSignature) {
+        try {
+          const preparedClientSig = await prepareSignatureForExcel(effectiveOrder.clientSignature, 210, 48);
+          if (preparedClientSig && preparedClientSig.base64) {
+            const clientSigImgId = workbook.addImage({
+              base64: preparedClientSig.base64,
+              extension: 'png'
+            });
+            // Centraliza horizontalmente nas 6 colunas da esquerda (A..F ≈ 420px totais)
+            const centeredCol = Math.max(0.3, Math.min(2.2, (420 - preparedClientSig.width) / 2 / 70));
+            worksheet.addImage(clientSigImgId, {
+              tl: { col: centeredCol, row: (sigImageStartRow - 1) + 0.15 },
+              ext: { width: preparedClientSig.width, height: preparedClientSig.height }
+            } as any);
+          }
+        } catch (sigErr) {
+          console.warn('Erro ao inserir assinatura do cliente no Excel:', sigErr);
+        }
+      }
+
+      // Insere a imagem da Assinatura Digital do Técnico, se houver (Colunas G..L)
+      if (effectiveOrder.techSignature) {
+        try {
+          const preparedTechSig = await prepareSignatureForExcel(effectiveOrder.techSignature, 200, 46);
+          if (preparedTechSig && preparedTechSig.base64) {
+            const techSigImgId = workbook.addImage({
+              base64: preparedTechSig.base64,
+              extension: 'png'
+            });
+            const centeredTechCol = 6 + Math.max(0.3, Math.min(2.2, (420 - preparedTechSig.width) / 2 / 70));
+            worksheet.addImage(techSigImgId, {
+              tl: { col: centeredTechCol, row: (sigImageStartRow - 1) + 0.15 },
+              ext: { width: preparedTechSig.width, height: preparedTechSig.height }
+            } as any);
+          }
+        } catch (techSigErr) {
+          console.warn('Erro ao inserir assinatura do técnico no Excel:', techSigErr);
+        }
+      }
+
+      currentRow = sigImageEndRow + 1;
+
+      // Nome do Representante do Cliente & Razão Social da Prestadora
       worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
       const clientSignCell = worksheet.getCell(`A${currentRow}`);
-      clientSignCell.value = order.clientRepresentative || 'REPRESENTANTE DO CLIENTE';
-      clientSignCell.font = { bold: true, size: 8.5, name: 'Arial' };
+      clientSignCell.value = (effectiveOrder.clientRepresentative || 'REPRESENTANTE DO CLIENTE').toUpperCase();
+      clientSignCell.font = { bold: true, size: 8.5, name: 'Arial', color: { argb: 'FF000000' } };
       clientSignCell.alignment = { vertical: 'middle', horizontal: 'center' };
-
-      // Provider team names
-      const pTech1 = technicians.find(t => t.id === order.technicianId);
-      const pTech2 = order.technician2Id ? technicians.find(t => t.id === order.technician2Id) : null;
-      const techNames = [pTech1?.name, pTech2?.name].filter(Boolean).join(' / ');
-      const authDate = order.finishedAt ? new Date(order.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
-
-      worksheet.mergeCells(`G${currentRow}:L${currentRow}`);
-      const providerSignCell = worksheet.getCell(`G${currentRow}`);
-      providerSignCell.value = `Equipe autenticada no app JDSmartOS (APP: ${authDate} ${techNames})`;
-      providerSignCell.font = { italic: true, size: 7.5, name: 'Arial', color: { argb: 'FF475569' } };
-      providerSignCell.alignment = { vertical: 'middle', horizontal: 'center' };
-
-      currentRow++;
-
-      // Signatures subtitle
-      worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
-      const clientSubCell = worksheet.getCell(`A${currentRow}`);
-      clientSubCell.value = order.clientRepresentativeMatricula ? `Matrícula/CPF: ${order.clientRepresentativeMatricula} — ${order.clientName}` : order.clientName;
-      clientSubCell.font = { size: 8, name: 'Arial', color: { argb: 'FF475569' } };
-      clientSubCell.alignment = { vertical: 'middle', horizontal: 'center' };
 
       worksheet.mergeCells(`G${currentRow}:L${currentRow}`);
       const providerSubCell = worksheet.getCell(`G${currentRow}`);
-      providerSubCell.value = printCompany?.fullName;
+      providerSubCell.value = (printCompany?.fullName || '').toUpperCase();
       providerSubCell.font = { bold: true, size: 8, name: 'Arial', color: { argb: 'FF000000' } };
       providerSubCell.alignment = { vertical: 'middle', horizontal: 'center' };
+      worksheet.getRow(currentRow).height = 16;
 
       currentRow++;
+
+      // Matrícula/CPF do Cliente & Subtítulo Prestadora Autorizada
+      worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
+      const clientSubCell = worksheet.getCell(`A${currentRow}`);
+      clientSubCell.value = effectiveOrder.clientRepresentativeMatricula
+        ? `Matrícula/CPF: ${effectiveOrder.clientRepresentativeMatricula}`
+        : (clientName || effectiveOrder.clientName || '').toUpperCase();
+      clientSubCell.font = { size: 8, name: 'Arial', color: { argb: 'FF475569' } };
+      clientSubCell.alignment = { vertical: 'middle', horizontal: 'center' };
 
       worksheet.mergeCells(`G${currentRow}:L${currentRow}`);
       const providerSub2Cell = worksheet.getCell(`G${currentRow}`);
       providerSub2Cell.value = 'PRESTADORA AUTORIZADA';
       providerSub2Cell.font = { bold: true, size: 7.5, name: 'Arial', color: { argb: 'FF64748B' } };
       providerSub2Cell.alignment = { vertical: 'middle', horizontal: 'center' };
+      worksheet.getRow(currentRow).height = 15;
 
       currentRow++;
+
+      // Data/Hora da Assinatura do Cliente (quando presente)
+      if (effectiveOrder.clientSignatureDate) {
+        worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
+        const sigDateCell = worksheet.getCell(`A${currentRow}`);
+        const sigDateObj = new Date(effectiveOrder.clientSignatureDate);
+        sigDateCell.value = !isNaN(sigDateObj.getTime())
+          ? `Assinado às ${sigDateObj.toLocaleTimeString('pt-BR')} (${sigDateObj.toLocaleDateString('pt-BR')})`
+          : `Assinado em: ${effectiveOrder.clientSignatureDate}`;
+        sigDateCell.font = { bold: true, size: 8, name: 'Arial', color: { argb: 'FF475569' } };
+        sigDateCell.alignment = { vertical: 'middle', horizontal: 'center' };
+        worksheet.getRow(currentRow).height = 15;
+        currentRow++;
+      }
+
+      // Nome do Cliente abaixo da matrícula/data (quando tinha matrícula)
+      if (effectiveOrder.clientRepresentativeMatricula) {
+        worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
+        const clientOrgCell = worksheet.getCell(`A${currentRow}`);
+        clientOrgCell.value = (clientName || effectiveOrder.clientName || '').toUpperCase();
+        clientOrgCell.font = { bold: true, size: 8, name: 'Arial', color: { argb: 'FF64748B' } };
+        clientOrgCell.alignment = { vertical: 'middle', horizontal: 'center' };
+        worksheet.getRow(currentRow).height = 15;
+        currentRow++;
+      }
+
+      // --- ANEXOS FOTOGRÁFICOS (QUANDO HOUVER FOTOS NA O.S.) ---
+      const validPhotos = (effectiveOrder.photos || []).filter(p => typeof p === 'string' && p.trim().length > 0);
+      if (validPhotos.length > 0) {
+        currentRow++;
+        worksheet.getRow(currentRow).height = 16;
+        currentRow++;
+
+        // Cabeçalho de Seção de Anexos
+        worksheet.mergeCells(`A${currentRow}:H${currentRow}`);
+        const attachTitleCell = worksheet.getCell(`A${currentRow}`);
+        attachTitleCell.value = `ORDEM DE SERVIÇO: ${displayOsNum}`;
+        attachTitleCell.font = { bold: true, size: 10.5, name: 'Arial', color: { argb: 'FF000000' } };
+        attachTitleCell.alignment = { vertical: 'middle', horizontal: 'left' };
+
+        worksheet.mergeCells(`I${currentRow}:L${currentRow}`);
+        const attachSubCell = worksheet.getCell(`I${currentRow}`);
+        attachSubCell.value = 'Anexos Fotográficos';
+        attachSubCell.font = { bold: true, size: 8.5, name: 'Arial', color: { argb: 'FF333333' } };
+        attachSubCell.alignment = { vertical: 'middle', horizontal: 'right' };
+        for (let c = 1; c <= 12; c++) {
+          worksheet.getCell(currentRow, c).border = { bottom: { style: 'thin', color: { argb: 'FF000000' } } };
+        }
+        worksheet.getRow(currentRow).height = 22;
+        currentRow++;
+
+        worksheet.getRow(currentRow).height = 8;
+        currentRow++;
+
+        writeSectionHeader(currentRow, `ANEXOS DO APP - OS: ${displayOsNum}`);
+        worksheet.getRow(currentRow).height = 22;
+        currentRow++;
+
+        worksheet.getRow(currentRow).height = 8;
+        currentRow++;
+
+        // Renderiza as fotos em grade de 2 colunas (Colunas A..F e Colunas G..L) mantendo proporção fiel
+        const PHOTO_BOX_ROWS = 10;
+        for (let i = 0; i < validPhotos.length; i += 2) {
+          const boxStartRow = currentRow;
+          const boxEndRow = boxStartRow + PHOTO_BOX_ROWS - 1;
+
+          // Define altura fixa das linhas do quadro de fotos ANTES de inserir as imagens
+          for (let r = boxStartRow; r <= boxEndRow; r++) {
+            worksheet.getRow(r).height = 18;
+          }
+
+          const renderPhotoBox = async (photoSrc: string, photoIdx: number, startCol: number, endCol: number) => {
+            const sRef = `${colLetter(startCol)}${boxStartRow}`;
+            const eRef = `${colLetter(endCol)}${boxEndRow}`;
+            worksheet.mergeCells(`${sRef}:${eRef}`);
+
+            for (let r = boxStartRow; r <= boxEndRow; r++) {
+              for (let c = startCol; c <= endCol; c++) {
+                const cell = worksheet.getCell(r, c);
+                cell.fill = {
+                  type: 'pattern',
+                  pattern: 'solid',
+                  fgColor: { argb: 'FFF8FAFC' }
+                };
+                cell.border = {
+                  top: r === boxStartRow ? { style: 'thin', color: { argb: 'FF000000' } } : undefined,
+                  bottom: r === boxEndRow ? { style: 'thin', color: { argb: 'FF000000' } } : undefined,
+                  left: c === startCol ? { style: 'thin', color: { argb: 'FF000000' } } : undefined,
+                  right: c === endCol ? { style: 'thin', color: { argb: 'FF000000' } } : undefined
+                };
+              }
+            }
+
+            try {
+              const preparedPhoto = await prepareImageForExcel(photoSrc, 250, 195);
+              if (preparedPhoto) {
+                const photoImgId = workbook.addImage({
+                  base64: preparedPhoto.base64,
+                  extension: 'png'
+                });
+                worksheet.addImage(photoImgId, {
+                  tl: { col: (startCol - 1) + 0.6, row: (boxStartRow - 1) + 0.35 },
+                  ext: { width: preparedPhoto.width, height: preparedPhoto.height }
+                } as any);
+              }
+            } catch (phErr) {
+              console.warn(`Erro ao inserir foto ${photoIdx + 1} no Excel:`, phErr);
+            }
+          };
+
+          await renderPhotoBox(validPhotos[i], i, 1, 6);
+          if (validPhotos[i + 1]) {
+            await renderPhotoBox(validPhotos[i + 1], i + 1, 7, 12);
+          }
+
+          // Linha de legenda abaixo de cada par de fotos
+          const captionRow = boxEndRow + 1;
+          worksheet.getRow(captionRow).height = 18;
+
+          worksheet.mergeCells(`A${captionRow}:F${captionRow}`);
+          const capLeft = worksheet.getCell(`A${captionRow}`);
+          capLeft.value = `FOTO ${i + 1} - EVIDÊNCIA DE EXECUÇÃO`;
+          capLeft.font = { bold: true, size: 8, name: 'Arial', color: { argb: 'FF475569' } };
+          capLeft.alignment = { vertical: 'middle', horizontal: 'center' };
+          for (let c = 1; c <= 6; c++) {
+            worksheet.getCell(captionRow, c).border = {
+              top: { style: 'thin', color: { argb: 'FF000000' } },
+              bottom: { style: 'thin', color: { argb: 'FF000000' } },
+              left: { style: 'thin', color: { argb: 'FF000000' } },
+              right: { style: 'thin', color: { argb: 'FF000000' } }
+            };
+          }
+
+          if (validPhotos[i + 1]) {
+            worksheet.mergeCells(`G${captionRow}:L${captionRow}`);
+            const capRight = worksheet.getCell(`G${captionRow}`);
+            capRight.value = `FOTO ${i + 2} - EVIDÊNCIA DE EXECUÇÃO`;
+            capRight.font = { bold: true, size: 8, name: 'Arial', color: { argb: 'FF475569' } };
+            capRight.alignment = { vertical: 'middle', horizontal: 'center' };
+            for (let c = 7; c <= 12; c++) {
+              worksheet.getCell(captionRow, c).border = {
+                top: { style: 'thin', color: { argb: 'FF000000' } },
+                bottom: { style: 'thin', color: { argb: 'FF000000' } },
+                left: { style: 'thin', color: { argb: 'FF000000' } },
+                right: { style: 'thin', color: { argb: 'FF000000' } }
+              };
+            }
+          }
+
+          currentRow = captionRow + 1;
+          worksheet.getRow(currentRow).height = 10;
+          currentRow++;
+        }
+      }
 
       // Write to buffer and trigger download
       const buffer = await workbook.xlsx.writeBuffer();
       const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const downloadUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
-      const displayOsNumDownload = order.osNumber || (order.id && !order.id.startsWith('OS_') ? order.id : '00000');
-      link.id = `lnk-download-excel-${order.id}`;
+      const displayOsNumDownload = effectiveOrder.osNumber || (effectiveOrder.id && !effectiveOrder.id.startsWith('OS_') ? effectiveOrder.id : '00000');
+      link.id = `lnk-download-excel-${effectiveOrder.id}`;
       link.href = downloadUrl;
-      link.download = `OS_${displayOsNumDownload}_${order.clientName.replace(/\s+/g, '_')}.xlsx`;
+      link.download = `OS_${displayOsNumDownload}_${(effectiveOrder.clientName || 'Cliente').replace(/\s+/g, '_')}.xlsx`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -3485,7 +3883,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           tech1Upper.includes(termUpper) ||
           tech2Upper.includes(termUpper) ||
           techCode1.includes(termUpper) ||
-          techCode2.includes(termUpper);
+          techCode2.includes(termUpper) ||
+          (termUpper.includes('OFICINA') && Boolean(o.isWorkshop));
       }
         
       const matchStatus = statusFilter === 'all' 
@@ -3518,11 +3917,13 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
       }
       
-      return matchSearch && matchStatus && matchDate;
+      const matchWorkshop = !workshopOnlyFilter || Boolean(o.isWorkshop);
+      
+      return matchSearch && matchStatus && matchDate && matchWorkshop;
     });
 
     return sortOrdersByCreationDateDesc(list);
-  }, [orders, searchTerm, statusFilter, startDateFilter, endDateFilter, techIndex]);
+  }, [orders, searchTerm, statusFilter, workshopOnlyFilter, startDateFilter, endDateFilter, techIndex]);
 
   // --- PAGINAÇÃO DA TABELA DE ORDENS DE SERVIÇO ---
   const totalFilteredOrders = filteredOrders.length;
@@ -3569,6 +3970,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       if (reportCompany !== 'all' && o.serviceCompany !== reportCompany) return false;
       if (reportType !== 'all' && o.type !== reportType) return false;
       
+      if (reportWorkshopFilter === 'workshop_only' && !o.isWorkshop) return false;
+      if (reportWorkshopFilter === 'standard_only' && o.isWorkshop) return false;
+      
       if (reportStartDate || reportEndDate) {
         // Regra do sistema: no caso das ordens de serviço a data a ser considerada é a data de finalização
         const finalizedDate = o.finishedAt || o.adminFinalizedAt || o.techFinalizedAt || o.clientSignatureDate;
@@ -3591,7 +3995,16 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     });
 
     return sortOrdersByCreationDateDesc(list);
-  }, [orders, reportClientId, reportTechnicianId, reportStatus, reportCompany, reportType, reportStartDate, reportEndDate]);
+  }, [orders, reportClientId, reportTechnicianId, reportStatus, reportCompany, reportType, reportWorkshopFilter, reportStartDate, reportEndDate]);
+
+  // Contagem de O.S. na Oficina no sistema (global e filtradas)
+  const totalWorkshopOrders = useMemo(() => {
+    return orders.filter(o => Boolean(o.isWorkshop)).length;
+  }, [orders]);
+
+  const reportFilteredWorkshopCount = useMemo(() => {
+    return reportFilteredOrders.filter(o => Boolean(o.isWorkshop)).length;
+  }, [reportFilteredOrders]);
 
   const clientBillingMap: { [key: string]: number } = {};
   reportFilteredOrders.forEach(o => {
@@ -4763,7 +5176,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         ) : activeTab === 'list' ? (
           <>
             {/* Filtros e Busca */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-white p-4 border border-slate-200/80 rounded-2xl shadow-3xs no-print">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-white p-4 border border-slate-200/80 rounded-2xl shadow-3xs no-print items-center">
             {/* Busca */}
             <div className="relative">
               <input 
@@ -4824,6 +5237,36 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   </button>
                 )}
               </div>
+            </div>
+
+            {/* Botão Filtro de Oficina com Indicador de Quantidade */}
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={() => setWorkshopOnlyFilter(prev => !prev)}
+                className={cn(
+                  "w-full py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-between border cursor-pointer shadow-3xs",
+                  workshopOnlyFilter
+                    ? "bg-purple-600 text-white border-purple-700 shadow-purple-500/25 ring-2 ring-purple-400/30"
+                    : "bg-slate-50 hover:bg-purple-50/60 text-slate-700 border-slate-200 hover:border-purple-200"
+                )}
+                title={workshopOnlyFilter ? "Clique para desativar filtro de Oficina" : "Filtrar apenas O.S. que estão com Oficina ativa"}
+              >
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Wrench className={cn("w-3.5 h-3.5 shrink-0", workshopOnlyFilter ? "text-amber-300" : "text-purple-600")} />
+                  <span className="truncate">Apenas Oficina</span>
+                </div>
+                <span className={cn(
+                  "px-2 py-0.5 rounded-full text-[10px] font-black shrink-0 ml-1.5 leading-none transition-all",
+                  workshopOnlyFilter
+                    ? "bg-amber-400 text-slate-950 shadow-2xs"
+                    : totalWorkshopOrders > 0
+                      ? "bg-purple-100 text-purple-900 border border-purple-200"
+                      : "bg-slate-200 text-slate-600"
+                )}>
+                  {totalWorkshopOrders} na oficina
+                </span>
+              </button>
             </div>
           </div>
 
@@ -4921,9 +5364,17 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     </thead>
                     <tbody className="divide-y divide-slate-100 text-xs">
                       {paginatedOrders.map((o) => (
-                        <tr key={o.id} className="hover:bg-slate-50/50 transition-colors">
+                        <tr key={o.id} className={cn("transition-colors", o.isWorkshop ? "bg-purple-50/35 hover:bg-purple-50/65 border-l-4 border-l-purple-600" : "hover:bg-slate-50/50")}>
                           <td className="px-5 py-4 font-black text-slate-700">
-                            #{o.osNumber || (o.id && !o.id.startsWith('OS_') ? o.id : '00000')}
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span>#{o.osNumber || (o.id && !o.id.startsWith('OS_') ? o.id : '00000')}</span>
+                              {o.isWorkshop && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-black bg-purple-100 text-purple-900 border border-purple-200/80 shadow-2xs" title="Equipamento recolhido para conserto na Oficina">
+                                  <Wrench className="w-3 h-3 text-purple-700" />
+                                  OFICINA
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="px-5 py-4">
                             <div className="font-extrabold text-slate-800">{o.clientName}</div>
@@ -4932,12 +5383,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           <td className="px-5 py-4">
                             {o.equipmentName ? (
                               o.equipmentName === 'OUTRO EQUIPAMENTO' || o.equipmentId === 'OUTRO EQUIPAMENTO' ? (
-                                <div className="space-y-0.5">
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black bg-amber-100 text-amber-900 border border-amber-300">
-                                    <AlertTriangle className="w-3 h-3 text-amber-700" />
-                                    OUTRO EQUIPAMENTO
-                                  </span>
-                                  <div className="text-[9px] text-amber-700 font-bold">Vincular máquina no fechamento</div>
+                                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-50/90 text-amber-800 border border-amber-200/70 shadow-3xs transition-all hover:bg-amber-100/80 cursor-help" title="Vincular máquina no fechamento da O.S.">
+                                  <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
+                                  <span>Outro Equipamento</span>
                                 </div>
                               ) : (
                                 <div>
@@ -5242,7 +5690,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-1">
               {/* Empresa Prestadora */}
               <div>
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Empresa Prestadora</label>
@@ -5283,6 +5731,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                       <option value="AVALIAÇÃO TÉCNICA">Avaliação Técnica</option>
                     </>
                   )}
+                </select>
+              </div>
+
+              {/* Filtro de Oficina com Indicador */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Oficina</label>
+                  <span className="text-[9px] font-black text-purple-700 bg-purple-50 border border-purple-200/70 px-1.5 py-0.2 rounded-full">
+                    {totalWorkshopOrders} no sistema
+                  </span>
+                </div>
+                <select
+                  value={reportWorkshopFilter}
+                  onChange={(e) => setReportWorkshopFilter(e.target.value as any)}
+                  className={cn(
+                    "w-full border rounded-xl py-2 px-3 text-xs font-bold outline-none focus:ring-2 transition-all",
+                    reportWorkshopFilter === 'workshop_only'
+                      ? "bg-purple-50/70 border-purple-400 text-purple-900 focus:ring-purple-500/20"
+                      : "bg-slate-50 border-slate-200 text-slate-700 focus:ring-blue-500/10 focus:border-blue-500"
+                  )}
+                >
+                  <option value="all">TODAS (OFICINA E CAMPO)</option>
+                  <option value="workshop_only">APENAS EM OFICINA ({totalWorkshopOrders})</option>
+                  <option value="standard_only">APENAS SEM OFICINA</option>
                 </select>
               </div>
 
@@ -5331,26 +5803,61 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           </div>
 
           {/* Indicadores do Relatório */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 no-print">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 no-print">
             {/* Total de OS */}
             <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-3xs flex items-center gap-4">
-              <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
+              <div className="p-3 bg-blue-50 text-blue-600 rounded-xl shrink-0">
                 <FileText className="w-6 h-6" />
               </div>
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">Total O.S. Filtradas</span>
+              <div className="min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block truncate">Total O.S. Filtradas</span>
                 <span className="text-xl font-extrabold text-slate-800 leading-none">{reportFilteredOrders.length}</span>
+              </div>
+            </div>
+
+            {/* O.S. na Oficina (Indicador Imediato) */}
+            <div 
+              onClick={() => setReportWorkshopFilter(prev => prev === 'workshop_only' ? 'all' : 'workshop_only')}
+              className={cn(
+                "border p-5 rounded-2xl shadow-3xs flex items-center gap-4 transition-all cursor-pointer group",
+                reportWorkshopFilter === 'workshop_only'
+                  ? "bg-purple-50/80 border-purple-400 ring-2 ring-purple-400/20"
+                  : "bg-white border-slate-200/80 hover:border-purple-200 hover:bg-purple-50/30"
+              )}
+              title={reportWorkshopFilter === 'workshop_only' ? "Filtro ativo: exibindo apenas O.S. em Oficina. Clique para ver todas." : "Clique para filtrar apenas O.S. em Oficina"}
+            >
+              <div className={cn(
+                "p-3 rounded-xl shrink-0 transition-colors",
+                reportWorkshopFilter === 'workshop_only' ? "bg-purple-600 text-white" : "bg-purple-100 text-purple-700 group-hover:bg-purple-600 group-hover:text-white"
+              )}>
+                <Wrench className="w-6 h-6" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block truncate">Em Oficina</span>
+                  {reportWorkshopFilter === 'workshop_only' && (
+                    <span className="text-[8px] font-black uppercase bg-purple-200 text-purple-900 px-1.5 py-0.2 rounded-full">Ativo</span>
+                  )}
+                </div>
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-xl font-extrabold text-purple-900 leading-none">
+                    {reportFilteredWorkshopCount}
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-bold">
+                    de {totalWorkshopOrders} no sistema
+                  </span>
+                </div>
               </div>
             </div>
 
             {/* Faturamento Total */}
             <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-3xs flex items-center gap-4">
-              <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
+              <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl shrink-0">
                 <DollarSign className="w-6 h-6" />
               </div>
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">Valor Faturado</span>
-                <span className="text-xl font-extrabold text-slate-800 leading-none">
+              <div className="min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block truncate">Valor Faturado</span>
+                <span className="text-xl font-extrabold text-slate-800 leading-none truncate block">
                   R$ {reportFilteredOrders.reduce((sum, o) => sum + (o.totalValue || 0), 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                 </span>
               </div>
@@ -5358,12 +5865,12 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
             {/* Ticket Médio */}
             <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-3xs flex items-center gap-4">
-              <div className="p-3 bg-amber-50 text-amber-600 rounded-xl">
+              <div className="p-3 bg-amber-50 text-amber-600 rounded-xl shrink-0">
                 <TrendingUp className="w-6 h-6" />
               </div>
-              <div>
-                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">Ticket Médio por O.S.</span>
-                <span className="text-xl font-extrabold text-slate-800 leading-none">
+              <div className="min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block truncate">Ticket Médio por O.S.</span>
+                <span className="text-xl font-extrabold text-slate-800 leading-none truncate block">
                   R$ {(reportFilteredOrders.length ? (reportFilteredOrders.reduce((sum, o) => sum + (o.totalValue || 0), 0) / reportFilteredOrders.length) : 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                 </span>
               </div>
@@ -5371,15 +5878,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
             {/* Divisão Serviços / Produtos */}
             <div className="bg-white border border-slate-200/80 p-5 rounded-2xl shadow-3xs flex items-center gap-4">
-              <div className="p-3 bg-teal-50 text-teal-600 rounded-xl">
+              <div className="p-3 bg-teal-50 text-teal-600 rounded-xl shrink-0">
                 <Receipt className="w-6 h-6" />
               </div>
               <div className="flex-1 min-w-0">
-                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">Serviços vs Produtos</span>
-                <div className="text-[10px] text-slate-700 font-bold mt-1">
+                <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block truncate">Serviços vs Produtos</span>
+                <div className="text-[10px] text-slate-700 font-bold mt-1 truncate">
                   Serv: <span className="text-blue-600">R$ {reportFilteredOrders.reduce((sum, o) => sum + (o.services ? o.services.reduce((sSum, s) => sSum + (s.totalValue || 0), 0) : 0), 0).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}</span>
                 </div>
-                <div className="text-[10px] text-slate-700 font-bold">
+                <div className="text-[10px] text-slate-700 font-bold truncate">
                   Prod: <span className="text-teal-600">R$ {reportFilteredOrders.reduce((sum, o) => sum + (o.products ? o.products.reduce((pSum, p) => pSum + (p.totalValue || 0), 0) : 0), 0).toLocaleString('pt-BR', { maximumFractionDigits: 0 })}</span>
                 </div>
               </div>
@@ -5583,9 +6090,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             )) ||
             (
               selectedOrder.openedBy &&
-              !['ADMIN', 'ADMINISTRADOR', 'ADMINISTRATIVO', 'ESCRITORIO', 'ESCRITÓRIO', 'SISTEMA', 'LEFRIO', 'ALCLIMA', 'SUPORTE', 'ASSISTENTE', 'GERENTE'].some(term =>
-                (selectedOrder.openedBy || '').trim().toUpperCase().startsWith(term)
-              ) &&
+              !isStaffName(selectedOrder.openedBy) &&
               technicians.some(t => {
                 const openedStr = (selectedOrder.openedBy || '').trim().toUpperCase();
                 const tName = (t.name || '').trim().toUpperCase();
@@ -5598,7 +6103,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 );
               })
             ) ||
-            (selectedOrder.externalOs && !['ADMIN', 'ADMINISTRADOR', 'ESCRITORIO', 'ESCRITÓRIO', 'SISTEMA', 'LEFRIO', 'ALCLIMA'].some(term => (selectedOrder.openedBy || '').trim().toUpperCase().startsWith(term)))
+            (selectedOrder.externalOs && !isStaffName(selectedOrder.openedBy))
           )
         );
 
@@ -5659,13 +6164,27 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => userRole === UserRole.TECHNICIAN ? setTechActiveTab('my_orders') : setIsFormOpen(false)}
-                className="p-1 text-slate-400 hover:bg-slate-200/60 hover:text-slate-800 rounded-lg transition-all cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                {selectedOrder && (
+                  <button
+                    type="button"
+                    onClick={() => handleGenerateShareLink(selectedOrder)}
+                    className="px-2.5 py-1 text-[11px] font-extrabold uppercase tracking-wider bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-3xs"
+                    title="Gerar e compartilhar link de assinatura externa com validade de 48 horas"
+                  >
+                    <Send className="w-3.5 h-3.5 text-indigo-600" />
+                    <span className="hidden sm:inline">Link de Assinatura (48h)</span>
+                    <span className="sm:hidden">Link (48h)</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => userRole === UserRole.TECHNICIAN ? setTechActiveTab('my_orders') : setIsFormOpen(false)}
+                  className="p-1 text-slate-400 hover:bg-slate-200/60 hover:text-slate-800 rounded-lg transition-all cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {/* Conteúdo do Form */}
@@ -5954,6 +6473,36 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           </>
                         )}
                       </select>
+                    </div>
+                    <div>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">Equipamento na Oficina</label>
+                        {formIsWorkshop && (
+                          <span className="text-[8px] font-bold text-purple-700 bg-purple-100 px-1 py-0.2 rounded border border-purple-200 uppercase">Acompanhamento</span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setFormIsWorkshop(!formIsWorkshop)}
+                        className={cn(
+                          "w-full border rounded-lg py-1.5 px-2.5 flex items-center justify-between text-xs font-bold transition-all outline-none cursor-pointer h-[34px]",
+                          formIsWorkshop
+                            ? "bg-purple-600 text-white border-purple-700 shadow-xs"
+                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                        )}
+                        title="Marque para sinalizar que o equipamento foi trazido para conserto na oficina e precisa de acompanhamento especial"
+                      >
+                        <div className="flex items-center gap-1.5 truncate">
+                          <Wrench className={cn("w-3.5 h-3.5 shrink-0", formIsWorkshop ? "text-amber-300" : "text-slate-400")} />
+                          <span className="truncate">{formIsWorkshop ? 'OFICINA (HABILITADO)' : 'DESABILITADO'}</span>
+                        </div>
+                        <div className={cn(
+                          "w-7 h-3.5 rounded-full p-0.5 transition-colors duration-200 ease-in-out flex items-center shrink-0 ml-1",
+                          formIsWorkshop ? "bg-amber-400 justify-end" : "bg-slate-200 justify-start"
+                        )}>
+                          <div className="w-2.5 h-2.5 rounded-full bg-white shadow-2xs" />
+                        </div>
+                      </button>
                     </div>
                   </div>
 
@@ -6403,9 +6952,27 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         {userRole === UserRole.TECHNICIAN ? 'Equipamento / Máquina (Obrigatório)' : 'Equipamento (Obrigatório p/ Finalizar)'}
                       </label>
                       {formEquipmentId === 'OUTRO EQUIPAMENTO' && (
-                        <span className="text-[9px] font-black text-amber-800 bg-amber-100 border border-amber-300 px-1.5 py-0.2 rounded uppercase">
-                          Outro Equipamento
-                        </span>
+                        <div className="relative group inline-block">
+                          <span className="cursor-help inline-flex items-center gap-1 text-[9px] font-black text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 px-2 py-0.5 rounded-md uppercase transition-all shadow-2xs">
+                            <AlertTriangle className="w-3 h-3 text-amber-700" />
+                            <span>Troca Obrigatória</span>
+                          </span>
+                          <div className="absolute right-0 top-full mt-1.5 w-72 p-3 bg-slate-900/95 backdrop-blur-xs text-white text-[11px] font-medium leading-relaxed rounded-xl shadow-xl border border-slate-700 opacity-0 group-hover:opacity-100 transition-all pointer-events-none group-hover:pointer-events-auto z-50">
+                            <div className="flex items-center gap-1.5 text-amber-400 font-bold mb-1 border-b border-slate-800 pb-1">
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                              <span>Regra: Troca Obrigatória de Máquina</span>
+                            </div>
+                            {userRole === UserRole.TECHNICIAN ? (
+                              <span>
+                                Preencha no campo <strong>"Descrição do Problema"</strong> os detalhes desta máquina (marca, modelo, ambiente, capacidade) para que a administração possa identificar e vincular a máquina correta.
+                              </span>
+                            ) : (
+                              <span>
+                                Esta O.S. foi recebida com a opção <strong>"OUTRO EQUIPAMENTO"</strong>. Consulte a <strong>"Descrição do Problema"</strong> informada pelo técnico e selecione a máquina correta cadastrada na listagem acima. A O.S. não poderá ser finalizada com esta opção provisória.
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       )}
                     </div>
                     <select
@@ -6435,33 +7002,6 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         <option key={eq.id} value={eq.id}>{formatEquipmentOptionLabel(eq)}</option>
                       ))}
                     </select>
-
-                    {/* Alerta explicativo dinâmico para OUTRO EQUIPAMENTO */}
-                    {formEquipmentId === 'OUTRO EQUIPAMENTO' && (
-                      <div className={cn(
-                        "mt-2 p-2.5 rounded-xl text-xs flex items-start gap-2 animate-fadeIn",
-                        userRole === UserRole.TECHNICIAN
-                          ? "bg-amber-50 border border-amber-200 text-amber-900"
-                          : "bg-amber-500/15 border-2 border-amber-500/40 text-amber-950 font-medium"
-                      )}>
-                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                        <div className="flex-1 text-[11px] leading-relaxed">
-                          {userRole === UserRole.TECHNICIAN ? (
-                            <>
-                              <strong className="block text-amber-900 font-bold mb-0.5">Opção "OUTRO EQUIPAMENTO" selecionada:</strong>
-                              Preencha abaixo no campo <strong>"Descrição do Problema"</strong> os detalhes desta máquina (marca, modelo, ambiente/sala, capacidade aproximada) para que a administração possa identificar e vincular o equipamento correto.
-                            </>
-                          ) : (
-                            <>
-                              <strong className="block text-amber-950 font-black uppercase text-[10px] tracking-wide mb-0.5">
-                                Regra Administrativa: Troca Obrigatória de Máquina
-                              </strong>
-                              Esta O.S. foi recebida com a opção <strong>"OUTRO EQUIPAMENTO"</strong>. Consulte as informações descritas pelo técnico em <strong>"Descrição do Problema"</strong> e <strong>selecione a máquina correta cadastrada na listagem acima</strong>. A O.S. não poderá ser finalizada com esta opção provisória.
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    )}
                   </div>
                 </div>
 
@@ -7997,6 +8537,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     <div><span className="font-bold text-slate-600">Status:</span> {reportStatus === 'all' ? 'Todos os Status' : getStatusLabel(reportStatus).toUpperCase()}</div>
                     <div><span className="font-bold text-slate-600">Empresa:</span> {reportCompany === 'all' ? 'Todas' : getActiveCompanyForOrder(reportCompany).shortName}</div>
                     <div><span className="font-bold text-slate-600">Tipo:</span> {reportType === 'all' ? 'Todos os Tipos' : reportType}</div>
+                    {reportWorkshopFilter !== 'all' && (
+                      <div className="col-span-2 text-purple-900 font-bold">
+                        <span className="text-slate-600">Filtro Oficina:</span> {reportWorkshopFilter === 'workshop_only' ? 'Apenas O.S. com equipamento na Oficina' : 'Apenas O.S. sem Oficina'}
+                      </div>
+                    )}
                   </div>
 
                   {/* Estatísticas / KPIs */}
@@ -8225,6 +8770,109 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           </div>
         </div>
       )}
+
+      {/* Modal de Compartilhamento de Link de Assinatura Externa (48h) */}
+      <AnimatePresence>
+        {shareModalOpen && shareLinkOS && (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 no-print">
+            <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95">
+              <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl border border-indigo-100">
+                    <Send className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-slate-900 uppercase tracking-wide">
+                      Link de Assinatura Externa
+                    </h3>
+                    <p className="text-[11px] text-slate-500 font-medium">Validade de 48 horas para fiscal/cliente</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShareModalOpen(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition-all cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <div className="bg-slate-50 border border-slate-200 p-3 rounded-2xl space-y-1 text-xs">
+                  <div className="flex justify-between items-center text-slate-500">
+                    <span className="font-bold text-[10px] uppercase tracking-wider">Ordem de Serviço:</span>
+                    <span className="font-black text-slate-900">#{shareLinkOS.osNumber || shareLinkOS.id}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-slate-500">
+                    <span className="font-bold text-[10px] uppercase tracking-wider">Cliente:</span>
+                    <span className="font-bold text-slate-800 truncate max-w-[200px]">{shareLinkOS.clientName}</span>
+                  </div>
+                </div>
+
+                <div className="bg-amber-50/80 border border-amber-200/80 p-3 rounded-2xl flex items-center gap-2 text-amber-900 text-xs">
+                  <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+                  <div>
+                    <span className="font-black block text-[11px] uppercase tracking-wider">Link Temporário (48h)</span>
+                    <span className="text-[10px] text-amber-800">
+                      Expira em: {new Date(shareExpiresAt).toLocaleDateString('pt-BR')} às {new Date(shareExpiresAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">
+                    Endereço do Link Compartilhável
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      readOnly
+                      value={shareUrl}
+                      onClick={(e) => (e.target as HTMLInputElement).select()}
+                      className="w-full bg-slate-100 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none select-all"
+                    />
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(shareUrl);
+                        setIsCopied(true);
+                        setTimeout(() => setIsCopied(false), 3000);
+                      }}
+                      className={cn(
+                        "px-3.5 py-2 text-xs font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer shrink-0 flex items-center gap-1.5 shadow-2xs",
+                        isCopied
+                          ? "bg-emerald-600 text-white"
+                          : "bg-indigo-600 hover:bg-indigo-700 text-white"
+                      )}
+                    >
+                      {isCopied ? <Check className="w-3.5 h-3.5" /> : <ClipboardCheck className="w-3.5 h-3.5" />}
+                      <span>{isCopied ? 'Copiado!' : 'Copiar'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <a
+                    href={`https://wa.me/?text=${encodeURIComponent(
+                      `Olá! Segue o link para conferência e assinatura da Ordem de Serviço Nº ${shareLinkOS.osNumber || shareLinkOS.id} (${shareLinkOS.clientName}):\n\n${shareUrl}\n\nEste link possui validade de 48 horas.`
+                    )}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black uppercase tracking-wider py-3 px-4 rounded-2xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    <Send className="w-4 h-4" />
+                    <span>Enviar via WhatsApp</span>
+                  </a>
+                </div>
+              </div>
+
+              <div className="text-center pt-2 border-t border-slate-100">
+                <p className="text-[10px] text-slate-400 font-semibold">
+                  O cliente/fiscal poderá visualizar os dados e assinar sem precisar de login.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

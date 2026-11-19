@@ -249,6 +249,7 @@ export function EquipmentChecklistModal({
   const [clientSigneeName, setClientSigneeName] = useState(activeChecklistRecord.clientSigneeName || '');
   const [clientSigneeRegistration, setClientSigneeRegistration] = useState(activeChecklistRecord.clientSigneeRegistration || '');
   const [routeNotes, setRouteNotes] = useState(activeChecklistRecord.routeNotes || '');
+  const [otherPhotos, setOtherPhotos] = useState<string[]>(activeChecklistRecord.otherPhotos || []);
 
   // Controle de expansão dos cards (recolhidos por padrão para máxima compacidade e organização em telas móveis)
   const [expandedEqIds, setExpandedEqIds] = useState<Set<string>>(() => new Set());
@@ -274,6 +275,8 @@ export function EquipmentChecklistModal({
   // Refs síncronos para garantir que operações em segundo plano acessem sempre os valores mais recentes
   const routeNotesRef = useRef(routeNotes);
   routeNotesRef.current = routeNotes;
+  const otherPhotosRef = useRef(otherPhotos);
+  otherPhotosRef.current = otherPhotos;
   const clientSigneeNameRef = useRef(clientSigneeName);
   clientSigneeNameRef.current = clientSigneeName;
   const clientSigneeRegistrationRef = useRef(clientSigneeRegistration);
@@ -312,6 +315,7 @@ export function EquipmentChecklistModal({
           checklist: modalChecklistRef.current,
           executedQuantity: executedCount,
           routeNotes,
+          otherPhotos,
           clientSigneeName,
           clientSigneeRegistration,
           clientSignature,
@@ -340,7 +344,7 @@ export function EquipmentChecklistModal({
         clearTimeout(textDebounceTimerRef.current);
       }
     };
-  }, [routeNotes, clientSigneeName, clientSigneeRegistration, clientSignature, techSignature]);
+  }, [routeNotes, otherPhotos, clientSigneeName, clientSigneeRegistration, clientSignature, techSignature]);
 
   // Inclusão de nova máquina pelo técnico em campo
   const [isTechAddingEquipment, setIsTechAddingEquipment] = useState<boolean>(false);
@@ -404,6 +408,7 @@ export function EquipmentChecklistModal({
         checklist: nextChecklist,
         executedQuantity: executedCount,
         routeNotes: routeNotesRef.current,
+        otherPhotos: otherPhotosRef.current,
         techSignature: techSignatureRef.current,
         clientSignature: clientSignatureRef.current,
         clientSignatureDate: clientSignatureDateRef.current || (clientSignatureRef.current ? new Date().toISOString() : undefined),
@@ -660,6 +665,53 @@ export function EquipmentChecklistModal({
     saveChecklistItemRealtime(updated);
   };
 
+  // Upload e remoção de fotos gerais do cliente ("Outros" - até 4 imagens)
+  const handleAddOtherPhoto = async (file: File) => {
+    if (!file || isRecordCompleted) return;
+    if (otherPhotos.length >= 4) {
+      alert('Você pode adicionar no máximo 4 fotos na seção Outros.');
+      return;
+    }
+    try {
+      const base64Str = await compressImageToBase64(file, 800, 800, 0.60);
+      const updatedPhotos = [...otherPhotos, base64Str].slice(0, 4);
+      setOtherPhotos(updatedPhotos);
+      otherPhotosRef.current = updatedPhotos;
+
+      const updates: Partial<MaintenanceRecord> = {
+        otherPhotos: updatedPhotos
+      };
+      await dataService.upsertRecord({
+        ...activeChecklistRecord,
+        ...updates
+      });
+      if (onRecordUpdated) {
+        onRecordUpdated({ ...activeChecklistRecord, ...updates });
+      }
+    } catch (e) {
+      console.error('Erro ao adicionar foto na seção Outros:', e);
+      alert('Não foi possível anexar a foto. Tente novamente.');
+    }
+  };
+
+  const handleRemoveOtherPhoto = async (photoIndex: number) => {
+    if (isRecordCompleted) return;
+    const updatedPhotos = otherPhotos.filter((_, idx) => idx !== photoIndex);
+    setOtherPhotos(updatedPhotos);
+    otherPhotosRef.current = updatedPhotos;
+
+    const updates: Partial<MaintenanceRecord> = {
+      otherPhotos: updatedPhotos
+    };
+    await dataService.upsertRecord({
+      ...activeChecklistRecord,
+      ...updates
+    });
+    if (onRecordUpdated) {
+      onRecordUpdated({ ...activeChecklistRecord, ...updates });
+    }
+  };
+
   // Inclusão de nova máquina pelo técnico em campo
   const handleAddTechEquipment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -859,6 +911,7 @@ export function EquipmentChecklistModal({
       clientSigneeName: clientSigneeNameRef.current,
       clientSigneeRegistration: clientSigneeRegistrationRef.current,
       routeNotes: routeNotesRef.current,
+      otherPhotos: otherPhotosRef.current,
       status: MaintenanceStatus.PRE_COMPLETED,
       routeStatus: MaintenanceStatus.PRE_COMPLETED,
       completionDate: activeChecklistRecord.completionDate || nowISO,
@@ -917,6 +970,7 @@ export function EquipmentChecklistModal({
       clientSigneeName,
       clientSigneeRegistration,
       routeNotes,
+      otherPhotos,
       status: activeChecklistRecord.status === MaintenanceStatus.COMPLETED ? MaintenanceStatus.COMPLETED : MaintenanceStatus.PENDING,
       routeStatus: activeChecklistRecord.routeStatus === MaintenanceStatus.COMPLETED ? MaintenanceStatus.COMPLETED : MaintenanceStatus.PENDING
     };
@@ -1653,6 +1707,57 @@ export function EquipmentChecklistModal({
               placeholder="Descreva observações gerais desta visita, pendências, recomendações ao cliente..."
               className="w-full p-3.5 text-xs bg-slate-50 border border-slate-200 rounded-2xl outline-none font-medium text-slate-800 focus:bg-white focus:border-blue-500"
             />
+          </div>
+
+          {/* SEÇÃO "OUTROS" - FOTOS GERAIS DO CLIENTE / INSTALAÇÕES */}
+          <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap border-b border-slate-100 pb-2">
+              <div>
+                <h4 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                  <Camera className="w-4 h-4 text-amber-500" />
+                  Outros ({otherPhotos.length}/4 fotos)
+                </h4>
+                <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                  Adicione até 4 fotos de aspectos gerais do cliente (ex: parede que precisa de atenção, fiação exposta, telhado, etc.) sem vincular a uma máquina específica. Essas imagens sairão na folha de impressão.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 flex-wrap pt-1">
+              {otherPhotos.map((photoUrl, pIdx) => (
+                <div key={pIdx} className="relative group w-24 h-24 sm:w-28 sm:h-28 rounded-2xl overflow-hidden border border-slate-300 shadow-xs bg-slate-100">
+                  <img src={photoUrl} alt={`Outros ${pIdx + 1}`} className="w-full h-full object-cover" />
+                  {!isRecordCompleted && (
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveOtherPhoto(pIdx)}
+                      className="absolute top-1.5 right-1.5 p-1 bg-rose-600 text-white rounded-lg opacity-90 hover:opacity-100 transition-opacity cursor-pointer shadow-md"
+                      title="Remover foto"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+
+              {!isRecordCompleted && otherPhotos.length < 4 && (
+                <label className="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl border-2 border-dashed border-slate-300 hover:border-blue-500 flex flex-col items-center justify-center gap-1 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer bg-slate-50 hover:bg-blue-50/50">
+                  <Camera className="w-5 h-5 text-slate-500" />
+                  <span className="text-[10px] font-black uppercase tracking-wider">+ Adicionar</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      if (e.target.files && e.target.files[0]) {
+                        handleAddOtherPhoto(e.target.files[0]);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                </label>
+              )}
+            </div>
           </div>
 
           {/* IDENTIFICAÇÃO E ASSINATURA DIGITAL DO CLIENTE & TÉCNICO */}

@@ -1,8 +1,8 @@
 {
-  "versionCode": 15,
-  "versionName": "1.3.1",
+  "versionCode": 16,
+  "versionName": "1.3.2",
   "downloadUrl": "https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk",
-  "releaseNotes": "Versão 1.3.1 Oficial: Sincronização direta em tempo real de roteiros e ordens de serviço, auditoria GPS, checklists offline e instalador nativo integrado.",
+  "releaseNotes": "Versão 1.3.2 Oficial: Sincronização otimizada em paralelo dos endereços agendados por técnico e rota ativa, correção de carregamento de clientes/endereços nas Ordens de Serviço e checklists offline.",
   "isMandatory": false,
-  "updatedAt": "2026-10-25T01:03:42.620Z"
+  "updatedAt": "2026-11-19T21:20:00.000Z"
 }

@@ -44,7 +44,7 @@ import { ptBR } from 'date-fns/locale';
 import { ImageUploader } from './ImageUploader';
 import TechExpensesView from './TechExpensesView';
 import CardSummaryView from './CardSummaryView';
-import { cn, matchesTechnician } from '../lib/utils';
+import { cn, matchesTechnician, normalizeRouteKey } from '../lib/utils';
 
 interface RouteGroup {
   records: (MaintenanceRecord & { address?: Address, client?: Client })[];
@@ -67,7 +67,7 @@ interface RouteGroup {
   routeCardId?: string;
 }
 
-interface RouteCardProps {
+interface RouteTableRowProps {
   name: string;
   data: RouteGroup;
   colors: { name: string, bg: string, hex: string }[];
@@ -82,13 +82,14 @@ interface RouteCardProps {
   onSetTechnicians: (name: string, t1?: string, t2?: string) => Promise<void>;
   onEdit: (name: string) => void;
   onDelete: (name: string) => void;
+  onRemoveFromMonth?: (name: string) => void;
   onOpenAddressSelection: (name: string) => void;
   onOpenCostCalculator: (name: string) => void;
   userRole?: string;
   addressesCount?: number;
 }
 
-const RouteCard = ({ 
+const RouteTableRow = ({ 
   name, 
   data, 
   colors, 
@@ -103,11 +104,12 @@ const RouteCard = ({
   onSetTechnicians, 
   onEdit, 
   onDelete, 
+  onRemoveFromMonth,
   onOpenAddressSelection, 
   onOpenCostCalculator,
   userRole,
   addressesCount = 0
-}: RouteCardProps) => {
+}: RouteTableRowProps) => {
   const isReadOnly = userRole !== UserRole.ADMIN && userRole !== UserRole.ASSISTANT;
   const [localNotes, setLocalNotes] = useState(data.routeNotes || '');
   const [localPlannedDate, setLocalPlannedDate] = useState(data.plannedDate || '');
@@ -116,47 +118,36 @@ const RouteCard = ({
   const [localServicesValue, setLocalServicesValue] = useState<number | ''>(data.routeServicesValue ?? '');
   const [localPreventiveCount, setLocalPreventiveCount] = useState<number | ''>(data.routePreventiveCount ?? '');
   const [localAttachmentUrl, setLocalAttachmentUrl] = useState(data.routeAttachmentUrl || '');
+  const [isExpanded, setIsExpanded] = useState(false);
 
-  // Sync with prop changes (e.g. from other users or full reload)
-  useEffect(() => {
-    setLocalNotes(data.routeNotes || '');
-  }, [data.routeNotes]);
+  useEffect(() => { setLocalNotes(data.routeNotes || ''); }, [data.routeNotes]);
+  useEffect(() => { setLocalPlannedDate(data.plannedDate || ''); }, [data.plannedDate]);
+  useEffect(() => { setLocalReturnDate(data.returnDate || ''); }, [data.returnDate]);
+  useEffect(() => { setLocalOrdersCount(data.routeServiceOrdersCount ?? ''); }, [data.routeServiceOrdersCount]);
+  useEffect(() => { setLocalServicesValue(data.routeServicesValue ?? ''); }, [data.routeServicesValue]);
+  useEffect(() => { setLocalPreventiveCount(data.routePreventiveCount ?? ''); }, [data.routePreventiveCount]);
+  useEffect(() => { setLocalAttachmentUrl(data.routeAttachmentUrl || ''); }, [data.routeAttachmentUrl]);
 
-  useEffect(() => {
-    setLocalPlannedDate(data.plannedDate || '');
-  }, [data.plannedDate]);
+  const effectiveCost = useMemo(() => {
+    const itemsSum = (data.routeCostItems || []).reduce((acc, curr) => acc + (Number(curr.value) || 0), 0);
+    return (data.routeEstimatedCost !== undefined && data.routeEstimatedCost !== null && Number(data.routeEstimatedCost) > 0)
+      ? Number(data.routeEstimatedCost)
+      : itemsSum;
+  }, [data.routeEstimatedCost, data.routeCostItems]);
 
-  useEffect(() => {
-    setLocalReturnDate(data.returnDate || '');
-  }, [data.returnDate]);
-
-  useEffect(() => {
-    setLocalOrdersCount(data.routeServiceOrdersCount ?? '');
-  }, [data.routeServiceOrdersCount]);
-
-  useEffect(() => {
-    setLocalServicesValue(data.routeServicesValue ?? '');
-  }, [data.routeServicesValue]);
-
-  useEffect(() => {
-    setLocalPreventiveCount(data.routePreventiveCount ?? '');
-  }, [data.routePreventiveCount]);
-
-  useEffect(() => {
-    setLocalAttachmentUrl(data.routeAttachmentUrl || '');
-  }, [data.routeAttachmentUrl]);
+  const completedAddressesCount = useMemo(() => {
+    return data.records.filter(r => r.status === MaintenanceStatus.COMPLETED).length;
+  }, [data.records]);
 
   return (
-    <div className="bg-white border border-slate-200/90 rounded-xl overflow-hidden shadow-2xs hover:shadow-md hover:border-slate-300 transition-all duration-200">
-      {/* Seção Superior / Principal */}
-      <div className="p-3 sm:p-3.5 space-y-2.5">
-        {/* Linha 1: Identificação, Ações, Categorias, Datas e Status */}
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
-          {/* Lado Esquerdo: Ícone, Nome, Badges, Cores e Categoria */}
-          <div className="flex flex-wrap items-center gap-2.5">
+    <React.Fragment>
+      <tr className="hover:bg-slate-50/80 transition-colors group text-xs border-b border-slate-200/70">
+        {/* Coluna 1: Rota & Categoria */}
+        <td className="py-2.5 px-3.5 align-middle">
+          <div className="flex items-center gap-2 min-w-[190px]">
             <div 
               className={cn(
-                "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 shadow-2xs text-white",
+                "w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-2xs text-white text-[11px] font-bold",
                 data.routeColor ? "" : (
                   data.status === 'completed' ? "bg-emerald-500" : 
                   data.status === 'partial' ? "bg-amber-500" : "bg-blue-500"
@@ -164,62 +155,270 @@ const RouteCard = ({
               )} 
               style={data.routeColor ? { backgroundColor: data.routeColor } : {}}
             >
-              <MapPin className="w-4 h-4" />
+              <MapPin className="w-3.5 h-3.5" />
             </div>
 
-            <div>
+            <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <h3 className="font-extrabold text-slate-800 text-sm uppercase tracking-tight leading-none">{name}</h3>
-                
+                <span className="font-extrabold text-slate-900 text-xs uppercase tracking-tight truncate">{name}</span>
                 <button 
+                  type="button"
                   onClick={() => onOpenAddressSelection(name)}
+                  className="px-1.5 py-0.5 rounded-md bg-slate-100 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 font-extrabold text-[10px] flex items-center gap-1 transition-all shrink-0 cursor-pointer"
+                  title="Gerenciar locais de atendimento da rota"
+                >
+                  <ListChecks className="w-3 h-3 text-emerald-600" />
+                  <span>{addressesCount}</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-1 mt-1">
+                <select
+                  value={data.config.type}
+                  disabled={isReadOnly}
+                  onChange={(e) => onSetType(name, e.target.value as RouteType)}
                   className={cn(
-                    "p-1 rounded-md transition-all flex items-center gap-1",
-                    data.config.type === RouteType.TEMPORARY 
-                      ? "text-purple-600 hover:text-purple-800 hover:bg-purple-50" 
-                      : "text-slate-500 hover:text-emerald-700 hover:bg-emerald-50"
+                    "text-[9px] font-black uppercase px-1.5 py-0.2 rounded border outline-none cursor-pointer",
+                    data.config.type === RouteType.FIXED ? "bg-amber-50 border-amber-200 text-amber-800" :
+                    data.config.type === RouteType.TEMPORARY ? "bg-purple-50 border-purple-200 text-purple-800" :
+                    "bg-blue-50 border-blue-200 text-blue-800"
                   )}
-                  style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
-                  title={data.config.type === RouteType.TEMPORARY ? "Gerenciar e incluir locais de atendimento na rota temporária" : "Selecionar locais de atendimento"}
                 >
-                  <ListChecks className={cn("w-3 h-3", data.config.type === RouteType.TEMPORARY ? "text-purple-600" : "text-emerald-600")} />
-                  {addressesCount > 0 && (
-                    <span className={cn(
-                      "text-[10px] font-black rounded-full px-1.5 py-0.2 min-w-[16px] text-center leading-none",
-                      data.config.type === RouteType.TEMPORARY ? "bg-purple-100 text-purple-800" : "bg-emerald-100 text-emerald-800"
-                    )}>
-                      {addressesCount}
-                    </span>
-                  )}
-                </button>
+                  <option value={RouteType.VARIABLE}>Capital</option>
+                  <option value={RouteType.FIXED}>Viagem</option>
+                  <option value={RouteType.TEMPORARY}>Temporária</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </td>
 
-                <button 
-                  onClick={() => onEdit(name)} 
-                  style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
-                  className="p-1 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-all"
-                  title={data.config.type === RouteType.TEMPORARY ? "Editar Rota e Endereços" : "Editar nome da rota"}
-                >
-                  <Edit2 className="w-3 h-3" />
-                </button>
+        {/* Coluna 2: Equipe Escalada */}
+        <td className="py-2.5 px-2 align-middle">
+          <div className="flex flex-col gap-1 min-w-[120px]">
+            <select
+              value={data.config.technician1 || ''} disabled={isReadOnly}
+              onChange={(e) => onSetTechnicians(name, e.target.value, data.config.technician2)}
+              className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-bold text-slate-800 outline-none h-6 w-full max-w-[120px]"
+            >
+              <option value="">Técnico 1</option>
+              {technicians.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+            </select>
+            <select
+              value={data.config.technician2 || ''} disabled={isReadOnly}
+              onChange={(e) => onSetTechnicians(name, data.config.technician1, e.target.value)}
+              className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[10px] font-bold text-slate-800 outline-none h-6 w-full max-w-[120px]"
+            >
+              <option value="">Técnico 2</option>
+              {technicians.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
+            </select>
+          </div>
+        </td>
 
-                <button 
-                  onClick={() => onDelete(name)} 
-                  style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
-                  className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-all"
-                  title="Remover rota"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+        {/* Coluna 3: Período da Viagem */}
+        <td className="py-2.5 px-2 align-middle">
+          <div className="flex flex-col gap-1 min-w-[130px]">
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 h-6">
+              <span className="text-[8px] font-black text-slate-400 uppercase">Saída:</span>
+              <input 
+                type="date"
+                value={localPlannedDate} disabled={isReadOnly}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setLocalPlannedDate(val);
+                  onSetPlannedDate(name, val);
+                }}
+                className={cn("text-[10px] font-bold outline-none bg-transparent w-full cursor-pointer", localPlannedDate ? "text-blue-700 font-extrabold" : "text-slate-400")}
+              />
+            </div>
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 h-6">
+              <span className="text-[8px] font-black text-slate-400 uppercase">Retorno:</span>
+              <input 
+                type="date"
+                value={localReturnDate} disabled={isReadOnly}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setLocalReturnDate(val);
+                  onSetReturnDate(name, val);
+                }}
+                className={cn("text-[10px] font-bold outline-none bg-transparent w-full cursor-pointer", localReturnDate ? "text-emerald-700 font-extrabold" : "text-slate-400")}
+              />
+            </div>
+          </div>
+        </td>
 
-                {/* Seletor de cores discreto */}
-                <div className="flex items-center gap-1 ml-1" style={{ display: isReadOnly ? 'none' : 'flex' }}>
+        {/* Coluna 4: Status do Mês */}
+        <td className="py-2.5 px-2 align-middle min-w-[110px]">
+          <div className="flex items-center gap-1">
+            <select 
+              value={data.status} disabled={isReadOnly}
+              onChange={(e) => onSetStatus(name, e.target.value as MaintenanceStatus)}
+              className={cn(
+                "font-black text-[10px] px-1.5 py-1 rounded-md border outline-none transition-all cursor-pointer h-7",
+                data.status === 'completed' ? "text-emerald-700 bg-emerald-50 border-emerald-200" : 
+                data.status === 'partial' ? "text-amber-700 bg-amber-50 border-amber-200" : 
+                "text-slate-600 bg-slate-50 border-slate-200"
+              )}
+            >
+              <option value={MaintenanceStatus.PENDING}>Pendente</option>
+              <option value={MaintenanceStatus.PARTIAL}>Em Andamento</option>
+              <option value={MaintenanceStatus.COMPLETED}>Concluída</option>
+            </select>
+            <span className="text-[10px] font-black text-slate-600 bg-slate-100 border border-slate-200 rounded px-1.5 h-7 flex items-center justify-center shrink-0" title="Endereços concluídos / total">
+              {completedAddressesCount}/{addressesCount}
+            </span>
+          </div>
+        </td>
+
+        {/* Coluna 5: Ordens de Serviço & Preventivas */}
+        <td className="py-2.5 px-2 align-middle text-center">
+          <div className="flex items-center justify-center gap-1.5 min-w-[110px]">
+            <div className="flex items-center gap-1 bg-white border border-slate-200 rounded px-1.5 h-6 shadow-2xs" title="Quantidade O.S.">
+              <span className="text-[8px] font-black text-slate-400 uppercase">OS:</span>
+              <input 
+                type="number"
+                value={localOrdersCount === '' ? '' : localOrdersCount} disabled={isReadOnly}
+                onChange={(e) => setLocalOrdersCount(e.target.value ? Number(e.target.value) : '')}
+                onBlur={() => {
+                  if (localOrdersCount !== (data.routeServiceOrdersCount ?? '')) {
+                    onSetFinancials(name, { routeServiceOrdersCount: localOrdersCount === '' ? undefined : localOrdersCount });
+                  }
+                }}
+                placeholder="0"
+                className="w-7 text-[11px] font-black text-slate-800 text-center outline-none bg-transparent"
+              />
+            </div>
+            <div className="flex items-center gap-1 bg-white border border-slate-200 rounded px-1.5 h-6 shadow-2xs" title="Quantidade Preventivas">
+              <span className="text-[8px] font-black text-slate-400 uppercase">Prev:</span>
+              <input 
+                type="number"
+                value={localPreventiveCount === '' ? '' : localPreventiveCount} disabled={isReadOnly}
+                onChange={(e) => setLocalPreventiveCount(e.target.value ? Number(e.target.value) : '')}
+                onBlur={() => {
+                  if (localPreventiveCount !== (data.routePreventiveCount ?? '')) {
+                    onSetFinancials(name, { routePreventiveCount: localPreventiveCount === '' ? undefined : localPreventiveCount });
+                  }
+                }}
+                placeholder="0"
+                className="w-7 text-[11px] font-black text-slate-800 text-center outline-none bg-transparent"
+              />
+            </div>
+          </div>
+        </td>
+
+        {/* Coluna 6: Previsão & Total Gerado */}
+        <td className="py-2.5 px-2 align-middle text-right">
+          <div className="flex flex-col items-end gap-1 min-w-[125px]">
+            <button 
+              type="button"
+              onClick={() => onOpenCostCalculator(name)}
+              className="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[10px] font-extrabold h-6 px-2 rounded flex items-center gap-1 transition-all cursor-pointer font-mono"
+              title="Abrir Calculadora de Custos de Viagem"
+            >
+              <Calculator className="w-3 h-3 text-blue-600" />
+              <span>{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(effectiveCost)}</span>
+            </button>
+            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded px-1.5 h-6 w-full max-w-[115px] justify-end">
+              <span className="text-[8px] font-black text-slate-400 uppercase">Total:</span>
+              <span className="text-[9px] font-bold text-slate-400">R$</span>
+              <input 
+                type="number"
+                value={localServicesValue === '' ? '' : localServicesValue} disabled={isReadOnly}
+                onChange={(e) => setLocalServicesValue(e.target.value ? Number(e.target.value) : '')}
+                onBlur={() => {
+                  if (localServicesValue !== (data.routeServicesValue ?? '')) {
+                    onSetFinancials(name, { routeServicesValue: localServicesValue === '' ? undefined : localServicesValue });
+                  }
+                }}
+                placeholder="0,00"
+                className="w-14 text-[11px] font-black text-slate-800 text-right outline-none bg-transparent"
+              />
+            </div>
+          </div>
+        </td>
+
+        {/* Coluna 7: Anexo & Ações */}
+        <td className="py-2.5 px-3.5 align-middle text-right">
+          <div className="flex items-center justify-end gap-1">
+            <ImageUploader 
+              value={localAttachmentUrl} 
+              onChange={(val) => {
+                setLocalAttachmentUrl(val);
+                onSetFinancials(name, { routeAttachmentUrl: val });
+              }} 
+              compact={true}
+            />
+
+            <button
+              type="button"
+              onClick={() => setIsExpanded(!isExpanded)}
+              className={cn(
+                "p-1.5 rounded-lg border transition-all cursor-pointer relative",
+                isExpanded || localNotes.trim()
+                  ? "bg-amber-50 border-amber-200 text-amber-700"
+                  : "bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-600"
+              )}
+              title="Observações e Personalização"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              {localNotes.trim() && (
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 absolute top-1 right-1" />
+              )}
+            </button>
+
+            <button 
+              type="button"
+              onClick={() => onEdit(name)} 
+              style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
+              className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all cursor-pointer"
+              title="Editar Nome da Rota"
+            >
+              <Edit2 className="w-3.5 h-3.5" />
+            </button>
+
+            {onRemoveFromMonth && (
+              <button 
+                type="button"
+                onClick={() => onRemoveFromMonth(name)} 
+                style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
+                className="p-1.5 text-slate-400 hover:text-amber-600 hover:bg-amber-50 rounded-lg transition-all cursor-pointer"
+                title="Remover rota da pauta deste mês"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            <button 
+              type="button"
+              onClick={() => onDelete(name)} 
+              style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
+              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all cursor-pointer"
+              title="Excluir cadastro da rota globalmente"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </td>
+      </tr>
+
+      {/* Observações da Rota / Drawer de Detalhes */}
+      {isExpanded && (
+        <tr className="bg-slate-50/70 border-b border-slate-200">
+          <td colSpan={7} className="p-3">
+            <div className="space-y-2 max-w-4xl">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">
+                  Observações da Viagem / Rota ({name}):
+                </span>
+                <div className="flex items-center gap-1 ml-auto" style={{ display: isReadOnly ? 'none' : 'flex' }}>
+                  <span className="text-[9px] font-bold text-slate-400 uppercase mr-1">Cor:</span>
                   {colors.map(c => (
                     <button
                       key={c.hex}
                       onClick={() => onSetColor(name, c.hex)}
                       className={cn(
-                        "w-2.5 h-2.5 rounded-full transition-all border border-white hover:scale-125",
-                        data.routeColor === c.hex ? "ring-2 ring-offset-1 ring-slate-400" : "opacity-40 hover:opacity-100"
+                        "w-3 h-3 rounded-full transition-all border border-white hover:scale-125 cursor-pointer",
+                        data.routeColor === c.hex ? "ring-2 ring-offset-1 ring-slate-400 scale-110" : "opacity-50 hover:opacity-100"
                       )}
                       style={{ backgroundColor: c.hex }}
                       title={c.name}
@@ -227,255 +426,25 @@ const RouteCard = ({
                   ))}
                 </div>
               </div>
-
-              {/* Segmented Control de Categoria */}
-              <div className="flex bg-slate-100 p-0.5 rounded-lg w-fit mt-1">
-                <button
-                  onClick={() => onSetType(name, RouteType.VARIABLE)} disabled={isReadOnly}
-                  className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-extrabold transition-all",
-                    data.config.type === RouteType.VARIABLE ? "bg-white text-blue-600 shadow-2xs" : "text-slate-500 hover:text-slate-800"
-                  )}
-                >
-                  Capital
-                </button>
-                <button
-                  onClick={() => onSetType(name, RouteType.FIXED)} disabled={isReadOnly}
-                  className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-extrabold transition-all",
-                    data.config.type === RouteType.FIXED ? "bg-white text-amber-600 shadow-2xs" : "text-slate-500 hover:text-slate-800"
-                  )}
-                >
-                  Viagem
-                </button>
-                <button
-                  onClick={() => onSetType(name, RouteType.TEMPORARY)} disabled={isReadOnly}
-                  className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-extrabold transition-all",
-                    data.config.type === RouteType.TEMPORARY ? "bg-white text-purple-600 shadow-2xs" : "text-slate-500 hover:text-slate-800"
-                  )}
-                >
-                  Temporária
-                </button>
-              </div>
+              <input 
+                type="text"
+                placeholder="Digite aqui prioridades, pernoite, pedágios, observações técnicas..."
+                value={localNotes} disabled={isReadOnly}
+                onChange={(e) => setLocalNotes(e.target.value)}
+                onBlur={() => {
+                  if (localNotes !== data.routeNotes) {
+                    onSetNotes(name, localNotes);
+                  }
+                }}
+                className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-800 placeholder:text-slate-400 outline-none focus:border-blue-500 transition-all shadow-2xs"
+              />
             </div>
-          </div>
-
-          {/* Lado Direito: Técnicos Fixos, Datas e Status */}
-          <div className="flex flex-wrap items-center gap-2.5 xl:ml-auto">
-            {/* Técnicos Fixos ou da Rota (se Viagem ou Temporária) */}
-            {(data.config.type === RouteType.FIXED || data.config.type === RouteType.TEMPORARY) && (
-              <div className={cn(
-                "flex items-center gap-1 p-1 rounded-lg border",
-                data.config.type === RouteType.FIXED 
-                  ? "bg-amber-50/60 border-amber-200/70" 
-                  : "bg-purple-50/60 border-purple-200/70"
-              )}>
-                <span className={cn(
-                  "text-[8px] font-black uppercase tracking-wider px-1 shrink-0",
-                  data.config.type === RouteType.FIXED ? "text-amber-700" : "text-purple-700"
-                )}>
-                  {data.config.type === RouteType.FIXED ? "Fixos:" : "Téc:"}
-                </span>
-                <select
-                  value={data.config.technician1 || ''} disabled={isReadOnly}
-                  onChange={(e) => onSetTechnicians(name, e.target.value, data.config.technician2)}
-                  className={cn(
-                    "px-1.5 py-0.5 bg-white border rounded text-[11px] font-bold outline-none h-6.5 max-w-[110px]",
-                    data.config.type === RouteType.FIXED 
-                      ? "border-amber-200 text-amber-900" 
-                      : "border-purple-200 text-purple-900"
-                  )}
-                >
-                  <option value="">Técnico 1</option>
-                  {technicians.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
-                </select>
-                <select
-                  value={data.config.technician2 || ''} disabled={isReadOnly}
-                  onChange={(e) => onSetTechnicians(name, data.config.technician1, e.target.value)}
-                  className={cn(
-                    "px-1.5 py-0.5 bg-white border rounded text-[11px] font-bold outline-none h-6.5 max-w-[110px]",
-                    data.config.type === RouteType.FIXED 
-                      ? "border-amber-200 text-amber-900" 
-                      : "border-purple-200 text-purple-900"
-                  )}
-                >
-                  <option value="">Técnico 2</option>
-                  {technicians.map(t => <option key={t.id} value={t.name}>{t.name}</option>)}
-                </select>
-              </div>
-            )}
-
-            {/* Controles de Datas Compactos */}
-            <div className="flex items-center gap-1.5">
-              <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-0.5 h-7.5">
-                <span className="text-[8px] font-black text-slate-400 uppercase tracking-wider">Saída:</span>
-                <input 
-                  type="date"
-                  value={localPlannedDate} disabled={isReadOnly}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setLocalPlannedDate(val);
-                    onSetPlannedDate(name, val);
-                  }}
-                  className={cn(
-                    "text-[11px] font-bold outline-none bg-transparent transition-all cursor-pointer",
-                    localPlannedDate ? "text-blue-700 font-extrabold" : "text-slate-400"
-                  )}
-                />
-              </div>
-
-              <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-0.5 h-7.5">
-                <span className="text-[8px] font-black text-slate-400 uppercase tracking-wider">Retorno:</span>
-                <input 
-                  type="date"
-                  value={localReturnDate} disabled={isReadOnly}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setLocalReturnDate(val);
-                    onSetReturnDate(name, val);
-                  }}
-                  className={cn(
-                    "text-[11px] font-bold outline-none bg-transparent transition-all cursor-pointer",
-                    localReturnDate ? "text-emerald-700 font-extrabold" : "text-slate-400"
-                  )}
-                />
-              </div>
-            </div>
-
-            {/* Status do Mês Compacto */}
-            <div className="flex items-center gap-1">
-              <select 
-                value={data.status} disabled={isReadOnly}
-                onChange={(e) => onSetStatus(name, e.target.value as MaintenanceStatus)}
-                className={cn(
-                  "font-black text-[11px] px-2 py-1 rounded-lg border outline-none transition-all cursor-pointer h-7.5",
-                  data.status === 'completed' ? "text-emerald-700 bg-emerald-50 border-emerald-200" : 
-                  data.status === 'partial' ? "text-amber-700 bg-amber-50 border-amber-200" : 
-                  "text-slate-600 bg-slate-50 border-slate-200"
-                )}
-              >
-                <option value={MaintenanceStatus.PENDING}>Pendente</option>
-                <option value={MaintenanceStatus.PARTIAL}>Em Andamento</option>
-                <option value={MaintenanceStatus.COMPLETED}>Concluída</option>
-              </select>
-              <span className="text-[11px] font-black text-slate-600 bg-slate-100 border border-slate-200/80 rounded-lg px-2 h-7.5 flex items-center justify-center" title="Endereços concluídos / total">
-                {data.records.filter(r => r.status === MaintenanceStatus.COMPLETED).length}/{data.records.length}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Linha 2: Observações da Rota Compacta */}
-        <div className="w-full">
-          <input 
-            type="text"
-            placeholder="Observações da rota / viagem (pernoite, prioridades, imprevistos)..."
-            value={localNotes} disabled={isReadOnly}
-            onChange={(e) => setLocalNotes(e.target.value)}
-            onBlur={() => {
-              if (localNotes !== data.routeNotes) {
-                onSetNotes(name, localNotes);
-              }
-            }}
-            className="w-full px-2.5 py-1 rounded-lg border border-slate-200/80 bg-slate-50/50 text-xs font-medium text-slate-700 placeholder:text-slate-400 outline-none focus:bg-white focus:border-blue-400 transition-all h-7.5"
-          />
-        </div>
-      </div>
-
-      {/* Seção Inferior: Análise Financeira, Desempenho e Anexo Compactos */}
-      <div className="px-3 sm:px-3.5 py-1.5 sm:py-2 bg-slate-50/80 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Previsão Total da Rota */}
-          <div className="flex items-center gap-1.5 bg-blue-50/90 border border-blue-200/70 rounded-lg px-2 py-0.5 h-7.5 shadow-2xs">
-            <DollarSign className="w-3 h-3 text-blue-600 shrink-0" />
-            <span className="text-xs font-black text-blue-700 font-mono">
-              {(() => {
-                const itemsSum = (data.routeCostItems || []).reduce((acc, curr) => acc + (Number(curr.value) || 0), 0);
-                const effectiveCost = (data.routeEstimatedCost !== undefined && data.routeEstimatedCost !== null && Number(data.routeEstimatedCost) > 0)
-                  ? Number(data.routeEstimatedCost)
-                  : itemsSum;
-                return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(effectiveCost);
-              })()}
-            </span>
-            <button 
-              type="button"
-              onClick={() => onOpenCostCalculator(name)}
-              className="bg-blue-600 hover:bg-blue-700 text-white text-[9px] font-black h-5.5 px-2 rounded flex items-center gap-1 transition-all shadow-2xs cursor-pointer border-0 ml-0.5"
-              title="Planejar ou Ajustar Custos"
-            >
-              <Calculator className="w-2.5 h-2.5" /> Previsão
-            </button>
-          </div>
-
-          {/* O.S. (Qtd) */}
-          <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg px-2 h-7.5 shadow-2xs" title="Quantidade de Ordens de Serviço">
-            <span className="text-[8px] font-black text-slate-400 uppercase">OS:</span>
-            <input 
-              type="number"
-              value={localOrdersCount === '' ? '' : localOrdersCount} disabled={isReadOnly}
-              onChange={(e) => setLocalOrdersCount(e.target.value ? Number(e.target.value) : '')}
-              onBlur={() => {
-                if (localOrdersCount !== (data.routeServiceOrdersCount ?? '')) {
-                  onSetFinancials(name, { routeServiceOrdersCount: localOrdersCount === '' ? undefined : localOrdersCount });
-                }
-              }}
-              placeholder="0"
-              className="w-8 text-xs font-black text-slate-700 text-center outline-none bg-transparent"
-            />
-          </div>
-
-          {/* Preventivas */}
-          <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg px-2 h-7.5 shadow-2xs" title="Quantidade de Preventivas">
-            <span className="text-[8px] font-black text-slate-400 uppercase">Prev:</span>
-            <input 
-              type="number"
-              value={localPreventiveCount === '' ? '' : localPreventiveCount} disabled={isReadOnly}
-              onChange={(e) => setLocalPreventiveCount(e.target.value ? Number(e.target.value) : '')}
-              onBlur={() => {
-                if (localPreventiveCount !== (data.routePreventiveCount ?? '')) {
-                  onSetFinancials(name, { routePreventiveCount: localPreventiveCount === '' ? undefined : localPreventiveCount });
-                }
-              }}
-              placeholder="0"
-              className="w-8 text-xs font-black text-slate-700 text-center outline-none bg-transparent"
-            />
-          </div>
-
-          {/* Valor O.S. (R$) */}
-          <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg px-2 h-7.5 shadow-2xs" title="Valor Total das O.S.">
-            <span className="text-[8px] font-black text-slate-400 uppercase">Total:</span>
-            <span className="text-[10px] font-bold text-slate-400">R$</span>
-            <input 
-              type="number"
-              value={localServicesValue === '' ? '' : localServicesValue} disabled={isReadOnly}
-              onChange={(e) => setLocalServicesValue(e.target.value ? Number(e.target.value) : '')}
-              onBlur={() => {
-                if (localServicesValue !== (data.routeServicesValue ?? '')) {
-                  onSetFinancials(name, { routeServicesValue: localServicesValue === '' ? undefined : localServicesValue });
-                }
-              }}
-              placeholder="0,00"
-              className="w-16 text-xs font-black text-slate-700 text-right outline-none bg-transparent"
-            />
-          </div>
-        </div>
-
-        {/* Anexo Compacto (Imagem / Link) */}
-        <div className="flex items-center gap-1.5 ml-auto">
-          <ImageUploader 
-            value={localAttachmentUrl} 
-            onChange={(val) => {
-              setLocalAttachmentUrl(val);
-              onSetFinancials(name, { routeAttachmentUrl: val });
-            }} 
-            compact={true}
-          />
-        </div>
-      </div>
-    </div>
+          </td>
+        </tr>
+      )}
+    </React.Fragment>
   );
-}
+};
 
 interface RoutePlanningViewProps {
   userRole?: string;
@@ -550,6 +519,11 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const [showOnlySelected, setShowOnlySelected] = useState(false);
   const [showOtherRoutes, setShowOtherRoutes] = useState(false);
   const [addressSearchQuery, setAddressSearchQuery] = useState('');
+
+  // Estados para inclusão de rotas na pauta do mês
+  const [addRouteModalOpen, setAddRouteModalOpen] = useState(false);
+  const [addRouteSearch, setAddRouteSearch] = useState('');
+  const [selectedRoutesToAdd, setSelectedRoutesToAdd] = useState<string[]>([]);
 
   useEffect(() => {
     if (!addressSelectionModal.isOpen) {
@@ -634,68 +608,295 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
     setLoading(false);
   };
 
+  const extractRouteNum = (str?: string): string => {
+    if (!str) return '';
+    const clean = String(str).trim().toUpperCase().replace(/^ROTA\s*:?\s*/i, '');
+    if (clean.includes('-')) {
+      const prefix = clean.split('-')[0].trim();
+      if (/^\d+[A-Z]?$/i.test(prefix)) return prefix;
+    }
+    const match = clean.match(/^(\d+[A-Z]?)(?:\s|$|\/|-)/i);
+    return match ? match[1].trim() : '';
+  };
+
+  const findRouteConfig = (routeName?: string): RouteConfiguration | undefined => {
+    if (!routeName) return undefined;
+    const raw = routeName.trim();
+    if (!raw || raw === 'Sem Rota') return undefined;
+    const normTarget = normalizeRouteKey(raw);
+    const targetNum = extractRouteNum(raw);
+
+    // 1. Exact or normalized match on id / routeName / "num - name"
+    const exactOrNorm = routeConfigs.find(rc => {
+      if (rc.id === raw || rc.routeName === raw) return true;
+      if (rc.routeNumber && rc.routeNumber.trim() === raw) return true;
+      if (normalizeRouteKey(rc.id) === normTarget) return true;
+      if (rc.routeName && normalizeRouteKey(rc.routeName) === normTarget) return true;
+      if (rc.routeNumber && rc.routeName && normalizeRouteKey(`${rc.routeNumber} - ${rc.routeName}`) === normTarget) return true;
+      return false;
+    });
+    if (exactOrNorm) return exactOrNorm;
+
+    // 2. Unique route number match
+    if (targetNum) {
+      return routeConfigs.find(rc => {
+        const rcNum = (rc.routeNumber?.trim().toUpperCase()) || extractRouteNum(rc.id || rc.routeName);
+        return Boolean(rcNum && rcNum === targetNum);
+      });
+    }
+
+    return undefined;
+  };
+
+  const doesRouteMatch = (rawRoute?: string, targetRouteName?: string, targetConfig?: RouteConfiguration): boolean => {
+    if (!targetRouteName) return false;
+    const candidate = (rawRoute || 'Sem Rota').trim();
+    const target = targetRouteName.trim();
+
+    if (candidate === target) return true;
+    if (candidate === 'Sem Rota' && target !== 'Sem Rota') return false;
+
+    const resolvedTargetConfig = targetConfig || findRouteConfig(target);
+    if (resolvedTargetConfig) {
+      if (
+        candidate === resolvedTargetConfig.id ||
+        candidate === resolvedTargetConfig.routeName ||
+        (resolvedTargetConfig.routeNumber && candidate === resolvedTargetConfig.routeNumber.trim())
+      ) {
+        return true;
+      }
+    }
+
+    const normCandidate = normalizeRouteKey(candidate);
+    const normTarget = normalizeRouteKey(target);
+    if (normCandidate === normTarget) return true;
+
+    if (resolvedTargetConfig) {
+      if (normalizeRouteKey(resolvedTargetConfig.id) === normCandidate) return true;
+      if (resolvedTargetConfig.routeName && normalizeRouteKey(resolvedTargetConfig.routeName) === normCandidate) return true;
+      if (
+        resolvedTargetConfig.routeNumber &&
+        resolvedTargetConfig.routeName &&
+        normalizeRouteKey(`${resolvedTargetConfig.routeNumber} - ${resolvedTargetConfig.routeName}`) === normCandidate
+      ) {
+        return true;
+      }
+    }
+
+    // Match without leading "<num> - " prefix (e.g., target "16 - UNIÃO MURICI" vs candidate "UNIÃO MURICI")
+    if (target.includes('-')) {
+      const targetSuffix = target.split('-').slice(1).join('-').trim();
+      if (targetSuffix && normalizeRouteKey(targetSuffix) === normCandidate) return true;
+    }
+
+    // Match by unique route number (e.g., "16 - UNIÃO/MURICI" vs "16 - UNIÃO MURICI"),
+    // unless candidate explicitly belongs by exact/normalized name to another route config
+    const targetNum = (resolvedTargetConfig?.routeNumber?.trim().toUpperCase()) || extractRouteNum(target);
+    const candidateNum = extractRouteNum(candidate);
+    if (targetNum && candidateNum && targetNum === candidateNum) {
+      const anotherExactConfig = routeConfigs.find(rc => {
+        if (resolvedTargetConfig && rc.id === resolvedTargetConfig.id) return false;
+        return normalizeRouteKey(rc.id) === normCandidate || (rc.routeName ? normalizeRouteKey(rc.routeName) === normCandidate : false);
+      });
+      if (!anotherExactConfig) return true;
+    }
+
+    return false;
+  };
+
+  const findPlanningForRoute = (routeName: string): RouteMonthlyPlanning | undefined => {
+    const config = findRouteConfig(routeName);
+    return routePlannings.find(p => {
+      if (p.month !== month) return false;
+      return doesRouteMatch(p.routeName, routeName, config);
+    });
+  };
+
+  const isLegacyRecordSelectedForRoute = (r: MaintenanceRecord, routeName: string, config?: RouteConfiguration) => {
+    if (r.isTemporaryRoute) return true;
+    if (r.assignedRoute && doesRouteMatch(r.assignedRoute, routeName, config)) return true;
+    if (r.itineraryOrder !== undefined && r.itineraryOrder !== null) return true;
+    if (r.status && r.status !== MaintenanceStatus.PENDING) return true;
+    return false;
+  };
+
+  const getRouteSelectedAddressIds = (routeName: string): string[] => {
+    const planning = findPlanningForRoute(routeName);
+    if (planning && Array.isArray(planning.selectedAddressIds)) {
+      return planning.selectedAddressIds;
+    }
+
+    const config = findRouteConfig(routeName);
+    const selectedIds = new Set<string>();
+    records.forEach(r => {
+      if (!r || r.month !== month || !r.addressId) return;
+      const addr = addresses.find(a => a.id === r.addressId);
+      const rawRouteName = r.assignedRoute || (r.isTemporaryRoute ? (r.temporaryRouteName || '') : (addr?.route || 'Sem Rota'));
+
+      if (doesRouteMatch(rawRouteName, routeName, config) && isLegacyRecordSelectedForRoute(r, routeName, config)) {
+        selectedIds.add(r.addressId);
+      }
+    });
+    return Array.from(selectedIds);
+  };
+
   const routeStats = useMemo(() => {
     const groups: Record<string, RouteGroup> = {};
 
-    // 0. Inicializar grupos a partir de configurações de rotas fixas/variáveis cadastradas (routeConfigs)
-    // Rotas temporárias são exclusivas de cada mês e NÃO devem ser inicializadas vazias em meses anteriores/posteriores!
-    routeConfigs.forEach(rc => {
-      if (rc.type === RouteType.TEMPORARY) return;
+    // Determina os nomes de rotas ativas/adicionadas para o mês selecionado (sem duplicar rotas equivalentes)
+    const activeRouteNamesList: string[] = [];
+    const explicitlyRemovedRoutes = new Set<string>();
 
-      const routeName = rc.id || rc.routeName;
-      if (routeName && !groups[routeName]) {
-        groups[routeName] = {
-          records: [],
-          status: 'pending',
-          config: rc
-        };
+    const isRouteExplicitlyRemoved = (name: string, config?: RouteConfiguration) =>
+      Array.from(explicitlyRemovedRoutes).some(rem => doesRouteMatch(rem, name, config));
+
+    const findMatchingActiveRoute = (name: string, config?: RouteConfiguration) =>
+      activeRouteNamesList.find(existing => doesRouteMatch(existing, name, config));
+
+    // 1. Incluir rotas que possuem registro explícito de planejamento no mês ativo (isPlannedForMonth === true)
+    // ou dados de viagem preenchidos pelo usuário
+    const monthPlannings = routePlannings.filter(p => p.month === month && p.routeName);
+    monthPlannings.forEach(p => {
+      if (p.isPlannedForMonth === false) {
+        explicitlyRemovedRoutes.add(p.routeName);
       }
     });
 
-    // 1. Inicializar ou vincular grupos a partir dos endereços
-    addresses.forEach(addr => {
-      const rawRoute = addr.route || 'Sem Rota';
-      const config = routeConfigs.find(rc => rc.id === rawRoute || rc.routeName === rawRoute || (rc.routeNumber && rc.routeNumber.trim() === rawRoute.trim()));
-      const routeName = config ? (config.id || config.routeName) : rawRoute;
-      if (!groups[routeName]) {
-        groups[routeName] = {
-          records: [],
-          status: 'pending',
-          config: config || {
-            id: routeName,
-            routeName: routeName,
-            type: RouteType.VARIABLE,
-            updatedAt: null
-          }
-        };
+    monthPlannings.forEach(p => {
+      if (p.isPlannedForMonth === false) return;
+      const isExplicitlyPlanned = p.isPlannedForMonth === true;
+      const hasPlannedData = Boolean(
+        p.plannedDate || 
+        p.returnDate || 
+        (p.routeEstimatedCost !== undefined && p.routeEstimatedCost !== null && Number(p.routeEstimatedCost) > 0) ||
+        (p.routeServicesValue !== undefined && p.routeServicesValue !== null && Number(p.routeServicesValue) > 0) ||
+        (p.routeServiceOrdersCount !== undefined && p.routeServiceOrdersCount !== null && Number(p.routeServiceOrdersCount) > 0) ||
+        (p.routeNotes && p.routeNotes.trim().length > 0)
+      );
+      if (!isExplicitlyPlanned && !hasPlannedData) return;
+
+      const config = findRouteConfig(p.routeName);
+      const existingKey = findMatchingActiveRoute(p.routeName, config);
+      if (!existingKey) {
+        activeRouteNamesList.push(p.routeName);
+      } else if (existingKey !== p.routeName) {
+        const existingPlanning = monthPlannings.find(mp => mp.routeName === existingKey && mp.isPlannedForMonth !== false);
+        const existingScore =
+          (existingPlanning?.isPlannedForMonth === true ? 4 : 0) +
+          (existingPlanning?.returnDate ? 2 : 0) +
+          ((existingPlanning?.selectedAddressIds?.length || 0) > 0 ? 1 : 0);
+        const candidateScore =
+          (p.isPlannedForMonth === true ? 4 : 0) +
+          (p.returnDate ? 2 : 0) +
+          ((p.selectedAddressIds?.length || 0) > 0 ? 1 : 0);
+        if (candidateScore > existingScore) {
+          const idx = activeRouteNamesList.indexOf(existingKey);
+          if (idx !== -1) activeRouteNamesList[idx] = p.routeName;
+        }
       }
     });
 
-    // 2. Preencher grupos com registros
+    // 2. Incluir rotas com registros de atendimento que possuem dados de viagem ou execução gravados pelo usuário no mês
     records.forEach(r => {
+      if (r.month === month) {
+        const isTemp = r.isTemporaryRoute;
+        const realAddr = r.addressId ? addresses.find(a => a.id === r.addressId) : undefined;
+        const rawRouteName = r.assignedRoute || (isTemp ? (r.temporaryRouteName || 'Rota Temp. Indefinida') : (realAddr?.route || 'Sem Rota'));
+        const config = findRouteConfig(rawRouteName);
+        const routeName = config ? (config.id || config.routeName) : rawRouteName;
+
+        if (
+          routeName &&
+          routeName !== 'Sem Rota' &&
+          !findMatchingActiveRoute(routeName, config) &&
+          !findMatchingActiveRoute(rawRouteName, config) &&
+          !isRouteExplicitlyRemoved(routeName, config) &&
+          !isRouteExplicitlyRemoved(rawRouteName, config)
+        ) {
+          const hasRecordActivity = Boolean(
+            r.isTemporaryRoute ||
+            r.plannedDate ||
+            r.returnDate ||
+            r.status === MaintenanceStatus.COMPLETED ||
+            r.status === MaintenanceStatus.PARTIAL ||
+            (r.routeEstimatedCost !== undefined && r.routeEstimatedCost !== null && Number(r.routeEstimatedCost) > 0) ||
+            (r.routeServicesValue !== undefined && r.routeServicesValue !== null && Number(r.routeServicesValue) > 0) ||
+            (r.routeServiceOrdersCount !== undefined && r.routeServiceOrdersCount !== null && Number(r.routeServiceOrdersCount) > 0) ||
+            (r.routeNotes && r.routeNotes.trim().length > 0)
+          );
+          if (hasRecordActivity) {
+            activeRouteNamesList.push(routeName);
+          }
+        }
+      }
+    });
+
+    // Mapa de seleção explícita por rota no mês
+    const routeSelectionMap: Record<string, { hasExplicit: boolean; selectedSet: Set<string> }> = {};
+
+    // 3. Inicializar grupos apenas para as rotas ativas no mês
+    activeRouteNamesList.forEach(routeName => {
+      const config = findRouteConfig(routeName);
+      const exactPlanning = routePlannings.find(p =>
+        p.month === month && p.isPlannedForMonth !== false && p.routeName === routeName
+      );
+      const matchingPlannings = routePlannings.filter(p =>
+        p.month === month && p.isPlannedForMonth !== false && doesRouteMatch(p.routeName, routeName, config)
+      );
+      const explicitPlannings = matchingPlannings.filter(p => Array.isArray(p.selectedAddressIds));
+      const hasExplicit = explicitPlannings.length > 0;
+      const selectedIdsCombined = new Set<string>();
+      if (exactPlanning && Array.isArray(exactPlanning.selectedAddressIds)) {
+        exactPlanning.selectedAddressIds.forEach(id => selectedIdsCombined.add(id));
+      } else {
+        explicitPlannings.forEach(ep => ep.selectedAddressIds?.forEach(id => selectedIdsCombined.add(id)));
+      }
+      routeSelectionMap[routeName] = {
+        hasExplicit,
+        selectedSet: selectedIdsCombined
+      };
+
+      groups[routeName] = {
+        records: [],
+        status: 'pending',
+        config: config || {
+          id: routeName,
+          routeName: routeName,
+          type: RouteType.VARIABLE,
+          updatedAt: null
+        }
+      };
+    });
+
+    // 4. Preencher grupos somente com os registros dos endereços efetivamente selecionados para a rota no mês
+    records.forEach(r => {
+      if (r.month !== month) return;
       const isTemp = r.isTemporaryRoute;
-      const isRealAddress = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
+      const isDummyTemp = Boolean(r.addressId && String(r.addressId).startsWith('TEMP_ADDR_'));
+      const isRealAddress = Boolean(r.addressId && !isDummyTemp);
       const realAddr = isRealAddress ? addresses.find(a => a.id === r.addressId) : undefined;
       const realClient = realAddr ? clients.find(c => c.id === realAddr.clientId) : undefined;
 
       const addr = realAddr || (isTemp ? undefined : addresses.find(a => a.id === r.addressId));
       const client = realClient || (isTemp ? undefined : clients.find(c => c.id === addr?.clientId));
       const rawRouteName = r.assignedRoute || (isTemp ? (r.temporaryRouteName || 'Rota Temp. Indefinida') : (addr?.route || 'Sem Rota'));
-      const config = routeConfigs.find(rc => rc.id === rawRouteName || rc.routeName === rawRouteName || (rc.routeNumber && rc.routeNumber.trim() === rawRouteName.trim()));
-      const routeName = config ? (config.id || config.routeName) : rawRouteName;
+      const config = findRouteConfig(rawRouteName);
+      let routeName = config ? (config.id || config.routeName) : rawRouteName;
 
       if (!groups[routeName]) {
-        groups[routeName] = { 
-          records: [], 
-          status: 'pending',
-          config: config || {
-            id: routeName,
-            routeName: routeName,
-            type: isTemp ? RouteType.TEMPORARY : RouteType.VARIABLE,
-            updatedAt: null
-          }
-        };
+        const matchedGroupKey = Object.keys(groups).find(gKey => doesRouteMatch(rawRouteName, gKey, groups[gKey]?.config));
+        if (!matchedGroupKey) return;
+        routeName = matchedGroupKey;
       }
+
+      const selInfo = routeSelectionMap[routeName];
+      const isSelectedForThisRoute = isDummyTemp
+        ? true
+        : (selInfo?.hasExplicit
+            ? Boolean(r.addressId && selInfo.selectedSet.has(r.addressId))
+            : isLegacyRecordSelectedForRoute(r, routeName, config));
+
+      if (!isSelectedForThisRoute) return;
 
       const pseudoAddr = realAddr
         ? { ...realAddr, route: routeName }
@@ -706,7 +907,6 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
         ? realClient
         : (isTemp && r.temporaryClient ? { id: 'TEMP', name: r.temporaryClient } as Client : client);
 
-      // Garante que cada endereço é estritamente único dentro da rota
       const existingInGroup = groups[routeName].records.find(existingR => 
         isRealAddress
           ? (existingR.addressId && existingR.addressId === r.addressId)
@@ -720,128 +920,99 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       } else {
         groups[routeName].records.push({ ...r, address: pseudoAddr, client: pseudoClient });
       }
-      
-      if (r.plannedDate && !groups[routeName].plannedDate) {
-        groups[routeName].plannedDate = r.plannedDate;
-      }
-      if (r.returnDate && !groups[routeName].returnDate) {
-        groups[routeName].returnDate = r.returnDate;
-      }
-      if (r.routeNotes && !groups[routeName].routeNotes) {
-        groups[routeName].routeNotes = r.routeNotes;
-      }
-      if (r.routeColor && !groups[routeName].routeColor) {
-        groups[routeName].routeColor = r.routeColor;
-      }
-      if (r.routeStatus && !groups[routeName].routeStatus) {
-        groups[routeName].routeStatus = r.routeStatus;
-      }
-      if (r.routeEstimatedCost !== undefined && groups[routeName].routeEstimatedCost === undefined) {
-        groups[routeName].routeEstimatedCost = r.routeEstimatedCost;
-      }
-      if (r.routeActualCost !== undefined && groups[routeName].routeActualCost === undefined) {
-        groups[routeName].routeActualCost = r.routeActualCost;
-      }
-      if (r.routeServiceOrdersCount !== undefined && groups[routeName].routeServiceOrdersCount === undefined) {
-        groups[routeName].routeServiceOrdersCount = r.routeServiceOrdersCount;
-      }
-      if (r.routeServicesValue !== undefined && groups[routeName].routeServicesValue === undefined) {
-        groups[routeName].routeServicesValue = r.routeServicesValue;
-      }
-      if (r.routePreventiveCount !== undefined && groups[routeName].routePreventiveCount === undefined) {
-        groups[routeName].routePreventiveCount = r.routePreventiveCount;
-      }
-      if (r.routeAttachmentUrl && !groups[routeName].routeAttachmentUrl) {
-        groups[routeName].routeAttachmentUrl = r.routeAttachmentUrl;
-      }
-      if (r.routeMap1Url && !groups[routeName].routeMap1Url) {
-        groups[routeName].routeMap1Url = r.routeMap1Url;
-      }
-      if (r.routeMap2Url && !groups[routeName].routeMap2Url) {
-        groups[routeName].routeMap2Url = r.routeMap2Url;
-      }
-      if (r.routeCardId !== undefined && groups[routeName].routeCardId === undefined) {
-        groups[routeName].routeCardId = r.routeCardId;
-      }
-      if (r.routeCostItems !== undefined && groups[routeName].routeCostItems === undefined) {
-        groups[routeName].routeCostItems = r.routeCostItems;
-      }
+
+      if (r.plannedDate && !groups[routeName].plannedDate) groups[routeName].plannedDate = r.plannedDate;
+      if (r.returnDate && !groups[routeName].returnDate) groups[routeName].returnDate = r.returnDate;
+      if (r.routeNotes && !groups[routeName].routeNotes) groups[routeName].routeNotes = r.routeNotes;
+      if (r.routeColor && !groups[routeName].routeColor) groups[routeName].routeColor = r.routeColor;
+      if (r.routeStatus && !groups[routeName].routeStatus) groups[routeName].routeStatus = r.routeStatus;
+      if (r.routeEstimatedCost !== undefined && groups[routeName].routeEstimatedCost === undefined) groups[routeName].routeEstimatedCost = r.routeEstimatedCost;
+      if (r.routeActualCost !== undefined && groups[routeName].routeActualCost === undefined) groups[routeName].routeActualCost = r.routeActualCost;
+      if (r.routeServiceOrdersCount !== undefined && groups[routeName].routeServiceOrdersCount === undefined) groups[routeName].routeServiceOrdersCount = r.routeServiceOrdersCount;
+      if (r.routeServicesValue !== undefined && groups[routeName].routeServicesValue === undefined) groups[routeName].routeServicesValue = r.routeServicesValue;
+      if (r.routePreventiveCount !== undefined && groups[routeName].routePreventiveCount === undefined) groups[routeName].routePreventiveCount = r.routePreventiveCount;
+      if (r.routeAttachmentUrl && !groups[routeName].routeAttachmentUrl) groups[routeName].routeAttachmentUrl = r.routeAttachmentUrl;
+      if (r.routeMap1Url && !groups[routeName].routeMap1Url) groups[routeName].routeMap1Url = r.routeMap1Url;
+      if (r.routeMap2Url && !groups[routeName].routeMap2Url) groups[routeName].routeMap2Url = r.routeMap2Url;
+      if (r.routeCardId !== undefined && groups[routeName].routeCardId === undefined) groups[routeName].routeCardId = r.routeCardId;
+      if (r.routeCostItems !== undefined && groups[routeName].routeCostItems === undefined) groups[routeName].routeCostItems = r.routeCostItems;
     });
 
-    // 2b. Apply route monthly planning overrides (from routePlannings)
-    // Pre-calculate valid route names to ignore ghost plannings from deleted routes
-    const validNames = new Set<string>();
-    routeConfigs.forEach(c => {
-      if (c.id) validNames.add(c.id);
-      if (c.routeName) validNames.add(c.routeName);
-    });
-    records.forEach(r => {
-      if (r.assignedRoute) validNames.add(r.assignedRoute);
-      if (r.temporaryRouteName) validNames.add(r.temporaryRouteName);
-    });
-    addresses.forEach(a => {
-      if (a.route) validNames.add(a.route);
+    // 5. Preservar endereços explicitamente selecionados pelo usuário mesmo quando ainda não houver registro individual em records
+    Object.keys(groups).forEach(routeName => {
+      const selInfo = routeSelectionMap[routeName];
+      if (!selInfo?.hasExplicit || selInfo.selectedSet.size === 0) return;
+
+      selInfo.selectedSet.forEach(addrId => {
+        const alreadyInGroup = groups[routeName].records.some(r => r.addressId === addrId);
+        if (alreadyInGroup) return;
+
+        const addr = addresses.find(a => a.id === addrId);
+        if (!addr) return;
+        const client = clients.find(c => c.id === addr.clientId);
+        groups[routeName].records.push({
+          id: `temp_${month}_${addr.id}`,
+          month,
+          addressId: addr.id,
+          status: MaintenanceStatus.PENDING,
+          address: { ...addr, route: routeName },
+          client
+        } as any);
+      });
     });
 
-    routePlannings.forEach(p => {
+    // 6. Aplicar overrides de planejamento mensal (routePlannings) - aplicando primeiro equivalentes e por último correspondências exatas
+    const sortedPlanningsForOverrides = [...routePlannings]
+      .filter(p => p.month === month && p.isPlannedForMonth !== false && (p.routeName || '').trim().length > 0)
+      .sort((a, b) => {
+        const aExact = groups[a.routeName!] ? 1 : 0;
+        const bExact = groups[b.routeName!] ? 1 : 0;
+        return aExact - bExact;
+      });
+
+    sortedPlanningsForOverrides.forEach(p => {
       const rawRouteName = p.routeName || '';
-      if (!rawRouteName.trim()) return;
-
-      // Find matching route name (exact, by config, or case-insensitive)
-      const config = routeConfigs.find(rc => rc.id === rawRouteName || rc.routeName === rawRouteName);
+      const config = findRouteConfig(rawRouteName);
       let routeName = config ? (config.id || config.routeName) : rawRouteName;
-      if (!validNames.has(routeName)) {
-        const found = Array.from(validNames).find(vn => vn.trim().toLowerCase() === rawRouteName.trim().toLowerCase());
-        if (found) {
-          routeName = found;
-        } else {
-          // If the user configured costs or planning for this route, keep it visible!
-          validNames.add(routeName);
-        }
+      if (groups[rawRouteName]) {
+        routeName = rawRouteName;
+      } else if (!groups[routeName]) {
+        const matchedKey = Object.keys(groups).find(gKey => doesRouteMatch(rawRouteName, gKey, groups[gKey]?.config));
+        if (!matchedKey) return;
+        routeName = matchedKey;
       }
 
-      if (!groups[routeName]) {
-        groups[routeName] = {
-          records: [],
-          status: 'pending',
-          config: config || {
-            id: routeName,
-            routeName: routeName,
-            type: RouteType.VARIABLE,
-            updatedAt: null
-          }
-        };
-      }
       const g = groups[routeName];
-      if (p.plannedDate !== undefined && p.plannedDate !== null) g.plannedDate = p.plannedDate;
-      if (p.returnDate !== undefined && p.returnDate !== null) g.returnDate = p.returnDate;
-      if (p.routeNotes !== undefined && p.routeNotes !== null) g.routeNotes = p.routeNotes;
-      if (p.routeColor !== undefined && p.routeColor !== null) g.routeColor = p.routeColor;
-      if (p.routeStatus !== undefined && p.routeStatus !== null) g.routeStatus = p.routeStatus;
-      if (p.routeActualCost !== undefined && p.routeActualCost !== null) g.routeActualCost = p.routeActualCost;
-      if (p.routeServiceOrdersCount !== undefined && p.routeServiceOrdersCount !== null) g.routeServiceOrdersCount = p.routeServiceOrdersCount;
-      if (p.routeServicesValue !== undefined && p.routeServicesValue !== null) g.routeServicesValue = p.routeServicesValue;
-      if (p.routePreventiveCount !== undefined && p.routePreventiveCount !== null) g.routePreventiveCount = p.routePreventiveCount;
-      if (p.routeAttachmentUrl !== undefined && p.routeAttachmentUrl !== null) g.routeAttachmentUrl = p.routeAttachmentUrl;
-      if (p.routeMap1Url !== undefined && p.routeMap1Url !== null) g.routeMap1Url = p.routeMap1Url;
-      if (p.routeMap2Url !== undefined && p.routeMap2Url !== null) g.routeMap2Url = p.routeMap2Url;
-      if (p.routeCostItems !== undefined && p.routeCostItems !== null) g.routeCostItems = p.routeCostItems;
-      if (p.routeCardId !== undefined && p.routeCardId !== null) g.routeCardId = p.routeCardId;
+      const isExact = p.routeName === routeName;
+      if (p.plannedDate !== undefined && p.plannedDate !== null && (isExact || !g.plannedDate)) g.plannedDate = p.plannedDate;
+      if (p.returnDate !== undefined && p.returnDate !== null && (isExact || !g.returnDate)) g.returnDate = p.returnDate;
+      if (p.routeNotes !== undefined && p.routeNotes !== null && (isExact || !g.routeNotes)) g.routeNotes = p.routeNotes;
+      if (p.routeColor !== undefined && p.routeColor !== null && (isExact || !g.routeColor)) g.routeColor = p.routeColor;
+      if (p.routeStatus !== undefined && p.routeStatus !== null && (isExact || !g.routeStatus)) g.routeStatus = p.routeStatus;
+      if (p.routeActualCost !== undefined && p.routeActualCost !== null && (isExact || g.routeActualCost === undefined)) g.routeActualCost = p.routeActualCost;
+      if (p.routeServiceOrdersCount !== undefined && p.routeServiceOrdersCount !== null && (isExact || g.routeServiceOrdersCount === undefined)) g.routeServiceOrdersCount = p.routeServiceOrdersCount;
+      if (p.routeServicesValue !== undefined && p.routeServicesValue !== null && (isExact || g.routeServicesValue === undefined)) g.routeServicesValue = p.routeServicesValue;
+      if (p.routePreventiveCount !== undefined && p.routePreventiveCount !== null && (isExact || g.routePreventiveCount === undefined)) g.routePreventiveCount = p.routePreventiveCount;
+      if (p.routeAttachmentUrl !== undefined && p.routeAttachmentUrl !== null && (isExact || !g.routeAttachmentUrl)) g.routeAttachmentUrl = p.routeAttachmentUrl;
+      if (p.routeMap1Url !== undefined && p.routeMap1Url !== null && (isExact || !g.routeMap1Url)) g.routeMap1Url = p.routeMap1Url;
+      if (p.routeMap2Url !== undefined && p.routeMap2Url !== null && (isExact || !g.routeMap2Url)) g.routeMap2Url = p.routeMap2Url;
+      if (p.routeCostItems !== undefined && p.routeCostItems !== null && (isExact || g.routeCostItems === undefined)) g.routeCostItems = p.routeCostItems;
+      if (p.routeCardId !== undefined && p.routeCardId !== null && (isExact || !g.routeCardId)) g.routeCardId = p.routeCardId;
       
       const pItemsSum = (g.routeCostItems || []).reduce((acc, curr) => acc + (Number(curr.value) || 0), 0);
       if (p.routeEstimatedCost !== undefined && p.routeEstimatedCost !== null && Number(p.routeEstimatedCost) > 0) {
         g.routeEstimatedCost = Number(p.routeEstimatedCost);
       } else if (pItemsSum > 0) {
         g.routeEstimatedCost = pItemsSum;
-      } else if (p.routeEstimatedCost !== undefined && p.routeEstimatedCost !== null) {
+      } else if (p.routeEstimatedCost !== undefined && p.routeEstimatedCost !== null && (isExact || g.routeEstimatedCost === undefined)) {
         g.routeEstimatedCost = Number(p.routeEstimatedCost);
       }
     });
 
+    // 7. Ordenar endereços de cada rota e calcular status final
     Object.keys(groups).forEach(name => {
       const g = groups[name];
 
-      // Sort records within the route by client name, then by street
       g.records.sort((a, b) => {
         const clientA = a.client?.name || '';
         const clientB = b.client?.name || '';
@@ -860,7 +1031,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       });
 
       if (g.records.length === 0) {
-        g.status = 'pending';
+        g.status = (g.routeStatus as any) || 'pending';
         return;
       }
       if (g.routeStatus) {
@@ -876,7 +1047,72 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
     });
 
     return groups;
-  }, [records, addresses, clients, routeConfigs, routePlannings]);
+  }, [records, addresses, clients, routeConfigs, routePlannings, month]);
+
+  const getTimestampFromVal = (field: any): number => {
+    if (!field) return 0;
+    if (typeof field === 'number') return field;
+    if (typeof field === 'object') {
+      if ('seconds' in field && typeof field.seconds === 'number') {
+        return field.seconds * 1000;
+      }
+      if ('_seconds' in field && typeof field._seconds === 'number') {
+        return field._seconds * 1000;
+      }
+      if (field instanceof Date) return field.getTime();
+    }
+    if (typeof field === 'string') {
+      const t = new Date(field).getTime();
+      if (!isNaN(t)) return t;
+    }
+    return 0;
+  };
+
+  const getRouteSortTimestamp = (routeName: string, data: RouteGroup): number => {
+    let latest = 0;
+
+    // 1. Verifica no planejamento do mês (RouteMonthlyPlanning)
+    const planning = routePlannings.find(p => p.month === month && p.routeName === routeName);
+    if (planning) {
+      const pCreate = getTimestampFromVal((planning as any).createdAt);
+      const pUpdate = getTimestampFromVal((planning as any).updatedAt);
+      const pPlanned = getTimestampFromVal(planning.plannedDate);
+      latest = Math.max(latest, pCreate, pUpdate, pPlanned);
+    }
+
+    // 2. Verifica nas configurações da rota (RouteConfiguration)
+    if (data.config) {
+      const cCreate = getTimestampFromVal((data.config as any).createdAt);
+      const cUpdate = getTimestampFromVal(data.config.updatedAt);
+      latest = Math.max(latest, cCreate, cUpdate);
+    }
+
+    // 3. Verifica nos registros vinculados à rota
+    if (data.records && data.records.length > 0) {
+      data.records.forEach(r => {
+        const rCreate = getTimestampFromVal((r as any).createdAt);
+        const rUpdate = getTimestampFromVal((r as any).updatedAt);
+        const rExec = getTimestampFromVal(r.executionDate);
+        const rPlan = getTimestampFromVal(r.plannedDate);
+        latest = Math.max(latest, rCreate, rUpdate, rExec, rPlan);
+      });
+    }
+
+    // Fallback: Ordem de inserção nos arrays de planejamentos ou rotas
+    if (latest === 0) {
+      const pIdx = routePlannings.findIndex(p => p.routeName === routeName);
+      if (pIdx !== -1) {
+        latest = (pIdx + 1) * 1000;
+      } else {
+        const cIdx = routeConfigs.findIndex(rc => (rc.id || rc.routeName) === routeName);
+        if (cIdx !== -1) {
+          latest = (cIdx + 1) * 10;
+        }
+      }
+    }
+
+    return latest;
+  };
 
   const displayRoutes = useMemo(() => {
     return (Object.entries(routeStats) as [string, RouteGroup][])
@@ -889,44 +1125,240 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
         }
         return true;
       })
-      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true }));
-  }, [routeStats, hideVariableRoutes]);
+      .sort((a, b) => {
+        const timeA = getRouteSortTimestamp(a[0], a[1]);
+        const timeB = getRouteSortTimestamp(b[0], b[1]);
+        if (timeB !== timeA) {
+          return timeB - timeA; // As rotas recém adicionadas/criadas ficam sempre no topo (da mais recente à mais antiga)
+        }
+        return a[0].localeCompare(b[0], 'pt-BR');
+      });
+  }, [routeStats, hideVariableRoutes, routePlannings, routeConfigs, month]);
+
+  // Rotas cadastradas que ainda não foram adicionadas à pauta do mês atual
+  const availableRoutesForMonth = useMemo(() => {
+    const currentRouteNames = displayRoutes.map(([name]) => name);
+    const seenNormalized = new Set<string>();
+    return routeConfigs.filter(rc => {
+      const name = rc.id || rc.routeName;
+      if (!name) return false;
+      if (currentRouteNames.some(existing => doesRouteMatch(existing, name, rc))) return false;
+      const normKey = normalizeRouteKey(name);
+      if (seenNormalized.has(normKey)) return false;
+      seenNormalized.add(normKey);
+      if (addRouteSearch.trim()) {
+        const query = addRouteSearch.toLowerCase();
+        const matchName = rc.routeName?.toLowerCase().includes(query) || name.toLowerCase().includes(query);
+        const matchNum = rc.routeNumber?.toLowerCase().includes(query);
+        return matchName || matchNum;
+      }
+      return true;
+    });
+  }, [routeConfigs, displayRoutes, addRouteSearch]);
+
+  const handleConfirmAddRoutesToMonth = async () => {
+    if (selectedRoutesToAdd.length === 0) return;
+    setLoading(true);
+    try {
+      for (const rName of selectedRoutesToAdd) {
+        const routeConfig = findRouteConfig(rName);
+        const routeAddressIds = new Set(
+          addresses
+            .filter(a => doesRouteMatch(a.route, rName, routeConfig))
+            .map(a => a.id)
+        );
+
+        await dataService.upsertRoutePlanning({
+          month,
+          routeName: rName,
+          isPlannedForMonth: true,
+          routeStatus: MaintenanceStatus.PENDING,
+          routeServiceOrdersCount: 0,
+          routePreventiveCount: 0,
+          routeEstimatedCost: 0,
+          routeActualCost: 0,
+          routeCostItems: [],
+          routeServicesValue: 0,
+          routeCardId: '',
+          selectedAddressIds: []
+        });
+
+        // Garante que registros existentes dessa rota no mês não carreguem valores antigos de O.S., custo ou total
+        const affectedRecords = records.filter(r =>
+          r.month === month && (
+            r.assignedRoute === rName ||
+            r.temporaryRouteName === rName ||
+            (routeAddressIds.has(r.addressId) && (!r.assignedRoute || r.assignedRoute === rName))
+          )
+        );
+
+        const recordsWithStaleValues = affectedRecords.filter(r =>
+          (r.routeServiceOrdersCount !== undefined && r.routeServiceOrdersCount !== null && r.routeServiceOrdersCount !== 0) ||
+          (r.routePreventiveCount !== undefined && r.routePreventiveCount !== null && r.routePreventiveCount !== 0) ||
+          (r.routeEstimatedCost !== undefined && r.routeEstimatedCost !== null && r.routeEstimatedCost !== 0) ||
+          (r.routeActualCost !== undefined && r.routeActualCost !== null && r.routeActualCost !== 0) ||
+          (r.routeServicesValue !== undefined && r.routeServicesValue !== null && r.routeServicesValue !== 0) ||
+          (Array.isArray(r.routeCostItems) && r.routeCostItems.length > 0)
+        );
+
+        if (recordsWithStaleValues.length > 0) {
+          await Promise.all(
+            recordsWithStaleValues.map(r => {
+              const { address, client, ...pureRecord } = r as any;
+              return dataService.upsertRecord({
+                ...pureRecord,
+                routeServiceOrdersCount: 0,
+                routePreventiveCount: 0,
+                routeEstimatedCost: 0,
+                routeActualCost: 0,
+                routeCostItems: [],
+                routeServicesValue: 0
+              });
+            })
+          );
+        }
+      }
+      setSelectedRoutesToAdd([]);
+      setAddRouteModalOpen(false);
+      await loadData();
+    } catch (err) {
+      console.error('Erro ao adicionar rotas ao mês:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRemoveRouteFromMonth = async (routeName: string) => {
+    if (window.confirm(`Deseja remover a rota "${routeName}" da pauta do mês de ${format(parseISO(`${month}-01`), 'MMMM yyyy', { locale: ptBR })}?\n\nEsta rota deixará de ser exibida na pauta deste mês. O cadastro global e os endereços continuarão preservados no sistema.`)) {
+      setLoading(true);
+      try {
+        // 1. Marca explicitamente isPlannedForMonth = false e zera os campos financeiros/O.S. (inclusive em variantes equivalentes de acento)
+        const routeConfig = findRouteConfig(routeName);
+        const equivalentPlannings = routePlannings.filter(p =>
+          p.month === month && p.routeName && doesRouteMatch(p.routeName, routeName, routeConfig)
+        );
+        const planningRouteNamesToDisable = Array.from(new Set([routeName, ...equivalentPlannings.map(p => p.routeName)]));
+
+        await Promise.all(planningRouteNamesToDisable.map(rKey =>
+          dataService.upsertRoutePlanning({
+            month,
+            routeName: rKey,
+            isPlannedForMonth: false,
+            routeStatus: MaintenanceStatus.PENDING,
+            plannedDate: '',
+            returnDate: '',
+            routeNotes: '',
+            routeServicesValue: 0,
+            routeServiceOrdersCount: 0,
+            routePreventiveCount: 0,
+            routeEstimatedCost: 0,
+            routeActualCost: 0,
+            routeCostItems: [],
+            routeCardId: '',
+            routeAttachmentUrl: '',
+            selectedAddressIds: []
+          } as any)
+        ));
+
+        // 2. Limpa os dados de viagem dos registros do mês vinculados a esta rota
+        const routeAddressIds = new Set(addresses.filter(a =>
+          doesRouteMatch(a.route, routeName, routeConfig)
+        ).map(a => a.id));
+
+        const affectedRecords = records.filter(r => 
+          r.month === month && (
+            doesRouteMatch(r.assignedRoute, routeName, routeConfig) ||
+            doesRouteMatch(r.temporaryRouteName, routeName, routeConfig) ||
+            (routeAddressIds.has(r.addressId) && (!r.assignedRoute || doesRouteMatch(r.assignedRoute, routeName, routeConfig)))
+          )
+        );
+
+        if (affectedRecords.length > 0) {
+          await Promise.all(affectedRecords.map(r => {
+            if (r.isTemporaryRoute) {
+              return r.id ? dataService.deleteRecord(r.id) : Promise.resolve();
+            } else {
+              return dataService.upsertRecord({
+                ...r,
+                plannedDate: '',
+                returnDate: '',
+                routeNotes: '',
+                routeServicesValue: 0,
+                routeServiceOrdersCount: 0,
+                routePreventiveCount: 0,
+                routeEstimatedCost: 0,
+                routeActualCost: 0,
+                routeCostItems: [],
+                routeCardId: '',
+                routeAttachmentUrl: ''
+              } as any);
+            }
+          }));
+        }
+
+        // 3. Atualização otimista do estado local
+        const disabledSet = new Set(planningRouteNamesToDisable);
+        setRoutePlannings(prev => {
+          const filtered = prev.filter(p => !(p.month === month && disabledSet.has(p.routeName)));
+          const disabledPlannings = planningRouteNamesToDisable.map(rKey => ({
+            id: `${month}_${rKey}`,
+            month,
+            routeName: rKey,
+            isPlannedForMonth: false,
+            routeServiceOrdersCount: 0,
+            routePreventiveCount: 0,
+            routeEstimatedCost: 0,
+            routeActualCost: 0,
+            routeCostItems: [],
+            routeServicesValue: 0,
+            selectedAddressIds: []
+          } as RouteMonthlyPlanning));
+          return [...filtered, ...disabledPlannings];
+        });
+
+        await loadData();
+      } catch (err) {
+        console.error("Erro ao remover rota do mês:", err);
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
 
   const sortedAddresses = useMemo(() => {
     if (!addressSelectionModal.isOpen) return [];
     
     const currentRouteName = addressSelectionModal.routeName;
-    const currentConfig = routeConfigs.find(c => c.id === currentRouteName || c.routeName === currentRouteName);
+    const currentConfig = findRouteConfig(currentRouteName);
+    const selectedSet = new Set(getRouteSelectedAddressIds(currentRouteName));
     
-    // Obter IDs de endereços de outras rotas já vinculados a esta rota para este mês
-    const assignedAddressIds = new Set(
-      records
+    // Obter IDs de endereços de outras rotas já vinculados/selecionados nesta rota para este mês
+    const assignedAddressIds = new Set<string>([
+      ...Array.from(selectedSet),
+      ...records
         .filter(r => r.month === month && (
-          r.assignedRoute === currentRouteName || 
-          r.temporaryRouteName === currentRouteName ||
-          (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName))
+          doesRouteMatch(r.assignedRoute, currentRouteName, currentConfig) ||
+          doesRouteMatch(r.temporaryRouteName, currentRouteName, currentConfig)
         ))
         .map(r => r.addressId)
-    );
+    ]);
     
     let baseAddresses = addresses;
     if (!showOtherRoutes) {
       baseAddresses = addresses.filter(a => {
-        const belongsToCurrent = (a.route || 'Sem Rota') === currentRouteName || 
-          (currentConfig && (a.route === currentConfig.id || a.route === currentConfig.routeName)) ||
+        const belongsToCurrent = doesRouteMatch(a.route, currentRouteName, currentConfig) ||
           assignedAddressIds.has(a.id);
         return belongsToCurrent;
       });
     } else {
       // Quando "Incluir outras rotas" está ativo, ocultamos endereços cujas rotas originais sejam "Capital" (RouteType.VARIABLE)
       baseAddresses = addresses.filter(a => {
-        const belongsToCurrent = (a.route || 'Sem Rota') === currentRouteName || 
-          (currentConfig && (a.route === currentConfig.id || a.route === currentConfig.routeName)) ||
+        const belongsToCurrent = doesRouteMatch(a.route, currentRouteName, currentConfig) ||
           assignedAddressIds.has(a.id);
         if (belongsToCurrent) return true;
         
         if (a.route) {
-          const config = routeConfigs.find(c => c.id === a.route || c.routeName === a.route);
+          const config = findRouteConfig(a.route);
           if (config && config.type === RouteType.VARIABLE) {
             return false;
           }
@@ -966,6 +1398,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
     const isRecordInRoute = (r: MaintenanceRecord | undefined, addr: Address) => {
       if (!r || r.month !== month || r.addressId !== addr.id) return false;
+      if (!selectedSet.has(addr.id)) return false;
       if (r.assignedRoute === currentRouteName || r.temporaryRouteName === currentRouteName) return true;
       if (currentConfig) {
         if (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName || (currentConfig.routeNumber && r.assignedRoute === currentConfig.routeNumber)) return true;
@@ -976,15 +1409,15 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
         if (baseRoute === currentRouteName) return true;
         if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName || (currentConfig.routeNumber && baseRoute.trim() === currentConfig.routeNumber.trim()))) return true;
       }
-      return false;
+      return true;
     };
 
     return [...baseAddresses].sort((a, b) => {
       const recA = records.find(r => isRecordInRoute(r, a));
       const recB = records.find(r => isRecordInRoute(r, b));
       
-      const isIncA = !!recA;
-      const isIncB = !!recB;
+      const isIncA = selectedSet.has(a.id);
+      const isIncB = selectedSet.has(b.id);
       
       // Included addresses always come before non-included
       if (isIncA !== isIncB) {
@@ -1006,7 +1439,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       const clientB = clients.find(c => c.id === b.clientId)?.name || '';
       return clientA.localeCompare(clientB, 'pt-BR');
     });
-  }, [addresses, addressSelectionModal.isOpen, addressSelectionModal.routeName, records, month, clients, showOtherRoutes, addressSearchQuery, routeConfigs, orderValueMap]);
+  }, [addresses, addressSelectionModal.isOpen, addressSelectionModal.routeName, records, month, clients, showOtherRoutes, addressSearchQuery, routeConfigs, orderValueMap, routePlannings]);
 
   // Validação em tempo real de ID/Número único exclusivo para rotas
   const routeNumberConflict = useMemo(() => {
@@ -1221,8 +1654,15 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
         return true;
       })
-      .sort((a, b) => a[0].localeCompare(b[0], 'pt-BR', { numeric: true }));
-  }, [routeStats, month]);
+      .sort((a, b) => {
+        const timeA = getRouteSortTimestamp(a[0], a[1]);
+        const timeB = getRouteSortTimestamp(b[0], b[1]);
+        if (timeB !== timeA) {
+          return timeB - timeA; // As rotas recém adicionadas/criadas ficam sempre no topo (da mais recente à mais antiga)
+        }
+        return a[0].localeCompare(b[0], 'pt-BR');
+      });
+  }, [routeStats, month, hideVariableRoutes, routePlannings, routeConfigs]);
 
   const printControlFinancialSummary = useMemo(() => {
     let totalEstimated = 0;
@@ -1409,10 +1849,19 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const handleSetReturnDate = async (routeName: string, date: string) => updateRouteRecords(routeName, { returnDate: date });
   const handleSetRouteNotes = async (routeName: string, notes: string) => updateRouteRecords(routeName, { routeNotes: notes });
   const handleSetRouteFinancials = async (routeName: string, updates: Partial<MaintenanceRecord>) => {
-    // Convert undefined to null so Firestore cleans up the field when the user erases it
+    // Normaliza valores apagados para 0 ou '' para garantir que o merge no Firestore sobrescreva valores antigos
     const cleanUpdates = { ...updates } as any;
+    const numericZeroKeys = new Set([
+      'routeServiceOrdersCount',
+      'routePreventiveCount',
+      'routeServicesValue',
+      'routeEstimatedCost',
+      'routeActualCost'
+    ]);
     Object.keys(cleanUpdates).forEach(k => {
-      if (cleanUpdates[k] === undefined) cleanUpdates[k] = null;
+      if (cleanUpdates[k] === undefined || cleanUpdates[k] === null) {
+        cleanUpdates[k] = numericZeroKeys.has(k) ? 0 : '';
+      }
     });
     updateRouteRecords(routeName, cleanUpdates);
   };
@@ -1552,22 +2001,66 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
           }
         }
 
-        // 2. Base fields da rota para aplicar aos records (datas, cores, notas, custos)
-        const baseRecordFields = currentRecords[0] ? {
+        // 2. Base fields da rota para aplicar aos records (ao criar nova rota, inicia tudo zerado por padrão)
+        const baseRecordFields = (routeModal.mode === 'create' || !currentRecords[0]) ? {
+            plannedDate: '',
+            returnDate: '',
+            routeColor: '',
+            routeNotes: '',
+            routeEstimatedCost: 0,
+            routeActualCost: 0,
+            routeServiceOrdersCount: 0,
+            routeServicesValue: 0,
+            routePreventiveCount: 0,
+            routeAttachmentUrl: '',
+            routeCostItems: [],
+            routeCardId: '',
+            routeMap1Url: '',
+            routeMap2Url: '',
+        } : {
             plannedDate: currentRecords[0].plannedDate,
             returnDate: currentRecords[0].returnDate,
             routeColor: currentRecords[0].routeColor,
             routeNotes: currentRecords[0].routeNotes,
-            routeEstimatedCost: currentRecords[0].routeEstimatedCost,
-            routeActualCost: currentRecords[0].routeActualCost,
-            routeServiceOrdersCount: currentRecords[0].routeServiceOrdersCount,
-            routeServicesValue: currentRecords[0].routeServicesValue,
-            routePreventiveCount: currentRecords[0].routePreventiveCount,
+            routeEstimatedCost: currentRecords[0].routeEstimatedCost ?? 0,
+            routeActualCost: currentRecords[0].routeActualCost ?? 0,
+            routeServiceOrdersCount: currentRecords[0].routeServiceOrdersCount ?? 0,
+            routeServicesValue: currentRecords[0].routeServicesValue ?? 0,
+            routePreventiveCount: currentRecords[0].routePreventiveCount ?? 0,
             routeAttachmentUrl: currentRecords[0].routeAttachmentUrl,
-            routeCostItems: currentRecords[0].routeCostItems,
+            routeCostItems: currentRecords[0].routeCostItems || [],
+            routeCardId: currentRecords[0].routeCardId || '',
             routeMap1Url: currentRecords[0].routeMap1Url,
             routeMap2Url: currentRecords[0].routeMap2Url,
-        } : {};
+        };
+
+        const selectedTempAddressIds = routeModal.tempAddresses
+          .map(a => a.addressId)
+          .filter((id): id is string => Boolean(id));
+
+        if (routeModal.mode === 'create') {
+          await dataService.upsertRoutePlanning({
+            month,
+            routeName,
+            isPlannedForMonth: true,
+            routeStatus: MaintenanceStatus.PENDING,
+            routeEstimatedCost: 0,
+            routeActualCost: 0,
+            routeServiceOrdersCount: 0,
+            routeServicesValue: 0,
+            routePreventiveCount: 0,
+            routeCostItems: [],
+            routeCardId: '',
+            selectedAddressIds: selectedTempAddressIds
+          });
+        } else {
+          await dataService.upsertRoutePlanning({
+            month,
+            routeName,
+            isPlannedForMonth: true,
+            selectedAddressIds: selectedTempAddressIds
+          });
+        }
 
         // 3. Upsert dos endereços mantidos ou adicionados
         const promises = routeModal.tempAddresses.map(async (addr) => {
@@ -1649,21 +2142,40 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
   const handleToggleAddressInRoute = async (routeName: string, addressId: string, isIncluded: boolean) => {
     try {
+      const currentSelected = getRouteSelectedAddressIds(routeName);
+      const nextSelected = isIncluded
+        ? Array.from(new Set([...currentSelected, addressId]))
+        : currentSelected.filter(id => id !== addressId);
+
+      // Atualiza imediatamente a lista explícita de endereços selecionados da rota no mês
+      setRoutePlannings(prev => {
+        const existingIdx = prev.findIndex(p => p.month === month && p.routeName === routeName);
+        if (existingIdx !== -1) {
+          return prev.map((p, idx) => idx === existingIdx ? { ...p, isPlannedForMonth: true, selectedAddressIds: nextSelected } : p);
+        }
+        return [...prev, { id: `${month}_${routeName}`, month, routeName, isPlannedForMonth: true, selectedAddressIds: nextSelected } as RouteMonthlyPlanning];
+      });
+
+      await dataService.upsertRoutePlanning({
+        month,
+        routeName,
+        isPlannedForMonth: true,
+        selectedAddressIds: nextSelected
+      });
+
       if (isIncluded) {
-        const config = routeConfigs.find(c => c.id === routeName && (c.type === RouteType.FIXED || c.type === RouteType.TEMPORARY));
+        const config = findRouteConfig(routeName);
+        const routeTypeConfig = config && (config.type === RouteType.FIXED || config.type === RouteType.TEMPORARY) ? config : undefined;
         
-        // Encontrar a maior ordem existente entre os endereços desta rota no mês atual (incluindo atribuídos)
-        const routeAddressIds = new Set(addresses.filter(a => (a.route || 'Sem Rota') === routeName).map(a => a.id));
+        // Encontrar a maior ordem existente entre os endereços já selecionados desta rota no mês atual
+        const selectedSet = new Set(nextSelected);
         const maxOrder = records.reduce((max, r) => {
-          const belongsToRoute = r.assignedRoute === routeName || (routeAddressIds.has(r.addressId) && !r.assignedRoute);
-          if (r.month === month && belongsToRoute && r.itineraryOrder !== undefined && r.itineraryOrder !== null) {
+          if (r.month === month && selectedSet.has(r.addressId) && r.itineraryOrder !== undefined && r.itineraryOrder !== null) {
             return Math.max(max, r.itineraryOrder);
           }
           return max;
         }, 0);
 
-        const addressObj = addresses.find(a => a.id === addressId);
-        const isFromOtherRoute = addressObj && (addressObj.route || 'Sem Rota') !== routeName;
         const existingRecordForMonth = records.find(r => r.addressId === addressId && r.month === month);
 
         const recordToCreate: Partial<MaintenanceRecord> = {
@@ -1673,15 +2185,15 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
           addressId: addressId,
           scheduledWeek: existingRecordForMonth?.scheduledWeek || 1,
           status: existingRecordForMonth?.status || MaintenanceStatus.PENDING,
-          technician1: config?.technician1 ?? existingRecordForMonth?.technician1 ?? '',
-          technician2: config?.technician2 ?? '',
+          technician1: routeTypeConfig?.technician1 ?? existingRecordForMonth?.technician1 ?? '',
+          technician2: routeTypeConfig?.technician2 ?? existingRecordForMonth?.technician2 ?? '',
           itineraryOrder: maxOrder + 1,
-          ...(isFromOtherRoute ? { assignedRoute: routeName } : {}),
+          assignedRoute: routeName,
         };
         const existingRouteData = routeStats[routeName];
         if (existingRouteData) {
             recordToCreate.plannedDate = existingRouteData.plannedDate;
-            recordToCreate.returnDate = null;
+            recordToCreate.returnDate = existingRouteData.returnDate ?? null;
             delete (recordToCreate as any).plannedDates;
             recordToCreate.routeColor = existingRouteData.routeColor;
             recordToCreate.routeNotes = existingRouteData.routeNotes;
@@ -1701,25 +2213,34 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
             setRecords(prev => [...prev.filter(r => !(r.addressId === addressId && r.month === month)), { id, ...recordToCreate } as MaintenanceRecord]);
         }
       } else {
-        // Busca direta no estado de registros por qualquer vínculo para este endereço e mês
+        // Desmarcação na rota: preserva registros do Cronograma e remove apenas vínculos temporários ou atribuições de rota/ordem
         const targetRecords = records.filter(r => 
           r.addressId === addressId && 
           r.month === month
         );
 
-        if (targetRecords.length > 0) {
-          const idsToDelete = new Set(targetRecords.map(r => r.id).filter(Boolean));
-          for (const rec of targetRecords) {
-            if (rec.id) {
-              await dataService.deleteRecord(rec.id);
-            }
+        for (const rec of targetRecords) {
+          const isDummyTemp = Boolean(rec.isTemporaryRoute && String(rec.addressId).startsWith('TEMP_ADDR_'));
+          if (isDummyTemp) {
+            if (rec.id) await dataService.deleteRecord(rec.id);
+            setRecords(prev => prev.filter(r => r.id !== rec.id));
+          } else {
+            const { address, client, ...pureRec } = rec as any;
+            await dataService.upsertRecord({
+              ...pureRec,
+              assignedRoute: '',
+              temporaryRouteName: '',
+              isTemporaryRoute: false,
+              itineraryOrder: null
+            });
+            setRecords(prev => prev.map(r => r.id === rec.id ? {
+              ...r,
+              assignedRoute: undefined,
+              temporaryRouteName: undefined,
+              isTemporaryRoute: false,
+              itineraryOrder: undefined
+            } : r));
           }
-          setRecords(prev => prev.filter(r => !idsToDelete.has(r.id)));
-        } else {
-          // Contingência: remove documento determinístico e limpa do estado local
-          const canonicalId = `${month}_${addressId}`;
-          await dataService.deleteRecord(canonicalId);
-          setRecords(prev => prev.filter(r => r.id !== canonicalId && !(r.addressId === addressId && r.month === month)));
         }
       }
     } catch (error) {
@@ -1735,18 +2256,15 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       // Atualiza o mapa local de valores imediatamente para resposta visual instantânea
       setOrderValueMap(prev => ({ ...prev, [addressId]: numOrder !== null ? numOrder : '' }));
 
-      const currentConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
+      const currentConfig = findRouteConfig(routeName);
 
       // Localiza o registro do endereço para este mês com correspondência abrangente
       const record = records.find(r => {
         if (r.addressId !== addressId || r.month !== month) return false;
-        if (r.assignedRoute === routeName || r.temporaryRouteName === routeName) return true;
-        if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName)) return true;
+        if (doesRouteMatch(r.assignedRoute, routeName, currentConfig) || doesRouteMatch(r.temporaryRouteName, routeName, currentConfig)) return true;
         const addr = addresses.find(a => a.id === addressId);
-        const baseRoute = addr?.route || 'Sem Rota';
         if (!r.assignedRoute && !r.isTemporaryRoute) {
-          if (baseRoute === routeName) return true;
-          if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName)) return true;
+          if (doesRouteMatch(addr?.route, routeName, currentConfig)) return true;
         }
         return true;
       });
@@ -1764,7 +2282,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
         await dataService.upsertRecord(updatedRecord as MaintenanceRecord);
       } else if (numOrder !== null) {
         const addressObj = addresses.find(a => a.id === addressId);
-        const isFromOtherRoute = addressObj && (addressObj.route || 'Sem Rota') !== routeName;
+        const isFromOtherRoute = Boolean(addressObj && !doesRouteMatch(addressObj.route, routeName, currentConfig));
         const existingRouteData = routeStats[routeName];
 
         const recordToCreate: Partial<MaintenanceRecord> = {
@@ -1794,23 +2312,8 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
   const handleRenumberSequentially = async (routeName: string) => {
     try {
-      const currentConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
-      const isRecordInThisRoute = (r: MaintenanceRecord | undefined, addr: Address) => {
-        if (!r || r.month !== month || r.addressId !== addr.id) return false;
-        if (r.assignedRoute === routeName || r.temporaryRouteName === routeName) return true;
-        if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName)) return true;
-        if (!r.assignedRoute && !r.isTemporaryRoute) {
-          const baseRoute = addr.route || 'Sem Rota';
-          if (baseRoute === routeName) return true;
-          if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName)) return true;
-        }
-        return false;
-      };
-
-      const includedAddresses = sortedAddresses.filter(addr => {
-        const rec = records.find(r => isRecordInThisRoute(r, addr));
-        return !!rec;
-      });
+      const selectedSet = new Set(getRouteSelectedAddressIds(routeName));
+      const includedAddresses = sortedAddresses.filter(addr => selectedSet.has(addr.id));
 
       const newMap: Record<string, number> = {};
       includedAddresses.forEach((addr, idx) => {
@@ -1830,23 +2333,8 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
 
   const handleMoveAddressOrder = async (routeName: string, addressId: string, direction: 'up' | 'down') => {
     try {
-      const currentConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
-      const isRecordInThisRoute = (r: MaintenanceRecord | undefined, addr: Address) => {
-        if (!r || r.month !== month || r.addressId !== addr.id) return false;
-        if (r.assignedRoute === routeName || r.temporaryRouteName === routeName) return true;
-        if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName)) return true;
-        if (!r.assignedRoute && !r.isTemporaryRoute) {
-          const baseRoute = addr.route || 'Sem Rota';
-          if (baseRoute === routeName) return true;
-          if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName)) return true;
-        }
-        return false;
-      };
-
-      const includedAddresses = sortedAddresses.filter(addr => {
-        const rec = records.find(r => isRecordInThisRoute(r, addr));
-        return !!rec;
-      });
+      const selectedSet = new Set(getRouteSelectedAddressIds(routeName));
+      const includedAddresses = sortedAddresses.filter(addr => selectedSet.has(addr.id));
 
       const currentIndex = includedAddresses.findIndex(a => a.id === addressId);
       if (currentIndex === -1) return;
@@ -1887,29 +2375,46 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
   const handleToggleAllAddressesInRoute = async (routeName: string, selectAll: boolean) => {
     setLoading(true);
     try {
-      const routeAddresses = addresses.filter(a => (a.route || 'Sem Rota') === routeName);
+      const routeConfig = findRouteConfig(routeName);
+      const routeAddresses = addresses.filter(a =>
+        doesRouteMatch(a.route, routeName, routeConfig)
+      );
       
       if (selectAll) {
+        const currentSelected = getRouteSelectedAddressIds(routeName);
+        const nextSelected = Array.from(new Set([...currentSelected, ...routeAddresses.map(a => a.id)]));
+
+        setRoutePlannings(prev => {
+          const existingIdx = prev.findIndex(p => p.month === month && p.routeName === routeName);
+          if (existingIdx !== -1) {
+            return prev.map((p, idx) => idx === existingIdx ? { ...p, isPlannedForMonth: true, selectedAddressIds: nextSelected } : p);
+          }
+          return [...prev, { id: `${month}_${routeName}`, month, routeName, isPlannedForMonth: true, selectedAddressIds: nextSelected } as RouteMonthlyPlanning];
+        });
+
+        await dataService.upsertRoutePlanning({
+          month,
+          routeName,
+          isPlannedForMonth: true,
+          selectedAddressIds: nextSelected
+        });
+
         const config = routeConfigs.find(c => c.id === routeName && (c.type === RouteType.FIXED || c.type === RouteType.TEMPORARY));
         const existingRouteData = routeStats[routeName];
         
         const newRecords: Partial<MaintenanceRecord>[] = [];
+        const currentSelectedSet = new Set(currentSelected);
         
         const routeAddressIds = new Set(routeAddresses.map(a => a.id));
         let currentMaxOrder = records.reduce((max, r) => {
-          if (r.month === month && routeAddressIds.has(r.addressId) && r.itineraryOrder !== undefined && r.itineraryOrder !== null) {
+          if (r.month === month && (routeAddressIds.has(r.addressId) || currentSelectedSet.has(r.addressId)) && r.itineraryOrder !== undefined && r.itineraryOrder !== null) {
             return Math.max(max, r.itineraryOrder);
           }
           return max;
         }, 0);
 
         const promises = routeAddresses.map(async addr => {
-          const isIncluded = records.some(r => 
-            r.addressId === addr.id && 
-            r.month === month && 
-            (r.assignedRoute || (r.isTemporaryRoute ? r.temporaryRouteName : (addr.route || 'Sem Rota'))) === routeName
-          );
-          if (isIncluded) return; // Already included in this route
+          if (currentSelectedSet.has(addr.id)) return; // Already selected in this route
           
           currentMaxOrder += 1;
           const orderForThis = currentMaxOrder;
@@ -1926,6 +2431,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
             technician1: config?.technician1 || existingRecordForMonth?.technician1 || '',
             technician2: config?.technician2 || existingRecordForMonth?.technician2 || '',
             itineraryOrder: orderForThis,
+            assignedRoute: routeName,
           };
           
           if (existingRouteData) {
@@ -1956,28 +2462,54 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
           setRecords(prev => [...prev.filter(r => !(newAddressIds.has(r.addressId) && r.month === month)), ...newRecords as MaintenanceRecord[]]);
         }
       } else {
-        const routeConfig = routeConfigs.find(c => c.id === routeName || c.routeName === routeName);
-        const routeAddressIds = new Set(addresses.filter(a => 
-          (a.route || 'Sem Rota') === routeName || 
-          (routeConfig && (a.route === routeConfig.id || a.route === routeConfig.routeName))
-        ).map(a => a.id));
+        setRoutePlannings(prev => {
+          const existingIdx = prev.findIndex(p => p.month === month && p.routeName === routeName);
+          if (existingIdx !== -1) {
+            return prev.map((p, idx) => idx === existingIdx ? { ...p, isPlannedForMonth: true, selectedAddressIds: [] } : p);
+          }
+          return [...prev, { id: `${month}_${routeName}`, month, routeName, isPlannedForMonth: true, selectedAddressIds: [] } as RouteMonthlyPlanning];
+        });
 
-        const recordsToDelete = records.filter(r => 
+        await dataService.upsertRoutePlanning({
+          month,
+          routeName,
+          isPlannedForMonth: true,
+          selectedAddressIds: []
+        });
+
+        const routeAddressIds = new Set(routeAddresses.map(a => a.id));
+        const recordsToUnlink = records.filter(r => 
           r.month === month && (
-            r.assignedRoute === routeName ||
-            r.temporaryRouteName === routeName ||
-            (routeAddressIds.has(r.addressId) && (!r.assignedRoute || r.assignedRoute === routeName))
+            doesRouteMatch(r.assignedRoute, routeName, routeConfig) ||
+            doesRouteMatch(r.temporaryRouteName, routeName, routeConfig) ||
+            (routeAddressIds.has(r.addressId) && (!r.assignedRoute || doesRouteMatch(r.assignedRoute, routeName, routeConfig)))
           )
         );
 
-        if (recordsToDelete.length > 0) {
-          const deletedIds = new Set(recordsToDelete.map(r => r.id).filter(Boolean));
-          await Promise.all(recordsToDelete.map(async record => {
-            if (record.id) {
-              await dataService.deleteRecord(record.id);
+        if (recordsToUnlink.length > 0) {
+          await Promise.all(recordsToUnlink.map(async record => {
+            const isDummyTemp = Boolean(record.isTemporaryRoute && String(record.addressId).startsWith('TEMP_ADDR_'));
+            if (isDummyTemp) {
+              if (record.id) await dataService.deleteRecord(record.id);
+              setRecords(prev => prev.filter(r => r.id !== record.id));
+            } else {
+              const { address, client, ...pureRec } = record as any;
+              await dataService.upsertRecord({
+                ...pureRec,
+                assignedRoute: '',
+                temporaryRouteName: '',
+                isTemporaryRoute: false,
+                itineraryOrder: null
+              });
+              setRecords(prev => prev.map(r => r.id === record.id ? {
+                ...r,
+                assignedRoute: undefined,
+                temporaryRouteName: undefined,
+                isTemporaryRoute: false,
+                itineraryOrder: undefined
+              } : r));
             }
           }));
-          setRecords(prev => prev.filter(r => !deletedIds.has(r.id)));
         }
       }
     } catch (error) {
@@ -2061,215 +2593,200 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       ) : (
         <div>
           <div className={cn("space-y-6", (addressSelectionModal.isOpen || routeControlPrintModalOpen) ? "print:hidden" : "")}>
-          {/* Header Controls */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
-        <div>
-          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-            <LayoutDashboard className="w-5 h-5 text-blue-600" />
-            Cronograma Mestre de Rotas
-          </h2>
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wider mt-1">Previsão e Acompanhamento para a Gestão</p>
-        </div>
-        
-        <div className="flex items-center gap-2 print:hidden">
-          <button 
-            type="button"
-            onClick={() => setHideVariableRoutes(!hideVariableRoutes)}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all shadow-sm border",
-              hideVariableRoutes 
-                ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100" 
-                : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-            )}
-            title={hideVariableRoutes ? "Mostrar rotas da Capital" : "Ocultar rotas da Capital"}
-          >
-            {hideVariableRoutes ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-            {hideVariableRoutes ? "Mostrar Capital" : "Ocultar Capital"}
-          </button>
-          <button 
-            type="button"
-            onClick={() => setRouteModal({
-              isOpen: true,
-              mode: 'create',
-              originalName: '',
-              number: '',
-              name: '',
-              type: RouteType.VARIABLE,
-              tempAddresses: []
-            })}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 transition-all shadow-md shadow-blue-100"
-            style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
-          >
-            <Plus className="w-4 h-4" />
-            Nova Rota
-          </button>
-          <button 
-            type="button"
-            onClick={() => setRouteControlPrintModalOpen(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-xl text-sm font-bold hover:bg-emerald-700 transition-all shadow-md shadow-emerald-100 cursor-pointer"
-          >
-            <ListChecks className="w-4 h-4" />
-            Controle de Rotas (A4)
-          </button>
-          <button 
-            type="button"
-            onClick={() => { 
-                window.focus(); 
-                setTimeout(() => window.print(), 200); 
-            }}
-            className="p-2 bg-white border border-gray-200 rounded-xl text-gray-700 hover:bg-gray-50 transition-all shadow-sm cursor-pointer"
-            title="Imprimir"
-          >
-            <Printer className="w-4 h-4 text-gray-700" />
-          </button>
-          <div className="flex bg-gray-100 p-1 rounded-xl">
-            <button 
-              onClick={() => setViewMode('list')}
-              className={cn(
-                "px-4 py-1.5 rounded-lg text-xs font-bold transition-all",
-                viewMode === 'list' ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
-              )}
-            >
-              Lista de Rotas
-            </button>
-            <button 
-              onClick={() => setViewMode('calendar')}
-              className={cn(
-                "px-4 py-1.5 rounded-lg text-xs font-bold transition-all",
-                viewMode === 'calendar' ? "bg-white text-blue-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
-              )}
-            >
-              Calendário
-            </button>
-          </div>
-          <input 
-            type="month" 
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            className="px-4 py-2 border border-gray-200 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-blue-500/20"
-          />
-        </div>
-      </div>
-
-      {/* Monthly Financial Summary Card */}
-      <div id="financial-summary-card" className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
-          <div className="flex items-center gap-2.5">
-            <div className="bg-blue-50 p-2.5 rounded-xl text-blue-600">
-              <DollarSign className="w-5 h-5" />
+      {/* Executive Command Header & Financial Overview */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-xs p-4 space-y-4">
+        {/* Row 1: Title, Controls & Action Toolbar */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-blue-600/10 border border-blue-200 text-blue-700 flex items-center justify-center shrink-0">
+              <LayoutDashboard className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-black text-gray-900 uppercase tracking-widest">Resumo Financeiro de Rotas</h3>
-              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider mt-0.5">Acompanhamento e previsão total para o mês vigente</p>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-black text-slate-900 tracking-tight">Cronograma Mestre de Rotas</h2>
+                <span className="text-[10px] font-black uppercase tracking-wider bg-slate-100 border border-slate-200 text-slate-700 px-2 py-0.5 rounded-md">
+                  {format(parseISO(month + '-01'), 'MMMM yyyy', { locale: ptBR })}
+                </span>
+              </div>
+              <p className="text-[11px] font-medium text-slate-500">Gestão integrada de roteiros, planejamento operacional e despesas</p>
             </div>
           </div>
-          <div className="bg-linear-to-r from-gray-50 to-gray-100/50 border border-gray-200/60 px-3.5 py-1.5 rounded-xl text-xs font-bold text-gray-500 self-start sm:self-auto uppercase tracking-wide shadow-2xs">
-            Mês de Referência: <span className="text-gray-800 font-black">{format(parseISO(month + '-01'), 'MMMM yyyy', { locale: ptBR })}</span>
+
+          <div className="flex flex-wrap items-center gap-2 print:hidden">
+            {/* View Mode Toggle */}
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200/60">
+              <button 
+                type="button"
+                onClick={() => setViewMode('list')}
+                className={cn(
+                  "px-3 py-1 rounded-lg text-xs font-extrabold transition-all cursor-pointer",
+                  viewMode === 'list' ? "bg-white text-blue-700 shadow-2xs" : "text-slate-500 hover:text-slate-800"
+                )}
+              >
+                Lista de Rotas
+              </button>
+              <button 
+                type="button"
+                onClick={() => setViewMode('calendar')}
+                className={cn(
+                  "px-3 py-1 rounded-lg text-xs font-extrabold transition-all cursor-pointer",
+                  viewMode === 'calendar' ? "bg-white text-blue-700 shadow-2xs" : "text-slate-500 hover:text-slate-800"
+                )}
+              >
+                Calendário
+              </button>
+            </div>
+
+            {/* Filter Toggle */}
+            <button 
+              type="button"
+              onClick={() => setHideVariableRoutes(!hideVariableRoutes)}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-extrabold transition-all border cursor-pointer",
+                hideVariableRoutes 
+                  ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100" 
+                  : "bg-white border-slate-200 text-slate-700 hover:bg-slate-50"
+              )}
+              title={hideVariableRoutes ? "Mostrar rotas da Capital" : "Ocultar rotas da Capital"}
+            >
+              {hideVariableRoutes ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+              <span>{hideVariableRoutes ? "Mostrar Capital" : "Ocultar Capital"}</span>
+            </button>
+
+            {/* Date Input Month Picker */}
+            <input 
+              type="month" 
+              value={month}
+              onChange={(e) => setMonth(e.target.value)}
+              className="px-3 py-1.5 bg-slate-50 hover:bg-white border border-slate-200 rounded-xl text-xs font-extrabold text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 cursor-pointer transition-all"
+            />
+
+            {/* Action Buttons */}
+            <button 
+              type="button"
+              onClick={() => setAddRouteModalOpen(true)}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs cursor-pointer"
+              style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Adicionar Rota ao Mês</span>
+            </button>
+
+            <button 
+              type="button"
+              onClick={() => setRouteModal({
+                isOpen: true,
+                mode: 'create',
+                originalName: '',
+                number: '',
+                name: '',
+                type: RouteType.VARIABLE,
+                tempAddresses: []
+              })}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs cursor-pointer"
+              style={{ display: isReadOnly ? 'none' : 'inline-flex' }}
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Nova Rota</span>
+            </button>
+
+            <button 
+              type="button"
+              onClick={() => setRouteControlPrintModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 rounded-xl text-xs font-extrabold transition-all cursor-pointer"
+            >
+              <ListChecks className="w-3.5 h-3.5" />
+              <span>Controle (A4)</span>
+            </button>
+
+            <button 
+              type="button"
+              onClick={() => { 
+                  window.focus(); 
+                  setTimeout(() => window.print(), 200); 
+              }}
+              className="p-1.5 bg-white border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-50 transition-all cursor-pointer"
+              title="Imprimir visualização"
+            >
+              <Printer className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-          {/* Total Estimado (Custos) */}
-          <div className="bg-linear-to-r from-blue-50/40 via-blue-50/10 to-transparent border border-blue-100/50 rounded-xl p-4 flex flex-col justify-between min-h-[102px]">
-            <div className="flex items-center justify-between w-full">
-              <div className="space-y-1">
-                <span className="text-[9px] font-black text-blue-600 uppercase tracking-widest block">Total Previsto das Rotas</span>
-                <span className="text-xl font-black text-blue-700 font-mono tracking-tight block">
-                  {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(financialSummary.totalEstimated)}
-                </span>
-              </div>
-              <div className="w-11 h-11 shrink-0 rounded-full bg-blue-100/40 flex items-center justify-center p-3 text-blue-600 font-black font-mono text-sm shadow-2xs border border-blue-50">
-                R$
-              </div>
+        {/* Row 2: High-Density Financial Metric Strip */}
+        <div id="financial-summary-card" className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {/* Card 1: Previsto */}
+          <div className="bg-slate-50/70 border border-slate-200/80 rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">Custo Total Previsto</span>
+              <span className="text-base font-black text-blue-700 font-mono tracking-tight block mt-0.5">
+                {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(financialSummary.totalEstimated)}
+              </span>
             </div>
-            <div className="mt-2.5 pt-2 border-t border-blue-100/30 flex items-center justify-between">
-              <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wide">Custo de Viagens</span>
-              <span className="text-[9px] font-black uppercase text-blue-700 bg-blue-50 border border-blue-100/65 px-2 py-0.5 rounded-md leading-none">Previsão</span>
+            <div className="w-8 h-8 rounded-lg bg-blue-100/60 text-blue-700 flex items-center justify-center text-xs font-black shrink-0 font-mono">
+              R$
             </div>
           </div>
 
-          {/* Rotas com Custos Planejados */}
-          <div className="bg-linear-to-r from-emerald-50/40 via-emerald-50/10 to-transparent border border-emerald-100/50 rounded-xl p-4 flex flex-col justify-between min-h-[102px]">
-            <div className="flex items-center justify-between w-full">
-              <div className="space-y-1">
-                <span className="text-[9px] font-black text-emerald-600 uppercase tracking-widest block">Rotas com Custos Cadastrados</span>
-                <span className="text-xl font-black text-emerald-700 font-mono tracking-tight block">
-                  {financialSummary.routesWithCostCount} <span className="text-xs font-bold text-emerald-500 uppercase">de {financialSummary.routesCount} rotas</span>
-                </span>
-              </div>
-              <div className="w-11 h-11 shrink-0 rounded-full bg-emerald-100/40 flex items-center justify-center p-3 text-emerald-600 shadow-2xs border border-emerald-50">
-                <Calculator className="w-5 h-5" />
-              </div>
+          {/* Card 2: Custos Cadastrados */}
+          <div className="bg-slate-50/70 border border-slate-200/80 rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">Rotas Com Custo</span>
+              <span className="text-base font-black text-emerald-700 font-mono tracking-tight block mt-0.5">
+                {financialSummary.routesWithCostCount} <span className="text-[10px] font-bold text-slate-400">/ {financialSummary.routesCount} rotas</span>
+              </span>
             </div>
-            <div className="mt-2.5 pt-2 border-t border-emerald-100/30 flex items-center justify-between">
-              <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wide">Preenchimento</span>
-              <span className="text-[9px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-100/65 px-2 py-0.5 rounded-md leading-none">
-                {financialSummary.routesCount > 0 ? Math.round((financialSummary.routesWithCostCount / financialSummary.routesCount) * 100) : 0}% concluído
+            <div className="text-right">
+              <span className="text-[10px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md">
+                {financialSummary.routesCount > 0 ? Math.round((financialSummary.routesWithCostCount / financialSummary.routesCount) * 100) : 0}%
               </span>
             </div>
           </div>
 
-          {/* Custos Concluídos */}
-          <div className="bg-linear-to-r from-purple-50/40 via-purple-50/10 to-transparent border border-purple-100/50 rounded-xl p-4 flex flex-col justify-between min-h-[102px]">
-            <div className="flex items-center justify-between w-full">
-              <div className="space-y-1">
-                <span className="text-[9px] font-black text-purple-600 uppercase tracking-widest block">Custos Concluídos</span>
-                <span className="text-xl font-black text-purple-700 font-mono tracking-tight block">
-                  {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(financialSummary.totalCompletedCosts)}
-                </span>
-              </div>
-              <div className="w-11 h-11 shrink-0 rounded-full bg-purple-100/40 flex items-center justify-center p-2.5 text-purple-600 font-black shadow-2xs border border-purple-50">
-                <ListChecks className="w-5 h-5" />
-              </div>
+          {/* Card 3: Custos Executados */}
+          <div className="bg-slate-50/70 border border-slate-200/80 rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">Custos Concluídos</span>
+              <span className="text-base font-black text-purple-700 font-mono tracking-tight block mt-0.5">
+                {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(financialSummary.totalCompletedCosts)}
+              </span>
             </div>
-            <div className="mt-2.5 pt-2 border-t border-purple-100/30 flex items-center justify-between">
-              <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wide">Rotas Executadas</span>
-              <span className="text-[9px] font-black uppercase text-purple-700 bg-purple-50 border border-purple-100/65 px-2 py-0.5 rounded-md leading-none font-sans">
-                {financialSummary.completedRoutesCount} {financialSummary.completedRoutesCount === 1 ? 'completada' : 'completadas'}
+            <div className="text-right">
+              <span className="text-[10px] font-black uppercase text-purple-700 bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded-md">
+                {financialSummary.completedRoutesCount} {financialSummary.completedRoutesCount === 1 ? 'rota' : 'rotas'}
               </span>
             </div>
           </div>
 
-          {/* Faturamento Total Gerado */}
-          <div className="bg-linear-to-r from-indigo-50/40 via-indigo-50/10 to-transparent border border-indigo-100/50 rounded-xl p-4 flex flex-col justify-between min-h-[102px]">
-            <div className="flex items-center justify-between w-full">
-              <div className="space-y-1">
-                <span className="text-[9px] font-black text-indigo-600 uppercase tracking-widest block">Valor Total Gerado</span>
-                <span className="text-xl font-black text-indigo-700 font-mono tracking-tight block">
-                  {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(financialSummary.totalServicesValue)}
-                </span>
-              </div>
-              <div className="w-11 h-11 shrink-0 rounded-full bg-indigo-100/40 flex items-center justify-center p-3 text-indigo-600 shadow-2xs border border-indigo-50">
-                <DollarSign className="w-5 h-5" />
-              </div>
+          {/* Card 4: Faturamento Total / Balanço */}
+          <div className="bg-slate-50/70 border border-slate-200/80 rounded-xl p-3 flex items-center justify-between">
+            <div>
+              <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">Valor Total Gerado</span>
+              <span className="text-base font-black text-slate-900 font-mono tracking-tight block mt-0.5">
+                {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(financialSummary.totalServicesValue)}
+              </span>
             </div>
-            
-            {/* Comparativo de Custo vs Faturamento */}
-            <div className="mt-2.5 pt-2 border-t border-indigo-100/30 flex items-center justify-between">
-              <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wide">Balanço do Mês</span>
+            <div className="text-right">
               {financialSummary.totalServicesValue === 0 && financialSummary.totalEstimated === 0 ? (
-                <span className="text-[9px] font-black uppercase text-gray-500 bg-gray-100 px-2 py-0.5 rounded-md leading-none">Sem dados</span>
+                <span className="text-[9px] font-black uppercase text-slate-500 bg-slate-100 px-1.5 py-0.5 rounded-md">Sem dados</span>
               ) : financialSummary.totalServicesValue >= financialSummary.totalEstimated ? (
-                <span className="text-[9px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-100/60 px-1.5 py-0.5 rounded-md leading-none flex items-center gap-0.5">
-                  ▲ Lucrativo (+{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(financialSummary.totalServicesValue - financialSummary.totalEstimated)})
+                <span className="text-[9px] font-black uppercase text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md">
+                  ▲ +{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(financialSummary.totalServicesValue - financialSummary.totalEstimated)}
                 </span>
               ) : (
-                <span className="text-[9px] font-black uppercase text-red-700 bg-red-50 border border-red-100/60 px-1.5 py-0.5 rounded-md leading-none flex items-center gap-0.5">
-                  ▼ Crítico (-{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(financialSummary.totalEstimated - financialSummary.totalServicesValue)})
+                <span className="text-[9px] font-black uppercase text-red-700 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-md">
+                  ▼ -{new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumFractionDigits: 0 }).format(financialSummary.totalEstimated - financialSummary.totalServicesValue)}
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* Breakdown details */}
+        {/* Row 3: Alocação de Custos por Rota (horizontal pills) */}
         {financialSummary.activeRouteCosts.length > 0 && (
-          <div className="space-y-2 pt-1">
-            <div className="flex items-center gap-2">
-              <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest shrink-0">Alocação de Custos por Rota</span>
-              <div className="h-px bg-gray-100 flex-1" />
-            </div>
-            <div className="flex flex-wrap gap-2">
+          <div className="flex items-center gap-2 pt-1 border-t border-slate-100">
+            <span className="text-[9px] font-black text-slate-400 uppercase tracking-wider shrink-0">Alocação por Rota:</span>
+            <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 scrollbar-none">
               {financialSummary.activeRouteCosts.map((item) => (
                 <button
                   key={item.name}
@@ -2278,18 +2795,18 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                     const el = document.getElementById(`route-${item.name}`);
                     if (el) {
                       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      el.classList.add('ring-[5px]', 'ring-blue-500/15', 'shadow-md');
+                      el.classList.add('ring-4', 'ring-blue-500/20');
                       setTimeout(() => {
-                        el.classList.remove('ring-[5px]', 'ring-blue-500/15', 'shadow-md');
+                        el.classList.remove('ring-4', 'ring-blue-500/20');
                       }, 1800);
                     }
                   }}
-                  className="inline-flex items-center gap-2 px-3 py-1.5 bg-gray-50 hover:bg-blue-50/40 rounded-xl border border-gray-200/80 hover:border-blue-200 text-xs font-semibold text-gray-600 hover:text-blue-800 transition-all cursor-pointer shadow-3xs group"
-                  title="Clique para rolar até esta rota"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-50 hover:bg-blue-50 rounded-lg border border-slate-200 text-[11px] font-semibold text-slate-700 hover:text-blue-800 transition-all cursor-pointer shrink-0"
+                  title="Clique para destacar na tabela"
                 >
-                  <span className="w-2 h-2 rounded-full shrink-0 group-hover:scale-125 transition-transform" style={{ backgroundColor: item.color || '#3b82f6' }} />
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: item.color || '#3b82f6' }} />
                   <span className="font-extrabold">{item.name}</span>
-                  <span className="text-[11px] font-black font-mono bg-white group-hover:bg-blue-100 px-1.5 py-0.5 rounded-md border border-gray-100 group-hover:border-blue-200 text-gray-900 group-hover:text-blue-800 transition-colors">
+                  <span className="font-mono text-[10px] font-black text-slate-900 bg-white px-1 rounded border border-slate-100">
                     {new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(item.cost)}
                   </span>
                 </button>
@@ -2475,104 +2992,141 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
       )}
 
       {viewMode === 'list' ? (
-        <div className="grid grid-cols-1 gap-4">
-          {displayRoutes.map(([name, data]) => (
-            <div key={name} id={`route-${name}`} className="transition-all duration-500 rounded-2xl">
-              <RouteCard 
-                name={name}
-                data={data}
-                colors={colors}
-                technicians={technicians}
-                onSetColor={handleSetRouteColor}
-                onSetNotes={handleSetRouteNotes}
-                onSetPlannedDate={handleSetPlannedDate}
-                onSetReturnDate={handleSetReturnDate}
-                onSetFinancials={handleSetRouteFinancials}
-                onSetType={handleSetRouteType}
-                onSetStatus={handleSetRouteStatus}
-                onSetTechnicians={handleSetRouteTechnicians}
-                onOpenCostCalculator={(name) => setCostCalculatorModal({ isOpen: true, routeName: name })}
-                onEdit={(name) => {
-                  const config = routeConfigs.find(c => c.id === name || c.routeName === name);
-                  const isTemp = config?.type === RouteType.TEMPORARY;
-                  const tempAddresses = isTemp ? data.records.map(r => {
-                    const isReal = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
-                    const realAddr = isReal ? addresses.find(a => a.id === r.addressId) : null;
-                    const realClient = realAddr ? clients.find(c => c.id === realAddr.clientId) : null;
-
-                    return {
-                      key: r.id || Math.random().toString(36).substr(2, 9),
-                      addressId: isReal ? r.addressId : undefined,
-                      isRealAddress: isReal,
-                      originalRoute: r.originalRoute || realAddr?.route || 'Sem Rota',
-                      clientName: isReal ? (realClient?.name || r.temporaryClient || 'Cliente') : (r.temporaryClient || ''),
-                      street: isReal ? `${realAddr?.street || ''}${realAddr?.number ? ', ' + realAddr.number : ''}${realAddr?.neighborhood ? ' - ' + realAddr.neighborhood : ''}` : (r.temporaryStreet || ''),
-                      totalMachines: isReal ? (realAddr?.totalMachines || r.temporaryMachines || 0) : (r.temporaryMachines || 0),
-                      city: realAddr?.city,
-                      state: realAddr?.state,
-                      recordId: r.id
-                    };
-                  }) : [];
-
-                  setRouteModal({
-                    isOpen: true,
-                    mode: 'edit',
-                    originalName: name,
-                    number: config?.routeNumber || (name.includes('-') ? name.split('-')[0].trim() : ''),
-                    name: config?.routeName && config.routeName !== name ? config.routeName : (name.includes('-') ? name.split('-').slice(1).join('-').trim() : name),
-                    type: config?.type || RouteType.VARIABLE,
-                    tempAddresses
-                  });
-                }}
-                onDelete={(name) => {
-                  setDeleteConfirm({ isOpen: true, routeName: name });
-                }}
-                userRole={userRole}
-                addressesCount={data.records.length}
-                onOpenAddressSelection={(name) => {
-                  const config = routeConfigs.find(c => c.id === name || c.routeName === name);
-                  if (config?.type === RouteType.TEMPORARY) {
-                    const tempAddresses = data.records.map(r => {
-                      const isReal = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
-                      const realAddr = isReal ? addresses.find(a => a.id === r.addressId) : null;
-                      const realClient = realAddr ? clients.find(c => c.id === realAddr.clientId) : null;
-                      return {
-                        key: r.id || Math.random().toString(36).substr(2, 9),
-                        addressId: isReal ? r.addressId : undefined,
-                        isRealAddress: isReal,
-                        originalRoute: r.originalRoute || realAddr?.route || 'Sem Rota',
-                        clientName: isReal ? (realClient?.name || r.temporaryClient || 'Cliente') : (r.temporaryClient || ''),
-                        street: isReal ? `${realAddr?.street || ''}${realAddr?.number ? ', ' + realAddr.number : ''}${realAddr?.neighborhood ? ' - ' + realAddr.neighborhood : ''}` : (r.temporaryStreet || ''),
-                        totalMachines: isReal ? (realAddr?.totalMachines || r.temporaryMachines || 0) : (r.temporaryMachines || 0),
-                        city: realAddr?.city,
-                        state: realAddr?.state,
-                        recordId: r.id
-                      };
-                    });
-                    setRouteModal({
-                      isOpen: true,
-                      mode: 'edit',
-                      originalName: name,
-                      number: config?.routeNumber || (name.includes('-') ? name.split('-')[0].trim() : ''),
-                      name: config?.routeName && config.routeName !== name ? config.routeName : (name.includes('-') ? name.split('-').slice(1).join('-').trim() : name),
-                      type: RouteType.TEMPORARY,
-                      tempAddresses
-                    });
-                    setRealAddressSelectorOpen(true);
-                  } else {
-                    setAddressSelectionModal({ isOpen: true, routeName: name });
-                  }
-                }}
-              />
+        displayRoutes.length === 0 ? (
+          <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-10 sm:p-14 text-center my-4 flex flex-col items-center justify-center gap-4 shadow-2xs">
+            <div className="w-16 h-16 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center shadow-inner">
+              <RouteIcon className="w-8 h-8" />
             </div>
-          ))}
-          {displayRoutes.length === 0 && (
-            <div className="bg-white border border-dashed border-gray-300 rounded-3xl py-20 text-center">
-               <Filter className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-               <p className="text-gray-400 font-medium">Nenhuma rota programada para este período.</p>
+            <div className="max-w-md space-y-1.5">
+              <h3 className="text-base sm:text-lg font-extrabold text-slate-800">
+                Nenhuma Rota de Viagem na Pauta de {format(parseISO(`${month}-01`), 'MMMM/yyyy', { locale: ptBR })}
+              </h3>
+              <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                A pauta deste mês está em branco. Clique no botão abaixo para adicionar as rotas de viagem que foram planejadas para sair neste mês.
+              </p>
             </div>
-          )}
-        </div>
+            {!isReadOnly && (
+              <button
+                type="button"
+                onClick={() => setAddRouteModalOpen(true)}
+                className="mt-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold px-5 py-2.5 rounded-xl text-xs flex items-center gap-2 shadow-md hover:shadow-lg transition-all cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                Adicionar Rota ao Mês
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse min-w-[1000px]">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase text-slate-500 tracking-wider">
+                    <th className="py-3 px-3.5 w-[240px]">Rota / Categoria</th>
+                    <th className="py-3 px-2 w-[180px]">Equipe Escalada</th>
+                    <th className="py-3 px-2 w-[160px]">Período da Viagem</th>
+                    <th className="py-3 px-2 w-[140px]">Status</th>
+                    <th className="py-3 px-2 text-center w-[130px]">O.S. / Prev</th>
+                    <th className="py-3 px-2 text-right w-[150px]">Previsão & Total</th>
+                    <th className="py-3 px-3.5 text-right w-[160px]">Anexo / Ações</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayRoutes.map(([name, data]) => (
+                    <RouteTableRow 
+                      key={name}
+                      name={name}
+                      data={data}
+                      colors={colors}
+                      technicians={technicians}
+                      onSetColor={handleSetRouteColor}
+                      onSetNotes={handleSetRouteNotes}
+                      onSetPlannedDate={handleSetPlannedDate}
+                      onSetReturnDate={handleSetReturnDate}
+                      onSetFinancials={handleSetRouteFinancials}
+                      onSetType={handleSetRouteType}
+                      onSetStatus={handleSetRouteStatus}
+                      onSetTechnicians={handleSetRouteTechnicians}
+                      onRemoveFromMonth={handleRemoveRouteFromMonth}
+                      onOpenCostCalculator={(name) => setCostCalculatorModal({ isOpen: true, routeName: name })}
+                      onEdit={(name) => {
+                        const config = routeConfigs.find(c => c.id === name || c.routeName === name);
+                        const isTemp = config?.type === RouteType.TEMPORARY;
+                        const tempAddresses = isTemp ? data.records.map(r => {
+                          const isReal = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
+                          const realAddr = isReal ? addresses.find(a => a.id === r.addressId) : null;
+                          const realClient = realAddr ? clients.find(c => c.id === realAddr.clientId) : null;
+
+                          return {
+                            key: r.id || Math.random().toString(36).substr(2, 9),
+                            addressId: isReal ? r.addressId : undefined,
+                            isRealAddress: isReal,
+                            originalRoute: r.originalRoute || realAddr?.route || 'Sem Rota',
+                            clientName: isReal ? (realClient?.name || r.temporaryClient || 'Cliente') : (r.temporaryClient || ''),
+                            street: isReal ? `${realAddr?.street || ''}${realAddr?.number ? ', ' + realAddr.number : ''}${realAddr?.neighborhood ? ' - ' + realAddr.neighborhood : ''}` : (r.temporaryStreet || ''),
+                            totalMachines: isReal ? (realAddr?.totalMachines || r.temporaryMachines || 0) : (r.temporaryMachines || 0),
+                            city: realAddr?.city,
+                            state: realAddr?.state,
+                            recordId: r.id
+                          };
+                        }) : [];
+
+                        setRouteModal({
+                          isOpen: true,
+                          mode: 'edit',
+                          originalName: name,
+                          number: config?.routeNumber || (name.includes('-') ? name.split('-')[0].trim() : ''),
+                          name: config?.routeName && config.routeName !== name ? config.routeName : (name.includes('-') ? name.split('-').slice(1).join('-').trim() : name),
+                          type: config?.type || RouteType.VARIABLE,
+                          tempAddresses
+                        });
+                      }}
+                      onDelete={(name) => {
+                        setDeleteConfirm({ isOpen: true, routeName: name });
+                      }}
+                      userRole={userRole}
+                      addressesCount={data.records.length}
+                      onOpenAddressSelection={(name) => {
+                        const config = routeConfigs.find(c => c.id === name || c.routeName === name);
+                        if (config?.type === RouteType.TEMPORARY) {
+                          const tempAddresses = data.records.map(r => {
+                            const isReal = Boolean(r.addressId && !String(r.addressId).startsWith('TEMP_ADDR_'));
+                            const realAddr = isReal ? addresses.find(a => a.id === r.addressId) : null;
+                            const realClient = realAddr ? clients.find(c => c.id === realAddr.clientId) : null;
+                            return {
+                              key: r.id || Math.random().toString(36).substr(2, 9),
+                              addressId: isReal ? r.addressId : undefined,
+                              isRealAddress: isReal,
+                              originalRoute: r.originalRoute || realAddr?.route || 'Sem Rota',
+                              clientName: isReal ? (realClient?.name || r.temporaryClient || 'Cliente') : (r.temporaryClient || ''),
+                              street: isReal ? `${realAddr?.street || ''}${realAddr?.number ? ', ' + realAddr.number : ''}${realAddr?.neighborhood ? ' - ' + realAddr.neighborhood : ''}` : (r.temporaryStreet || ''),
+                              totalMachines: isReal ? (realAddr?.totalMachines || r.temporaryMachines || 0) : (r.temporaryMachines || 0),
+                              city: realAddr?.city,
+                              state: realAddr?.state,
+                              recordId: r.id
+                            };
+                          });
+                          setRouteModal({
+                            isOpen: true,
+                            mode: 'edit',
+                            originalName: name,
+                            number: config?.routeNumber || (name.includes('-') ? name.split('-')[0].trim() : ''),
+                            name: config?.routeName && config.routeName !== name ? config.routeName : (name.includes('-') ? name.split('-').slice(1).join('-').trim() : name),
+                            type: RouteType.TEMPORARY,
+                            tempAddresses
+                          });
+                          setRealAddressSelectorOpen(true);
+                        } else {
+                          setAddressSelectionModal({ isOpen: true, routeName: name });
+                        }
+                      }}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
       ) : (
         <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-sm">
           <div className="grid grid-cols-7 border-b border-gray-100">
@@ -3516,23 +4070,21 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                 </div>
               </div>
               <div className="p-4 space-y-2 print:p-8 print:pt-0">
-                {sortedAddresses.map(addr => {
-                  const client = clients.find(c => c.id === addr.clientId);
+                {(() => {
                   const currentRouteName = addressSelectionModal.routeName;
-                  const currentConfig = routeConfigs.find(c => c.id === currentRouteName || c.routeName === currentRouteName);
+                  const currentConfig = findRouteConfig(currentRouteName);
+                  const selectedAddressIdSet = new Set(getRouteSelectedAddressIds(currentRouteName));
+                  return sortedAddresses.map(addr => {
+                  const client = clients.find(c => c.id === addr.clientId);
                   const record = records.find(r => {
                     if (!r || r.month !== month || r.addressId !== addr.id) return false;
-                    if (r.assignedRoute === currentRouteName || r.temporaryRouteName === currentRouteName) return true;
-                    if (currentConfig && (r.assignedRoute === currentConfig.id || r.assignedRoute === currentConfig.routeName || (currentConfig.routeNumber && r.assignedRoute === currentConfig.routeNumber))) return true;
-                    if (r.temporaryRouteName === currentConfig?.id || r.temporaryRouteName === currentConfig?.routeName) return true;
+                    if (doesRouteMatch(r.assignedRoute, currentRouteName, currentConfig) || doesRouteMatch(r.temporaryRouteName, currentRouteName, currentConfig)) return true;
                     if (!r.assignedRoute && !r.isTemporaryRoute) {
-                      const baseRoute = addr.route || 'Sem Rota';
-                      if (baseRoute === currentRouteName) return true;
-                      if (currentConfig && (baseRoute === currentConfig.id || baseRoute === currentConfig.routeName || (currentConfig.routeNumber && baseRoute.trim() === currentConfig.routeNumber.trim()))) return true;
+                      if (doesRouteMatch(addr.route, currentRouteName, currentConfig)) return true;
                     }
                     return false;
                   });
-                  const isIncluded = !!record;
+                  const isIncluded = selectedAddressIdSet.has(addr.id);
                   const tempAssignedRecord = records.find(r => 
                     r.addressId === addr.id && 
                     r.month === month && 
@@ -3643,7 +4195,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                               <h4 className={cn("text-sm font-bold print:text-black print:font-extrabold print:text-[15px]", isIncluded ? "text-emerald-900 font-extrabold" : "text-gray-900")}>
                                 {client?.name || 'Cliente desconhecido'}
                               </h4>
-                              {addr.route && addr.route !== addressSelectionModal.routeName && (
+                              {addr.route && !doesRouteMatch(addr.route, addressSelectionModal.routeName, currentConfig) && (
                                 <span className="inline-flex items-center text-[10px] font-extrabold uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100 px-2 py-0.5 rounded-md leading-none select-none shrink-0 print:hidden">
                                   Rota Original: {addr.route}
                                 </span>
@@ -3708,7 +4260,7 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                                 ? "bg-purple-50/90 border-purple-300 print:bg-purple-50/20 print:border-purple-200/70"
                                 : "bg-amber-50/90 border-amber-300 print:bg-amber-50/20 print:border-amber-200/70"
                           )}>
-                            <div className="flex items-center justify-between gap-1.5 font-bold text-[11px] uppercase tracking-wide mb-1 print:font-semibold">
+                             <div className="flex items-center justify-between gap-1.5 font-bold text-[11px] uppercase tracking-wide mb-1 print:font-semibold">
                               <div className="flex items-center gap-1.5">
                                 {openCall.isWorkshop ? (
                                   <Wrench className="w-3.5 h-3.5 text-purple-700 print:text-purple-600 shrink-0" />
@@ -3717,12 +4269,6 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                                 ) : (
                                   <AlertCircle className="w-3.5 h-3.5 text-amber-600 print:text-amber-600 shrink-0" />
                                 )}
-                                <span className={cn(
-                                  "print:font-semibold print:text-gray-700",
-                                  openCall.priority === 'high' ? "text-red-900" : openCall.isWorkshop ? "text-purple-950" : "text-amber-900"
-                                )}>
-                                  Descrição do Chamado Técnico em Aberto:
-                                </span>
                               </div>
                               <div className="flex items-center gap-1">
                                 {openCall.isWorkshop && (
@@ -3759,17 +4305,17 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                               if (callPhotos.length === 0) return null;
 
                               return (
-                                <div className="mt-2 pt-1.5 border-t border-gray-200/60 print:mt-1 print:pt-1 flex items-center gap-2 flex-wrap">
+                                <div className="mt-2 pt-1.5 border-t border-gray-200/60 print:mt-1.5 print:pt-1.5 flex items-center gap-2 flex-wrap">
                                   <span className="text-[10px] font-semibold text-gray-500 print:text-gray-600 shrink-0">
                                     Fotos ({callPhotos.length}):
                                   </span>
-                                  <div className="flex flex-wrap gap-1.5">
+                                  <div className="flex flex-wrap gap-2">
                                     {callPhotos.map((imgUrl, idx) => (
                                       <img
                                         key={idx}
                                         src={imgUrl}
                                         alt={`Miniatura ${idx + 1}`}
-                                        className="w-10 h-10 print:w-9 print:h-9 object-cover rounded border border-gray-300 print:border-gray-400 shrink-0 bg-white shadow-2xs"
+                                        className="w-20 h-20 print:w-20 print:h-20 object-cover rounded-md border border-gray-300 print:border-gray-400 shrink-0 bg-white shadow-2xs"
                                       />
                                     ))}
                                   </div>
@@ -3781,10 +4327,26 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
                       </label>
                     </div>
                   );
-                })}
+                });
+                })()}
                 {sortedAddresses.length === 0 && (
-                  <div className="py-8 text-center text-gray-500 text-sm font-medium">
-                    Nenhum endereço encontrado com o filtro atual.
+                  <div className="py-8 px-4 text-center text-gray-500 text-sm font-medium space-y-3 bg-gray-50/70 rounded-xl border border-dashed border-gray-200">
+                    <p>
+                      {addressSearchQuery.trim()
+                        ? 'Nenhum endereço encontrado com o filtro de pesquisa atual.'
+                        : !showOtherRoutes
+                          ? `Nenhum endereço cadastrado na rota "${addressSelectionModal.routeName}".`
+                          : 'Nenhum endereço encontrado com o filtro atual.'}
+                    </p>
+                    {!addressSearchQuery.trim() && !showOtherRoutes && (
+                      <button
+                        type="button"
+                        onClick={() => setShowOtherRoutes(true)}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition-colors cursor-pointer"
+                      >
+                        Incluir endereços de outras rotas
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -4423,6 +4985,191 @@ export default function RoutePlanningView({ userRole, userProfile }: RoutePlanni
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* Modal para Adicionar Rotas à Pauta do Mês */}
+      {addRouteModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 print:hidden">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-150">
+            {/* Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50/80">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                  <ListPlus className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-800 text-base">Adicionar Rotas de Viagem ao Mês</h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Selecione as viagens programadas para {format(parseISO(`${month}-01`), 'MMMM/yyyy', { locale: ptBR })}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAddRouteModalOpen(false);
+                  setSelectedRoutesToAdd([]);
+                  setAddRouteSearch('');
+                }}
+                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-4 sm:p-5 space-y-4 overflow-y-auto flex-1">
+              {/* Barra de busca e criar rota temporária */}
+              <div className="flex flex-col sm:flex-row items-center gap-2.5">
+                <div className="relative flex-1 w-full">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar rota cadastrada por nome ou número..."
+                    value={addRouteSearch}
+                    onChange={(e) => setAddRouteSearch(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 placeholder:text-slate-400 outline-none focus:bg-white focus:border-blue-500 transition-all"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddRouteModalOpen(false);
+                    setRouteModal({
+                      isOpen: true,
+                      mode: 'create',
+                      originalName: '',
+                      number: '',
+                      name: '',
+                      type: RouteType.VARIABLE,
+                      tempAddresses: []
+                    });
+                  }}
+                  className="w-full sm:w-auto px-3.5 py-2 bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200/80 rounded-xl text-xs font-extrabold flex items-center justify-center gap-1.5 transition-all shrink-0 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Criar Rota Temporária
+                </button>
+              </div>
+
+              {/* Lista de Rotas */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between px-1">
+                  <span className="text-xs font-extrabold text-slate-500 uppercase tracking-wider">
+                    Rotas Cadastradas Disponíveis ({availableRoutesForMonth.length})
+                  </span>
+                  {availableRoutesForMonth.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedRoutesToAdd.length === availableRoutesForMonth.length) {
+                          setSelectedRoutesToAdd([]);
+                        } else {
+                          setSelectedRoutesToAdd(availableRoutesForMonth.map(r => r.id || r.routeName));
+                        }
+                      }}
+                      className="text-xs font-bold text-blue-600 hover:text-blue-700 hover:underline cursor-pointer"
+                    >
+                      {selectedRoutesToAdd.length === availableRoutesForMonth.length ? 'Desmarcar Todas' : 'Selecionar Todas'}
+                    </button>
+                  )}
+                </div>
+
+                {availableRoutesForMonth.length === 0 ? (
+                  <div className="text-center py-8 border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                    <RouteIcon className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="text-xs font-bold text-slate-600">
+                      {addRouteSearch ? 'Nenhuma rota cadastrada encontrada para esta pesquisa.' : 'Todas as rotas cadastradas já foram adicionadas ao mês atual!'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[320px] overflow-y-auto pr-1">
+                    {availableRoutesForMonth.map(rc => {
+                      const rName = rc.id || rc.routeName;
+                      const isSelected = selectedRoutesToAdd.includes(rName);
+                      const addrCount = addresses.filter(a => doesRouteMatch(a.route, rName, rc)).length;
+
+                      return (
+                        <div
+                          key={rName}
+                          onClick={() => {
+                            if (isSelected) {
+                              setSelectedRoutesToAdd(prev => prev.filter(x => x !== rName));
+                            } else {
+                              setSelectedRoutesToAdd(prev => [...prev, rName]);
+                            }
+                          }}
+                          className={cn(
+                            "p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between gap-3 select-none",
+                            isSelected
+                              ? "bg-blue-50/80 border-blue-400 shadow-2xs"
+                              : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50"
+                          )}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <div className={cn(
+                              "w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-all",
+                              isSelected ? "bg-blue-600 border-blue-600 text-white" : "border-slate-300 bg-white"
+                            )}>
+                              {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-extrabold text-xs text-slate-800 truncate uppercase">
+                                {rName}
+                              </div>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <span className={cn(
+                                  "text-[9px] font-black px-1.5 py-0.2 rounded uppercase",
+                                  rc.type === RouteType.FIXED ? "bg-amber-100 text-amber-800" :
+                                  rc.type === RouteType.TEMPORARY ? "bg-purple-100 text-purple-800" :
+                                  "bg-blue-100 text-blue-800"
+                                )}>
+                                  {rc.type === RouteType.FIXED ? 'Viagem' : rc.type === RouteType.TEMPORARY ? 'Temporária' : 'Capital'}
+                                </span>
+                                <span className="text-[10px] font-semibold text-slate-400">
+                                  {addrCount} {addrCount === 1 ? 'local' : 'locais'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-slate-100 bg-slate-50/80 flex items-center justify-between gap-3">
+              <span className="text-xs font-bold text-slate-500">
+                {selectedRoutesToAdd.length} {selectedRoutesToAdd.length === 1 ? 'rota selecionada' : 'rotas selecionadas'}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddRouteModalOpen(false);
+                    setSelectedRoutesToAdd([]);
+                    setAddRouteSearch('');
+                  }}
+                  className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition-all cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  disabled={selectedRoutesToAdd.length === 0}
+                  onClick={handleConfirmAddRoutesToMonth}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-extrabold flex items-center gap-1.5 shadow-md transition-all cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  Adicionar {selectedRoutesToAdd.length > 0 ? `(${selectedRoutesToAdd.length})` : ''}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

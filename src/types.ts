@@ -249,6 +249,7 @@ export interface MaintenanceRecord {
   originalRoute?: string; // Rota original de cadastro quando o endereço é alocado em rota temporária
   routeCardId?: string;
   checklist?: EquipmentChecklistItem[];
+  otherPhotos?: string[]; // Até 4 fotos gerais de aspectos do cliente (ex: paredes, fiação, telhado)
   techSignature?: string;
   clientSignature?: string;
   clientSignatureDate?: string; // Data e hora exata em que o cliente assinou a planilha
@@ -270,6 +271,7 @@ export interface RouteMonthlyPlanning {
   id: string; // "month_routeName"
   month: string;
   routeName: string;
+  isPlannedForMonth?: boolean;
   plannedDate?: string;
   returnDate?: string;
   routeNotes?: string;
@@ -285,6 +287,7 @@ export interface RouteMonthlyPlanning {
   routeMap2Url?: string;
   routeCostItems?: RouteCostItem[];
   routeCardId?: string;
+  selectedAddressIds?: string[];
 }
 
 export interface EquipmentChecklistItem {
@@ -354,6 +357,22 @@ export interface Technician {
   pricePerCorrectiveOS?: number;
   pricePerJettingOS?: number;
   pin?: string;
+  connectionStatus?: TechnicianConnectionStatus;
+}
+
+export interface TechnicianConnectionStatus {
+  technicianId: string; // ID, PIN or short name
+  technicianName: string;
+  isOnline: boolean;
+  effectiveType?: string; // '4g' | '3g' | '2g' | 'wifi' | 'slow-2g' | 'unknown'
+  rttMs?: number;
+  downlinkMbps?: number;
+  pingMs?: number;
+  lastSeenAt: string;
+  pendingOfflineCount?: number;
+  pingRequestedAt?: string;
+  deviceInfo?: string;
+  updatedAt?: any;
 }
 
 export interface Adjustment {
@@ -528,6 +547,7 @@ export interface ServiceOrder {
   
   status: 'aberta' | 'em_andamento' | 'pre_finalizada' | 'finalizada' | 'cancelada';
   type: string; // Ex: "MANUTENCAO CORRETIVA CONTRATO", "AVULSA", etc.
+  isWorkshop?: boolean; // Indica se o equipamento se encontra recolhido na Oficina para conserto
   
   openedAt: any; // data/hora de abertura
   openedBy: string; // usuário que abriu
@@ -548,6 +568,8 @@ export interface ServiceOrder {
   authenticatedTeam?: string; // Ex: "Equipe autenticada no aplicativo JDSmartOS..."
   clientRepresentative?: string; // Nome do representante (ex: ALUÍSIO MELO SIMÕES FILHO)
   clientRepresentativeMatricula?: string; // Matrícula do representante (ex: 0813)
+  clientSigneeName?: string;
+  clientSigneeRegistration?: string;
   serviceCompany?: string; // ID da empresa prestadora configurada
   
   photos?: string[]; // fotos anexadas do app
@@ -559,6 +581,9 @@ export interface ServiceOrder {
   adminFinalized?: boolean; // Finalizada formalmente pelo Administrativo
   adminFinalizedAt?: string; // Data e hora em que o administrativo finalizou formalmente
   itineraryOrder?: number; // Ordem cronológica da visita no Roteiro Diário
+  shareSignatureToken?: string; // Token único do link temporário de assinatura
+  shareSignatureCreatedAt?: string; // Data/hora em que o link de assinatura foi gerado
+  shareSignatureExpiresAt?: string; // Data/hora de expiração do link (48h de validade)
   createdAt: any;
   updatedAt?: any;
 }

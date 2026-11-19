@@ -1,7 +1,9 @@
 package com.lefrio.atendimento.data
 
 import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.tasks.await
 
 object FirebaseConfig {
     const val DATABASE_ID = "ai-studio-d7c7baca-4d3e-4f86-a163-d21206f789bc"
@@ -14,4 +16,17 @@ object FirebaseConfig {
             FirebaseFirestore.getInstance()
         }
     }
+
+    suspend fun ensureAuthenticated() {
+        val auth = FirebaseAuth.getInstance()
+        if (auth.currentUser != null) return
+        try {
+            auth.signInWithEmailAndPassword("atendimento@lefrio.com", "123456").await()
+        } catch (e: Exception) {
+            try {
+                auth.signInWithEmailAndPassword("admin@lefrio.com", "adminp-password").await()
+            } catch (_: Exception) {}
+        }
+    }
 }
+

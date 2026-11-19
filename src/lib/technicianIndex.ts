@@ -28,6 +28,20 @@ export function normalizeTechString(val: string | undefined | null): string {
   return normalizeText(String(val).trim()).toUpperCase();
 }
 
+export function isStaffName(name: string | undefined | null): boolean {
+  if (!name) return true;
+  const cleanName = String(name).trim().toUpperCase();
+  if (!cleanName) return true;
+
+  const staffTerms = [
+    'ADMIN', 'ADMINISTRADOR', 'ADMINISTRATIVO', 'ESCRITORIO', 'ESCRITÓRIO',
+    'SISTEMA', 'LEFRIO', 'ALCLIMA', 'KENNEDY', 'KENNEDY2026', 'SUPPORT', 'SUPORTE',
+    'GABRIELA', 'ATENDIMENTO', 'GESTOR'
+  ];
+
+  return staffTerms.some(term => cleanName === term || cleanName.startsWith(term));
+}
+
 /**
  * Constrói o sistema de indexação de técnicos com IDs canônicos,
  * conversão mandatória para MAIÚSCULAS e busca case-insensitive/sem acentos.
@@ -176,7 +190,7 @@ export function buildTechnicianIndex(techs: Technician[] = []): TechnicianIndexS
     }
 
     // 2. Se não tem technicianId, verifica quem abriu a OS (openedBy)
-    if (order.openedBy && order.openedBy !== 'ADMIN' && order.openedBy !== 'Administrativo') {
+    if (order.openedBy && !isStaffName(order.openedBy)) {
       const openerTech = findTech(order.openedBy);
       if (openerTech) {
         if (openerTech.id.toUpperCase() === targetIdUpper || openerTech.normalizedUpper === targetNorm) return true;

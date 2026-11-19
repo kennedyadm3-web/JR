@@ -30,6 +30,8 @@ class FirebaseSyncManager(private val context: Context) {
         val pendingTasks = db.syncQueueDao().getPendingTasks()
         if (pendingTasks.isEmpty()) return@withContext 0
 
+        FirebaseConfig.ensureAuthenticated()
+
         var successfulSyncs = 0
 
         for (task in pendingTasks) {

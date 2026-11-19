@@ -45,6 +45,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     private var currentTechName: String = ""
     private var currentTechId: String = ""
+    private val selectedTechFlow = MutableStateFlow(Pair("", ""))
 
     init {
         // Observa conectividade de rede
@@ -72,9 +73,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             }
         }
 
-        // Observa Ordens e Atendimentos do banco local Room
+        // Observa Ordens e Atendimentos do banco local Room combinados com o técnico ativo
         viewModelScope.launch {
-            repository.getAllOrders().collect { list ->
+            combine(repository.getAllOrders(), selectedTechFlow) { rawList, (techName, techId) ->
+                filterOrdersForTech(rawList, techName, techId)
+            }.collect { list ->
                 val prev = list.count { it.type.contains("PREVENTIVA", ignoreCase = true) }
                 val corr = list.count { it.type.contains("ORDEM", ignoreCase = true) || it.type.contains("CORRETIVA", ignoreCase = true) }
                 val open = list.count { it.status == "aberta" }
@@ -99,12 +102,30 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    private fun filterOrdersForTech(
+        allOrders: List<ServiceOrderEntity>,
+        rawTechName: String,
+        rawTechId: String
+    ): List<ServiceOrderEntity> {
+        val techName = rawTechName.trim().uppercase()
+        val techId = rawTechId.trim().uppercase()
+        if (techName.isBlank() && techId.isBlank()) return allOrders
+
+        return allOrders.filter { o ->
+            val t1 = o.technician1.trim().uppercase()
+            val t2 = (o.technician2 ?: "").trim().uppercase()
+            (techName.isNotBlank() && (t1.contains(techName) || techName.contains(t1) || (t2.isNotBlank() && (t2.contains(techName) || techName.contains(t2))))) ||
+            (techId.isNotBlank() && (t1 == techId || t2 == techId))
+        }
+    }
+
     /**
      * Inicializa ou atualiza o itinerário do dia para o técnico logado
      */
     fun loadItineraryForTechnician(techName: String, techId: String) {
         currentTechName = techName
         currentTechId = techId
+        selectedTechFlow.value = Pair(techName, techId)
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             repository.syncDailyItinerary(

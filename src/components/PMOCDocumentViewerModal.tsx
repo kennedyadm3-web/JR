@@ -500,31 +500,56 @@ export function PMOCDocumentViewerModal({
               </div>
             </div>
 
-            {/* ANEXO FOTOGRÁFICO DO ATENDIMENTO (SE HOUVER) */}
-            {equipsWithPhotos.length > 0 && (
+            {/* ANEXO FOTOGRÁFICO DO ATENDIMENTO & FOTOS GERAIS (OUTROS) */}
+            {((equipsWithPhotos && equipsWithPhotos.length > 0) || (record.otherPhotos && record.otherPhotos.length > 0)) && (
               <div className="pt-6 border-t border-black mt-6" style={{ pageBreakBefore: 'always' }}>
                 <h3 className="text-center font-bold text-xs uppercase mb-3">ANEXO FOTOGRÁFICO DO ATENDIMENTO</h3>
-                <div className="grid grid-cols-2 gap-3">
-                  {equipsWithPhotos.map(({ eq, photos }) => (
-                    <div key={eq.id} className="border border-black p-2 rounded-md flex flex-col gap-2 bg-white" style={{ pageBreakInside: 'avoid' }}>
-                      <span className="font-bold text-[8.5px] uppercase block border-b border-black pb-1">
-                        {eq.label || eq.name} - {eq.sector || 'Sem setor'} ({eq.brand || 'Sem marca'}{eq.btus ? ` - ${formatBtus(eq.btus)} BTUs` : ''})
-                      </span>
-                      <div className="grid grid-cols-2 gap-2 mt-1">
-                        {photos.map((photo, pIdx) => (
-                          <div key={pIdx} className="w-full flex justify-center border border-gray-300 rounded overflow-hidden bg-gray-50 h-28">
-                            <img 
-                              src={photo} 
-                              alt={`Foto ${pIdx + 1} - ${eq.name}`} 
-                              className="h-full w-full object-cover"
-                              referrerPolicy="no-referrer"
-                            />
-                          </div>
-                        ))}
+                
+                {/* Fotos das Máquinas */}
+                {equipsWithPhotos.length > 0 && (
+                  <div className="grid grid-cols-2 gap-3 mb-4">
+                    {equipsWithPhotos.map(({ eq, photos }) => (
+                      <div key={eq.id} className="border border-black p-2 rounded-md flex flex-col gap-2 bg-white" style={{ pageBreakInside: 'avoid' }}>
+                        <span className="font-bold text-[8.5px] uppercase block border-b border-black pb-1">
+                          {eq.label || eq.name} - {eq.sector || 'Sem setor'} ({eq.brand || 'Sem marca'}{eq.btus ? ` - ${formatBtus(eq.btus)} BTUs` : ''})
+                        </span>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                          {photos.map((photo, pIdx) => (
+                            <div key={pIdx} className="w-full flex justify-center border border-gray-300 rounded overflow-hidden bg-gray-50 h-28">
+                              <img 
+                                src={photo} 
+                                alt={`Foto ${pIdx + 1} - ${eq.name}`} 
+                                className="h-full w-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                          ))}
+                        </div>
                       </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Fotos Gerais do Cliente / Instalações (Outros) */}
+                {record.otherPhotos && record.otherPhotos.length > 0 && (
+                  <div className="border border-black p-2 rounded-md bg-white mt-3" style={{ pageBreakInside: 'avoid' }}>
+                    <span className="font-bold text-[8.5px] uppercase block border-b border-black pb-1 mb-2">
+                      OUTROS - FOTOS GERAIS DO CLIENTE / INSTALAÇÕES ({record.otherPhotos.length})
+                    </span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {record.otherPhotos.map((photo, pIdx) => (
+                        <div key={pIdx} className="w-full border border-gray-300 rounded overflow-hidden bg-gray-50 h-28">
+                          <img 
+                            src={photo} 
+                            alt={`Outros Foto ${pIdx + 1}`} 
+                            className="h-full w-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -447,7 +447,7 @@ export default function CardSummaryView({ userRole }: CardSummaryViewProps) {
       <html lang="pt-BR">
       <head>
         <meta charset="utf-8">
-        <title>Prestação de Contas - Despesas do Cartão</title>
+        <title>Previsão Orçamentária de Viagens</title>
         <style>
           @page {
             size: A4 portrait;
@@ -574,7 +574,7 @@ export default function CardSummaryView({ userRole }: CardSummaryViewProps) {
       <body>
         <div class="header">
           <div>
-            <h1>Relatório de Prestação de Contas - Despesas do Cartão</h1>
+            <h1>PREVISÃO ORÇAMENTÁRIA DE VIAGENS</h1>
             <p>Le Frio Refrigeração & Climatização • Controle Financeiro de Viagens</p>
             <p style="margin-top: 4px; font-weight: bold; color: #0284c7;">${periodText}</p>
           </div>
@@ -976,7 +976,7 @@ export default function CardSummaryView({ userRole }: CardSummaryViewProps) {
                   Controle de Viagens &bull; Cartões Corporativos
                 </span>
                 <h1 className="text-xl md:text-2xl font-black text-gray-950 uppercase tracking-tight">
-                  Relatório de Prestação de Contas das Despesas do Cartão
+                  PREVISÃO ORÇAMENTÁRIA DE VIAGENS
                 </h1>
                 <p className="text-gray-500 font-medium text-xs mt-1 print:text-gray-700">
                   Le Frio Refrigeração &bull; Mês de Referência: <strong className="text-gray-800 uppercase print:text-black">{format(parseISO(`${month}-01`), 'MMMM yyyy', { locale: ptBR })}</strong>

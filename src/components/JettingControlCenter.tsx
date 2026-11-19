@@ -68,16 +68,36 @@ export function JettingControlCenter({ records = [], onPrintChecklist, onGenerat
   const [manualMachines, setManualMachines] = useState('');
   const [creatingLocation, setCreatingLocation] = useState(false);
 
-  // Equipamentos para mapeamento da potência das máquinas por endereço
+  // Equipamentos carregados sob demanda apenas para os endereços presentes na lista de jateamento
   const [equipments, setEquipments] = useState<Equipment[]>([]);
+  const fetchedEqAddressIdsRef = React.useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    dataService.getEquipments(undefined, true).then(eqs => {
-      setEquipments(eqs || []);
+    const neededAddressIds = Array.from(new Set(
+      items
+        .map(it => it.addressId)
+        .concat(selectedAddressId ? [selectedAddressId] : [])
+        .filter((aid): aid is string => Boolean(aid) && !fetchedEqAddressIdsRef.current.has(aid))
+    ));
+    if (neededAddressIds.length === 0) return;
+
+    neededAddressIds.forEach(aid => fetchedEqAddressIdsRef.current.add(aid));
+    Promise.all(
+      neededAddressIds.map(aid => dataService.getEquipments(aid).catch(() => [] as Equipment[]))
+    ).then(results => {
+      const fresh = results.flat().filter(Boolean);
+      if (fresh.length > 0) {
+        setEquipments(prev => {
+          const map = new Map<string, Equipment>();
+          prev.forEach(e => { if (e?.id) map.set(e.id, e); });
+          fresh.forEach(e => { if (e?.id) map.set(e.id, e); });
+          return Array.from(map.values());
+        });
+      }
     }).catch(err => {
-      console.error('Erro ao carregar equipamentos no JettingControlCenter:', err);
+      console.error('Erro ao carregar equipamentos sob demanda no JettingControlCenter:', err);
     });
-  }, []);
+  }, [items, selectedAddressId]);
 
   const equipmentsByAddress = useMemo(() => {
     const map: Record<string, Equipment[]> = {};
@@ -226,68 +246,80 @@ export function JettingControlCenter({ records = [], onPrintChecklist, onGenerat
     }
   };
 
-  // Validar se as ordens associadas às máquinas já foram atendidas e finalizadas pelos técnicos
+  // Validar se as ordens associadas às máquinas já foram atendidas e finalizadas pelos técnicos (otimizado em lote sem N+1 queries)
   const validateAndSyncItemChecklists = async (itemsList: JettingControl[]) => {
     try {
-      let anyChanged = false;
-      const updatedList = await Promise.all(
-        itemsList.map(async (item) => {
-          if (!item.id || !item.addressId || !item.checkedEquipments || Object.keys(item.checkedEquipments).length === 0) {
-            return item;
-          }
-
-          // Buscar O.S. deste endereço
-          const orders = await dataService.getServiceOrdersByAddress(item.addressId);
-          if (!orders || orders.length === 0) return item;
-
-          const machinesArray = item.equipmentsText ? item.equipmentsText.split(';').map(x => x.trim()).filter(Boolean) : [];
-          const currentChecked: Record<string, { checked: boolean; os: string }> = { ...item.checkedEquipments };
-          let itemChanged = false;
-
-          machinesArray.forEach((mach, idx) => {
-            const eqKey = `${idx}_${mach}`;
-            const cleanName = mach.includes('_') ? mach.substring(mach.indexOf('_') + 1) : mach;
-            const config = currentChecked[eqKey] || currentChecked[cleanName];
-            if (!config || !config.os || config.os.trim() === '') return;
-
-            const osNum = config.os.trim().toUpperCase();
-            const matchedOrder = orders.find(o => (o.osNumber || '').trim().toUpperCase() === osNum);
-
-            if (matchedOrder) {
-              // A máquina SÓ deve constar como atendida (checked: true) se a O.S. foi finalizada pelo técnico ou pelo administrativo!
-              const isReallyFinished = matchedOrder.techFinalized === true || matchedOrder.status === 'finalizada' || matchedOrder.status === 'pre_finalizada';
-              if (config.checked !== isReallyFinished) {
-                currentChecked[eqKey] = { ...config, checked: isReallyFinished };
-                itemChanged = true;
-              }
-            }
-          });
-
-          if (itemChanged) {
-            anyChanged = true;
-            const checkedCount = machinesArray.filter((m, i) => {
-              const k = `${i}_${m}`;
-              return (currentChecked[k] || currentChecked[m])?.checked;
-            }).length;
-
-            const allMachinesChecked = machinesArray.length > 0 && checkedCount === machinesArray.length;
-            const hasAnyOs = Object.values(currentChecked).some(v => v.os && v.os.trim() !== '');
-            const newStatus: 'Concluído' | 'Em Andamento' | 'Pendente' = allMachinesChecked ? 'Concluído' : (checkedCount > 0 || hasAnyOs) ? 'Em Andamento' : 'Pendente';
-
-            dataService.updateJettingControl(item.id, {
-              checkedEquipments: currentChecked,
-              status: newStatus
-            }).catch(console.warn);
-
-            return {
-              ...item,
-              checkedEquipments: currentChecked,
-              status: newStatus
-            };
-          }
-          return item;
-        })
+      const itemsWithChecked = itemsList.filter(item =>
+        item.id && item.addressId && item.checkedEquipments && Object.keys(item.checkedEquipments).length > 0
       );
+      if (itemsWithChecked.length === 0) return;
+
+      // OTIMIZAÇÃO FIRESTORE: Reutiliza a lista de O.S. em cache em uma única leitura compartilhada em vez de N queries por endereço
+      const allOrders = await dataService.getServiceOrders();
+      const ordersByAddress = new Map<string, typeof allOrders>();
+      allOrders.forEach(o => {
+        if (!o || !o.addressId) return;
+        const list = ordersByAddress.get(o.addressId) || [];
+        list.push(o);
+        ordersByAddress.set(o.addressId, list);
+      });
+
+      let anyChanged = false;
+      const updatedList = itemsList.map((item) => {
+        if (!item.id || !item.addressId || !item.checkedEquipments || Object.keys(item.checkedEquipments).length === 0) {
+          return item;
+        }
+
+        const orders = ordersByAddress.get(item.addressId) || [];
+        if (orders.length === 0) return item;
+
+        const machinesArray = item.equipmentsText ? item.equipmentsText.split(';').map(x => x.trim()).filter(Boolean) : [];
+        const currentChecked: Record<string, { checked: boolean; os: string }> = { ...item.checkedEquipments };
+        let itemChanged = false;
+
+        machinesArray.forEach((mach, idx) => {
+          const eqKey = `${idx}_${mach}`;
+          const cleanName = mach.includes('_') ? mach.substring(mach.indexOf('_') + 1) : mach;
+          const config = currentChecked[eqKey] || currentChecked[cleanName];
+          if (!config || !config.os || config.os.trim() === '') return;
+
+          const osNum = config.os.trim().toUpperCase();
+          const matchedOrder = orders.find(o => (o.osNumber || '').trim().toUpperCase() === osNum);
+
+          if (matchedOrder) {
+            // A máquina SÓ deve constar como atendida (checked: true) se a O.S. foi finalizada pelo técnico ou pelo administrativo!
+            const isReallyFinished = matchedOrder.techFinalized === true || matchedOrder.status === 'finalizada' || matchedOrder.status === 'pre_finalizada';
+            if (config.checked !== isReallyFinished) {
+              currentChecked[eqKey] = { ...config, checked: isReallyFinished };
+              itemChanged = true;
+            }
+          }
+        });
+
+        if (itemChanged) {
+          anyChanged = true;
+          const checkedCount = machinesArray.filter((m, i) => {
+            const k = `${i}_${m}`;
+            return (currentChecked[k] || currentChecked[m])?.checked;
+          }).length;
+
+          const allMachinesChecked = machinesArray.length > 0 && checkedCount === machinesArray.length;
+          const hasAnyOs = Object.values(currentChecked).some(v => v.os && v.os.trim() !== '');
+          const newStatus: 'Concluído' | 'Em Andamento' | 'Pendente' = allMachinesChecked ? 'Concluído' : (checkedCount > 0 || hasAnyOs) ? 'Em Andamento' : 'Pendente';
+
+          dataService.updateJettingControl(item.id, {
+            checkedEquipments: currentChecked,
+            status: newStatus
+          }).catch(console.warn);
+
+          return {
+            ...item,
+            checkedEquipments: currentChecked,
+            status: newStatus
+          };
+        }
+        return item;
+      });
 
       if (anyChanged) {
         setItems(updatedList);
@@ -850,22 +882,35 @@ export function JettingControlCenter({ records = [], onPrintChecklist, onGenerat
         if (!item.id) return;
         try {
           let rec: MaintenanceRecord | null = null;
-          
-          // 1. Tenta buscar pelo recordId
-          if (item.recordId) {
+
+          // 1. OTIMIZAÇÃO: Tenta primeiro encontrar nos registros já carregados em memória (0 leituras no Firestore)
+          if (records && records.length > 0) {
+            if (item.recordId) {
+              rec = records.find(r => r.id === item.recordId && (r.technician1 || r.technician2)) || null;
+            }
+            if (!rec && item.month) {
+              rec = records.find(r => r.addressId === item.addressId && r.month === item.month && (r.technician1 || r.technician2)) || null;
+            }
+            if (!rec) {
+              rec = records.find(r => r.addressId === item.addressId && (r.technician1 || r.technician2)) || null;
+            }
+          }
+
+          // 2. Tenta buscar pelo recordId no banco apenas se não achou em memória
+          if (!rec && item.recordId) {
             rec = await dataService.getRecordById(item.recordId);
           }
 
-          // 2. Se não achou ou não tem técnico no record, busca pelo mês
+          // 3. Se não achou ou não tem técnico no record, busca pelo mês (usando lightweight em cache)
           if (!rec || (!rec.technician1 && !rec.technician2)) {
             if (item.month) {
-              const mRecs = await dataService.getRecords(item.month);
+              const mRecs = await dataService.getRecords(item.month, { lightweight: true });
               const found = mRecs.find(r => r.addressId === item.addressId && (r.technician1 || r.technician2));
               if (found) rec = found;
             }
           }
 
-          // 3. Se ainda assim não encontrou, busca no histórico do endereço
+          // 4. Se ainda assim não encontrou, busca no histórico do endereço
           if (!rec || (!rec.technician1 && !rec.technician2)) {
             const addrRecs = await dataService.getRecordsByAddress(item.addressId);
             if (addrRecs && addrRecs.length > 0) {
@@ -875,11 +920,6 @@ export function JettingControlCenter({ records = [], onPrintChecklist, onGenerat
               ) || addrRecs.find(r => r.technician1 || r.technician2);
               if (withTech) rec = withTech;
             }
-          }
-
-          // 4. Se não achou, tenta no array records prop
-          if (!rec && records && records.length > 0) {
-            rec = records.find(r => r.addressId === item.addressId && (r.technician1 || r.technician2)) || null;
           }
 
           if (rec && (rec.technician1 || rec.technician2)) {

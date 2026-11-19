@@ -172,6 +172,22 @@ export function sortOrdersByCreationDateDesc<T extends { id?: string }>(ordersLi
 }
 
 /**
+ * Normaliza uma string de rota para comparação insensível a maiúsculas/minúsculas, acentos e pontuações.
+ */
+export function normalizeRouteKey(rawRoute?: string): string {
+  if (!rawRoute || !String(rawRoute).trim()) return 'sem rota';
+  const clean = String(rawRoute)
+    .replace(/^rota\s*:\s*/i, '')
+    .replace(/^rota\s+/i, '')
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+  return clean || 'sem rota';
+}
+
+/**
  * Normaliza e resolve o nome canônico de uma rota para agrupamento unificado.
  * Remove prefixos "ROTA:", "Rota:" e unifica chaves de rota por ID ou Nome.
  */
@@ -187,17 +203,14 @@ export function getCanonicalRouteName(rawRoute?: string, routeConfigs: any[] = [
 
   if (!cleanStr) return 'Sem Rota';
 
+  const normTarget = normalizeRouteKey(cleanStr);
+
   if (Array.isArray(routeConfigs) && routeConfigs.length > 0) {
     const matched = routeConfigs.find(c => {
       if (!c) return false;
-      if (c.id && (c.id === rawStr || c.id === cleanStr)) return true;
+      if (c.id && (c.id === rawStr || c.id === cleanStr || normalizeRouteKey(c.id) === normTarget)) return true;
       if (c.routeName) {
-        if (c.routeName === rawStr || c.routeName === cleanStr) return true;
-        const cCleaned = c.routeName
-          .replace(/^rota\s*:\s*/i, '')
-          .replace(/^rota\s+/i, '')
-          .trim();
-        if (cCleaned.toLowerCase() === cleanStr.toLowerCase()) return true;
+        if (c.routeName === rawStr || c.routeName === cleanStr || normalizeRouteKey(c.routeName) === normTarget) return true;
       }
       return false;
     });

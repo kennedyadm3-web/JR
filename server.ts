@@ -411,6 +411,144 @@ async function startServer() {
     }
   });
 
+  // Endpoint seguro e público para buscar O.S. pelo token de assinatura (utiliza Admin SDK)
+  app.get("/api/public/os-by-token", async (req, res) => {
+    try {
+      const token = String(req.query.token || '').trim();
+      if (!token) {
+        return res.status(400).json({ error: "Token não fornecido" });
+      }
+
+      let osDocData: any = null;
+      let osIdFound: string | null = null;
+
+      // 1. Extração rápida de ID se codificado no formato sign_os_OS_...
+      const tokenParts = token.split('_');
+      if (token.startsWith('sign_os_OS_') && tokenParts.length >= 5) {
+        const extractedId = `OS_${tokenParts[2]}_${tokenParts[3]}`;
+        const docSnap = await robustGetDoc("serviceOrders", extractedId);
+        if (docSnap.exists) {
+          osDocData = docSnap.data();
+          osIdFound = extractedId;
+        }
+      }
+
+      // 2. Busca por shareSignatureToken == token no Firestore Admin
+      if (!osDocData) {
+        try {
+          const snap = await dbAdmin.collection("serviceOrders").where("shareSignatureToken", "==", token).get();
+          if (!snap.empty) {
+            const d = snap.docs[0];
+            osDocData = d.data();
+            osIdFound = d.id;
+          }
+        } catch (e: any) {
+          console.warn("[Server] Admin search by token failed, trying Client SDK workaround:", e.message);
+          try {
+            const q = clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("shareSignatureToken", "==", token));
+            const snap = await clientGetDocs(q);
+            if (!snap.empty) {
+              const d = snap.docs[0];
+              osDocData = d.data();
+              osIdFound = d.id;
+            }
+          } catch {}
+        }
+      }
+
+      // 3. Fallback: se o token for o próprio ID do documento
+      if (!osDocData) {
+        const docSnap = await robustGetDoc("serviceOrders", token);
+        if (docSnap.exists) {
+          osDocData = docSnap.data();
+          osIdFound = token;
+        }
+      }
+
+      if (!osDocData || !osIdFound) {
+        return res.status(404).json({ error: "Ordem de Serviço não encontrada para este link" });
+      }
+
+      return res.json({
+        id: osIdFound,
+        ...osDocData
+      });
+    } catch (err: any) {
+      console.error("[Server] Erro no endpoint público de O.S. por token:", err);
+      return res.status(500).json({ error: err.message || "Erro interno do servidor" });
+    }
+  });
+
+  // Endpoint público para submeter a assinatura digital do fiscal/cliente pelo token
+  app.post("/api/public/os-sign-by-token", async (req, res) => {
+    try {
+      const { token, signature, signeeName, signeeRegistration } = req.body;
+      if (!token || !signature || !signeeName || !signeeRegistration) {
+        return res.status(400).json({ error: "Dados incompletos para registro da assinatura" });
+      }
+
+      let osIdFound: string | null = null;
+      let osDocData: any = null;
+
+      const tokenParts = String(token).split('_');
+      if (String(token).startsWith('sign_os_OS_') && tokenParts.length >= 5) {
+        const extractedId = `OS_${tokenParts[2]}_${tokenParts[3]}`;
+        const docSnap = await robustGetDoc("serviceOrders", extractedId);
+        if (docSnap.exists) {
+          osDocData = docSnap.data();
+          osIdFound = extractedId;
+        }
+      }
+
+      if (!osDocData) {
+        try {
+          const snap = await dbAdmin.collection("serviceOrders").where("shareSignatureToken", "==", token).get();
+          if (!snap.empty) {
+            osIdFound = snap.docs[0].id;
+            osDocData = snap.docs[0].data();
+          }
+        } catch {}
+      }
+
+      if (!osDocData && token) {
+        const docSnap = await robustGetDoc("serviceOrders", String(token));
+        if (docSnap.exists) {
+          osDocData = docSnap.data();
+          osIdFound = String(token);
+        }
+      }
+
+      if (!osIdFound || !osDocData) {
+        return res.status(404).json({ error: "Ordem de Serviço não encontrada para gravação da assinatura" });
+      }
+
+      const nowIso = new Date().toISOString();
+      const updatedStatus = (osDocData.status === 'aberta' || osDocData.status === 'em_andamento') ? 'pre_finalizada' : osDocData.status;
+
+      const updateData = {
+        clientSignature: signature,
+        clientSignatureDate: nowIso,
+        clientSigneeName: String(signeeName).trim().toUpperCase(),
+        clientSigneeRegistration: String(signeeRegistration).trim().toUpperCase(),
+        clientRepresentative: String(signeeName).trim().toUpperCase(),
+        clientRepresentativeMatricula: String(signeeRegistration).trim().toUpperCase(),
+        status: updatedStatus,
+        updatedAt: SERVER_TIMESTAMP
+      };
+
+      await robustSetDoc("serviceOrders", osIdFound, updateData);
+
+      return res.json({
+        success: true,
+        message: "Assinatura registrada com sucesso!",
+        updatedAt: nowIso
+      });
+    } catch (err: any) {
+      console.error("[Server] Erro no salvamento público de assinatura por token:", err);
+      return res.status(500).json({ error: err.message || "Erro interno ao salvar assinatura" });
+    }
+  });
+
   app.get("/api/clients_list", async (req, res) => {
     try {
       let snapshot;
@@ -1045,7 +1183,7 @@ async function startServer() {
 
   // Cache em memória no servidor para otimização extrema e resposta em <10ms
   let serverEquipmentsCache: { data: any[]; timestamp: number } | null = null;
-  const SERVER_EQUIPMENTS_TTL = 30000; // 30 segundos
+  const SERVER_EQUIPMENTS_TTL = 15 * 60 * 1000; // 15 minutos de TTL (redução drástica de leituras no Firestore)
 
   const fetchAllEquipmentsServer = async (forceFresh = false) => {
     const now = Date.now();
@@ -1057,6 +1195,20 @@ async function startServer() {
     serverEquipmentsCache = { data: items, timestamp: now };
     return items;
   };
+
+  app.get("/api/equipments/max-number", async (req, res) => {
+    try {
+      const allEquips = await fetchAllEquipmentsServer();
+      let maxNum = 0;
+      allEquips.forEach(eq => {
+        const num = parseInt(eq.id, 10);
+        if (!isNaN(num) && num > maxNum) maxNum = num;
+      });
+      res.json({ success: true, maxNumber: maxNum });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
 
   app.post("/api/equipments/cache-clear", (req, res) => {
     serverEquipmentsCache = null;
@@ -1334,6 +1486,48 @@ async function startServer() {
     }
   });
 
+  // Caches em memória no servidor para otimização extrema e redução drástica de leituras de Firestore
+  const serverItineraryCache = new Map<string, { payload: any; timestamp: number }>();
+  const SERVER_ITINERARY_TTL = 3 * 60 * 1000; // 3 minutos
+
+  let serverAddressesCache: { data: any[]; timestamp: number } | null = null;
+  let serverClientsCache: { data: any[]; timestamp: number } | null = null;
+  let serverTechsCache: { data: any[]; timestamp: number } | null = null;
+  const SERVER_STATIC_TTL = 15 * 60 * 1000; // 15 minutos
+
+  const fetchTechsServer = async () => {
+    const now = Date.now();
+    if (serverTechsCache && (now - serverTechsCache.timestamp < SERVER_STATIC_TTL)) {
+      return serverTechsCache.data;
+    }
+    const snap = await clientGetDocs(clientCollection(dbClient, "technicians"));
+    const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+    serverTechsCache = { data: items, timestamp: now };
+    return items;
+  };
+
+  const fetchAddressesServer = async () => {
+    const now = Date.now();
+    if (serverAddressesCache && (now - serverAddressesCache.timestamp < SERVER_STATIC_TTL)) {
+      return serverAddressesCache.data;
+    }
+    const snap = await clientGetDocs(clientCollection(dbClient, "addresses"));
+    const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+    serverAddressesCache = { data: items, timestamp: now };
+    return items;
+  };
+
+  const fetchClientsServer = async () => {
+    const now = Date.now();
+    if (serverClientsCache && (now - serverClientsCache.timestamp < SERVER_STATIC_TTL)) {
+      return serverClientsCache.data;
+    }
+    const snap = await clientGetDocs(clientCollection(dbClient, "clients"));
+    const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+    serverClientsCache = { data: items, timestamp: now };
+    return items;
+  };
+
   // Endpoint dedicado e resiliente para o roteiro do dia do técnico
   app.get("/api/tech-demand/itinerary", async (req, res) => {
     try {
@@ -1341,15 +1535,34 @@ async function startServer() {
       const rawTargetTech = ((req.query.tech as string) || "").trim();
       const targetMonth = (req.query.month as string) || targetDate.slice(0, 7);
 
-      const [recordsSnap, techsSnap, serviceOrdersSnap] = await Promise.all([
-        clientGetDocs(clientCollection(dbClient, "maintenanceRecords")),
-        clientGetDocs(clientCollection(dbClient, "technicians")),
-        clientGetDocs(clientCollection(dbClient, "serviceOrders"))
+      const cacheKey = `${targetDate}_${rawTargetTech}_${targetMonth}`;
+      const now = Date.now();
+      const cached = serverItineraryCache.get(cacheKey);
+      if (cached && (now - cached.timestamp < SERVER_ITINERARY_TTL)) {
+        return res.json(cached.payload);
+      }
+
+      const [recordsByDateSnap, recordsByMonthSnap, allTechs, osByDateSnap, osActiveSnap] = await Promise.all([
+        clientGetDocs(clientQuery(clientCollection(dbClient, "maintenanceRecords"), clientWhere("plannedDate", "==", targetDate))),
+        clientGetDocs(clientQuery(clientCollection(dbClient, "maintenanceRecords"), clientWhere("month", "==", targetMonth))),
+        fetchTechsServer(),
+        clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("plannedDate", "==", targetDate))),
+        clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("status", "in", ["aberta", "em_atendimento", "pendente"])))
       ]);
 
-      const allRecords = recordsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-      const allTechs = techsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-      const allOS = serviceOrdersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      const recordsMap = new Map<string, any>();
+      recordsByDateSnap.docs.forEach(doc => recordsMap.set(doc.id, { id: doc.id, ...doc.data() as any }));
+      recordsByMonthSnap.docs.forEach(doc => {
+        if (!recordsMap.has(doc.id)) recordsMap.set(doc.id, { id: doc.id, ...doc.data() as any });
+      });
+      const allRecords = Array.from(recordsMap.values());
+
+      const osMap = new Map<string, any>();
+      osByDateSnap.docs.forEach(doc => osMap.set(doc.id, { id: doc.id, ...doc.data() as any }));
+      osActiveSnap.docs.forEach(doc => {
+        if (!osMap.has(doc.id)) osMap.set(doc.id, { id: doc.id, ...doc.data() as any });
+      });
+      const allOS = Array.from(osMap.values());
 
       // Função auxiliar de correspondência resiliente de técnico (por ID, Nome, FullName, Substring e Palavras)
       const matchesTechResilient = (t1Val: string | undefined | null, t2Val: string | undefined | null): boolean => {
@@ -1451,27 +1664,41 @@ async function startServer() {
         activeAddressScheduleDocId.set(aid, scheduledList[0].id);
       }
 
-      // Determina a data efetiva: se targetDate for fornecido, respeita rigorosamente a data solicitada
+      // Determina as datas efetivas do roteiro do técnico (alinhado com o comportamento do PWA)
       let effectiveTargetDate = targetDate;
       const techRecordsAllDates = allRecords.filter(r => {
         if (!r || !r.plannedDate) return false;
         return matchesTechResilient(r.technician1, r.technician2);
       });
 
-      const hasExactDateMatch = techRecordsAllDates.some(r => (r.plannedDate || "").split("T")[0].trim() === targetDate);
-      if (!targetDate && !hasExactDateMatch && techRecordsAllDates.length > 0) {
-        // Encontra a data mais próxima se nenhuma data for informada
-        const dates = Array.from(new Set(techRecordsAllDates.map(r => (r.plannedDate || "").split("T")[0].trim()))).sort();
-        if (dates.length > 0) {
-          effectiveTargetDate = dates.find(d => d >= targetDate) || dates[dates.length - 1];
-        }
+      const allTechDatesDesc = Array.from(
+        new Set(techRecordsAllDates.map(r => (r.plannedDate || "").split("T")[0].trim()).filter(Boolean))
+      ).sort((a, b) => b.localeCompare(a));
+
+      const hasExactDateMatch = allTechDatesDesc.includes(targetDate);
+      const activeRouteDates = new Set<string>();
+      if (hasExactDateMatch) {
+        activeRouteDates.add(targetDate);
+        const lastPrevDate = allTechDatesDesc.find(d => d < targetDate);
+        if (lastPrevDate) activeRouteDates.add(lastPrevDate);
+      } else if (allTechDatesDesc.length > 0) {
+        const pastOrToday = allTechDatesDesc.filter(d => d <= targetDate);
+        const futureDates = [...allTechDatesDesc].reverse().filter(d => d > targetDate);
+        effectiveTargetDate = pastOrToday[0] || futureDates[0] || targetDate;
+        activeRouteDates.add(effectiveTargetDate);
+        // Inclui também a segunda data mais recente da mesma rota caso seja viagem de múltiplos dias
+        if (pastOrToday.length > 1) activeRouteDates.add(pastOrToday[1]);
+        if (futureDates.length > 0) activeRouteDates.add(futureDates[0]);
+      } else {
+        activeRouteDates.add(targetDate);
       }
 
       // Filtragem dos registros de preventiva:
       const filteredRecords = allRecords.filter((r: any) => {
         if (!r) return false;
         const rDate = (r.plannedDate || "").split("T")[0].trim();
-        const matchesDate = rDate === targetDate || rDate === effectiveTargetDate;
+        if (!rDate) return false;
+        const matchesDate = rDate === targetDate || rDate === effectiveTargetDate || activeRouteDates.has(rDate);
         if (!matchesDate) return false;
 
         return matchesTechResilient(r.technician1, r.technician2);
@@ -1481,7 +1708,8 @@ async function startServer() {
       const filteredOS = allOS.filter((os: any) => {
         if (!os || os.status === "cancelada") return false;
         const osDate = (os.plannedDate || (os.openedAt ? os.openedAt.substring(0, 10) : "")).split("T")[0].trim();
-        const matchesDate = osDate === targetDate || osDate === effectiveTargetDate;
+        const isOpenStatus = os.status === "aberta" || os.status === "em_atendimento" || os.status === "em_andamento" || os.status === "pendente";
+        const matchesDate = !osDate || osDate === targetDate || osDate === effectiveTargetDate || activeRouteDates.has(osDate) || isOpenStatus;
         if (!matchesDate) return false;
 
         return matchesTechResilient(os.technicianId || os.technician1, os.technician2Id || os.technician2);
@@ -1497,8 +1725,7 @@ async function startServer() {
         }
       });
 
-      const addressesSnap = await clientGetDocs(clientCollection(dbClient, "addresses"));
-      const allAddresses = addressesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      const allAddresses = await fetchAddressesServer();
       const relevantAddresses = allAddresses.filter((a: any) => addressIds.has(String(a.id).trim()));
 
       const clientIds = new Set<string>();
@@ -1506,8 +1733,7 @@ async function startServer() {
       filteredOS.forEach((os: any) => { if (os.clientId) clientIds.add(String(os.clientId).trim()); });
       filteredRecords.forEach((r: any) => { if (r.clientId) clientIds.add(String(r.clientId).trim()); });
 
-      const clientsSnap = await clientGetDocs(clientCollection(dbClient, "clients"));
-      const allClients = clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
+      const allClients = await fetchClientsServer();
       const relevantClients = allClients.filter((c: any) => clientIds.has(String(c.id).trim()));
 
       // Enriquecimento proativo dos registros com nomes reais de clientes e endereços completos
@@ -1576,7 +1802,7 @@ async function startServer() {
         console.warn("[Itinerary] Aviso ao carregar equipamentos:", e.message);
       }
 
-      res.json({
+      const responsePayload = {
         success: true,
         targetDate,
         targetTech: rawTargetTech,
@@ -1593,7 +1819,11 @@ async function startServer() {
           (r.technicianId && r.technicianId.toUpperCase().includes("ERINALDO")) ||
           JSON.stringify(r).toUpperCase().includes("ERINALDO")
         ).map((r: any) => ({ id: r.id, month: r.month, plannedDate: r.plannedDate, t1: r.technician1, t2: r.technician2, assignedRoute: r.assignedRoute, addressId: r.addressId }))
-      });
+      };
+
+      serverItineraryCache.set(cacheKey, { payload: responsePayload, timestamp: now });
+
+      res.json(responsePayload);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -2382,6 +2612,79 @@ async function startServer() {
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  // API para consulta de equipamentos otimizada no servidor
+  app.get("/api/equipments", async (req, res) => {
+    try {
+      const addressId = req.query.addressId ? String(req.query.addressId).trim() : null;
+      const includeDeactivated = req.query.includeDeactivated === 'true';
+
+      let items: any[] = [];
+      try {
+        if (addressId) {
+          const snap = await withTimeout(dbAdmin.collection("equipments").where("addressId", "==", addressId).get(), 3000);
+          items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        } else {
+          const snap = await withTimeout(dbAdmin.collection("equipments").get(), 3000);
+          items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        }
+      } catch (adminErr) {
+        let snapshot;
+        if (addressId) {
+          snapshot = await clientGetDocs(clientQuery(clientCollection(dbClient, "equipments"), clientWhere("addressId", "==", addressId)));
+        } else {
+          snapshot = await clientGetDocs(clientCollection(dbClient, "equipments"));
+        }
+        items = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }));
+      }
+
+      if (!includeDeactivated) {
+        items = items.filter((eq: any) => eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+      }
+
+      items.sort((a: any, b: any) => {
+        const labelA = parseInt(a.label, 10) || 0;
+        const labelB = parseInt(b.label, 10) || 0;
+        if (labelA !== labelB) return labelA - labelB;
+        return (a.id || '').localeCompare(b.id || '');
+      });
+
+      res.json({ success: true, equipments: items, count: items.length });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.get("/api/equipments/max-number", async (req, res) => {
+    try {
+      let maxNumber = 0;
+      try {
+        const snap = await withTimeout(dbAdmin.collection("equipments").orderBy("__name__", "desc").limit(10).get(), 3000);
+        snap.docs.forEach(doc => {
+          const num = parseInt(doc.id, 10);
+          if (!isNaN(num) && num > maxNumber) {
+            maxNumber = num;
+          }
+        });
+      } catch (adminErr) {
+        const q = clientQuery(clientCollection(dbClient, "equipments"));
+        const snapshot = await clientGetDocs(q);
+        snapshot.docs.forEach(doc => {
+          const num = parseInt(doc.id, 10);
+          if (!isNaN(num) && num > maxNumber) {
+            maxNumber = num;
+          }
+        });
+      }
+      res.json({ success: true, maxNumber: maxNumber > 0 ? maxNumber : 6927 });
+    } catch (error: any) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
+
+  app.post("/api/equipments/cache-clear", (req, res) => {
+    res.json({ success: true });
   });
 
   // SharePoint Folder Upload API
