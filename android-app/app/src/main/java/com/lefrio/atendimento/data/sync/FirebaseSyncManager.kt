@@ -2,6 +2,7 @@ package com.lefrio.atendimento.data.sync
 
 import android.content.Context
 import android.util.Log
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.lefrio.atendimento.data.FirebaseConfig
@@ -165,6 +166,10 @@ class FirebaseSyncManager(private val context: Context) {
                 val completionLongitude = payload.optDouble("completionLongitude", 0.0)
                 val completionAccuracy = payload.optDouble("completionAccuracy", 0.0)
                 val executedQuantity = payload.optInt("executedQuantity", 0)
+                val techName = payload.optString("technician1", "").trim().ifBlank { "TÉCNICO" }.uppercase()
+                val clientName = payload.optString("clientName", "").trim().ifBlank { "Cliente" }
+                val addressStreet = payload.optString("addressStreet", "").trim().ifBlank { "Endereço" }
+                val osNumber = payload.optString("osNumber", "").trim()
 
                 val checklistArr = payload.optJSONArray("checklist") ?: org.json.JSONArray()
                 val checklistItems = mutableListOf<Map<String, Any>>()
@@ -188,12 +193,15 @@ class FirebaseSyncManager(private val context: Context) {
                 val todayDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
 
                 if (isPreventive) {
-                    // FLUXO DE MANUTENÇÃO PREVENTIVA -> VAI DIRETO PARA A TELA DE APROVAÇÃO DO PWA!
-                    // O PWA lê 'maintenanceRecords' e requer:
-                    // status: 'pre_completed', routeStatus: 'pre_completed', clientSignature, clientSigneeName, clientSigneeRegistration, adminApproved: false
+                    // FLUXO DE MANUTENÇÃO PREVENTIVA -> VAI DIRETO PARA A TELA DE APROVAÇÃO DO SISTEMA ADMINISTRATIVO!
                     val originalRecordId = payload.optString("originalRecordId", "").ifBlank { orderId.removePrefix("PREV_") }
                     val addressId = payload.optString("addressId", "")
                     val currentMonth = payload.optString("month", todayDate.take(7))
+                    val targetRecId = if (addressId.isNotBlank() && currentMonth.isNotBlank()) {
+                        "${currentMonth}_${addressId}"
+                    } else {
+                        originalRecordId
+                    }
 
                     val prevUpdates = hashMapOf<String, Any>(
                         "status" to "pre_completed",
@@ -208,6 +216,8 @@ class FirebaseSyncManager(private val context: Context) {
                         "techFinalized" to true,
                         "executionDate" to todayDate,
                         "adminApproved" to false,
+                        "approvedAt" to FieldValue.delete(),
+                        "approvedBy" to FieldValue.delete(),
                         "executedQuantity" to executedQuantity,
                         "completionLatitude" to completionLatitude,
                         "completionLongitude" to completionLongitude,
@@ -219,69 +229,72 @@ class FirebaseSyncManager(private val context: Context) {
                         prevUpdates["checklist"] = checklistItems
                     }
 
-                    // 1. Tenta atualizar pelo originalRecordId direto
+                    var savedPreventive = false
+
+                    // 1. Atualiza pelo originalRecordId direto
                     if (originalRecordId.isNotBlank()) {
-                        try {
-                            firestore.collection("maintenanceRecords").document(originalRecordId)
-                                .set(prevUpdates, SetOptions.merge())
-                                .await()
-                            Log.d(TAG, "Preventiva atualizada em maintenanceRecords com docId: " + originalRecordId)
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Erro ao atualizar maintenanceRecords/" + originalRecordId + ": " + e.message)
-                        }
+                        firestore.collection("maintenanceRecords").document(originalRecordId)
+                            .set(prevUpdates, SetOptions.merge())
+                            .await()
+                        savedPreventive = true
+                        Log.d(TAG, "Preventiva enviada para aprovação em maintenanceRecords/$originalRecordId")
                     }
 
                     // 2. Se tiver addressId e month, atualiza também a chave canônica ${month}_${addressId}
-                    if (addressId.isNotBlank() && currentMonth.isNotBlank()) {
-                        val canonicalKey = currentMonth + "_" + addressId
-                        if (canonicalKey != originalRecordId) {
-                            try {
-                                firestore.collection("maintenanceRecords").document(canonicalKey)
-                                    .set(prevUpdates, SetOptions.merge())
-                                    .await()
-                                Log.d(TAG, "Preventiva atualizada em maintenanceRecords com chave canônica: " + canonicalKey)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Erro ao atualizar chave canônica " + canonicalKey + ": " + e.message)
-                            }
-                        }
+                    if (targetRecId.isNotBlank() && targetRecId != originalRecordId) {
+                        firestore.collection("maintenanceRecords").document(targetRecId)
+                            .set(prevUpdates, SetOptions.merge())
+                            .await()
+                        savedPreventive = true
+                        Log.d(TAG, "Preventiva enviada para aprovação em maintenanceRecords/$targetRecId")
                     }
-                }
 
-                // FLUXO DE ORDEM DE SERVIÇO / ESPELHO:
-                // Atualiza tanto em 'serviceOrders' (coleção padrão do PWA) quanto em 'service_orders' (compatibilidade)
-                val finalizeMap = hashMapOf<String, Any>(
-                    "status" to "finalizada",
-                    "clientRepresentative" to clientRepresentative,
-                    "clientSigneeName" to clientRepresentative,
-                    "clientSigneeDoc" to clientSigneeDoc,
-                    "clientSigneeRegistration" to clientSigneeDoc,
-                    "clientSignatureDate" to (if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso),
-                    "completionDate" to (if (completionDate.isNotBlank()) completionDate else nowIso),
-                    "finishedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
-                    "techFinalizedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
-                    "techFinalized" to true,
-                    "clientSignature" to clientSignature,
-                    "completionLatitude" to completionLatitude,
-                    "completionLongitude" to completionLongitude,
-                    "completionAccuracy" to completionAccuracy,
-                    "isLockedForTech" to true,
-                    "updatedAt" to System.currentTimeMillis()
-                )
+                    if (!savedPreventive) {
+                        return@withContext false
+                    }
 
-                try {
+                    // 3. Dispara notificação em tempo real para o painel administrativo (sino + popup + som)
+                    sendAdminNotification(
+                        type = "tech_finish",
+                        title = "Atendimento Concluído: $techName",
+                        content = "O técnico $techName finalizou o atendimento no cliente $clientName ($addressStreet). Aguardando aprovação.",
+                        recordId = targetRecId.ifBlank { originalRecordId },
+                        includeManagers = false
+                    )
+                } else {
+                    // FLUXO DE ORDEM DE SERVIÇO CORRETIVA: atualiza em 'serviceOrders'
+                    val finalizeMap = hashMapOf<String, Any>(
+                        "status" to "aberta",
+                        "clientRepresentative" to clientRepresentative,
+                        "clientSigneeName" to clientRepresentative,
+                        "clientSigneeDoc" to clientSigneeDoc,
+                        "clientSigneeRegistration" to clientSigneeDoc,
+                        "clientSignatureDate" to (if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso),
+                        "completionDate" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                        "finishedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                        "techFinalizedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                        "techFinalized" to true,
+                        "adminFinalized" to false,
+                        "clientSignature" to clientSignature,
+                        "completionLatitude" to completionLatitude,
+                        "completionLongitude" to completionLongitude,
+                        "completionAccuracy" to completionAccuracy,
+                        "isLockedForTech" to true,
+                        "updatedAt" to System.currentTimeMillis()
+                    )
+
                     firestore.collection("serviceOrders").document(orderId)
                         .set(finalizeMap, SetOptions.merge())
                         .await()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Aviso ao salvar em serviceOrders: " + e.message)
-                }
 
-                try {
-                    firestore.collection("service_orders").document(orderId)
-                        .set(finalizeMap, SetOptions.merge())
-                        .await()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Aviso ao salvar em service_orders: " + e.message)
+                    val osLabel = osNumber.ifBlank { orderId.takeLast(6).uppercase() }
+                    sendAdminNotification(
+                        type = "os_attended",
+                        title = "Atendimento de Ordem de Serviço",
+                        content = "O técnico $techName finalizou a ordem de serviço #$osLabel no cliente $clientName ($addressStreet).",
+                        recordId = orderId,
+                        includeManagers = true
+                    )
                 }
 
                 db.serviceOrderDao().markAsSynced(orderId)
@@ -305,26 +318,32 @@ class FirebaseSyncManager(private val context: Context) {
 
                 firestore.collection("routeExpenses").document(expenseId)
                     .set(expenseMap, SetOptions.merge())
+                    .await()
                 db.routeExpenseDao().markAsSynced(expenseId)
                 true
             }
 
             "CREATE_SERVICE_ORDER" -> {
                 val orderId = task.referenceId
+                val osNumber = payload.optString("osNumber", "OS-${orderId.takeLast(4)}")
+                val techName = payload.optString("technician1", "").trim().ifBlank { "TÉCNICO" }.uppercase()
+                val clientName = payload.optString("clientName", "").trim().ifBlank { "Cliente" }
+                val addressStreet = payload.optString("addressStreet", "").trim().ifBlank { "Endereço" }
+                val isTechFinalized = payload.optBoolean("techFinalized", false)
                 val osMap = hashMapOf<String, Any>(
                     "id" to orderId,
-                    "osNumber" to payload.optString("osNumber", "OS-${orderId.takeLast(4)}"),
+                    "osNumber" to osNumber,
                     "clientId" to payload.optString("clientId", ""),
-                    "clientName" to payload.optString("clientName", ""),
+                    "clientName" to clientName,
                     "addressId" to payload.optString("addressId", ""),
-                    "addressStreet" to payload.optString("addressStreet", ""),
+                    "addressStreet" to addressStreet,
                     "equipmentId" to payload.optString("equipmentId", ""),
                     "equipmentName" to payload.optString("equipmentName", ""),
-                    "status" to payload.optString("status", "aberta"),
+                    "status" to if (isTechFinalized) "aberta" else payload.optString("status", "aberta"),
                     "type" to payload.optString("type", "MANUTENÇÃO CORRETIVA CONTRATO"),
                     "plannedDate" to payload.optString("plannedDate", ""),
                     "technicianId" to payload.optString("technicianId", ""),
-                    "technician1" to payload.optString("technician1", ""),
+                    "technician1" to techName,
                     "technician2" to payload.optString("technician2", ""),
                     "description" to payload.optString("description", ""),
                     "diagnosis" to payload.optString("diagnosis", ""),
@@ -335,6 +354,10 @@ class FirebaseSyncManager(private val context: Context) {
                     "clientSigneeDoc" to payload.optString("clientSigneeDoc", ""),
                     "clientSignatureDate" to payload.optString("clientSignatureDate", ""),
                     "completionDate" to payload.optString("completionDate", ""),
+                    "finishedAt" to payload.optString("finishedAt", ""),
+                    "techFinalizedAt" to payload.optString("techFinalizedAt", ""),
+                    "techFinalized" to isTechFinalized,
+                    "adminFinalized" to false,
                     "clientSignature" to payload.optString("clientSignature", ""),
                     "generalNotes" to payload.optString("generalNotes", ""),
                     "openedAt" to payload.optString("openedAt", ""),
@@ -342,27 +365,67 @@ class FirebaseSyncManager(private val context: Context) {
                     "updatedAt" to System.currentTimeMillis()
                 )
 
-                try {
-                    firestore.collection("serviceOrders").document(orderId)
-                        .set(osMap, SetOptions.merge())
-                        .await()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Aviso ao salvar em serviceOrders: ${e.message}")
-                }
+                firestore.collection("serviceOrders").document(orderId)
+                    .set(osMap, SetOptions.merge())
+                    .await()
 
-                try {
-                    firestore.collection("service_orders").document(orderId)
-                        .set(osMap, SetOptions.merge())
-                        .await()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Aviso ao salvar em service_orders: ${e.message}")
-                }
+                sendAdminNotification(
+                    type = "os_attended",
+                    title = "Atendimento de Ordem de Serviço",
+                    content = "O técnico $techName registrou a ordem de serviço #$osNumber no cliente $clientName ($addressStreet).",
+                    recordId = orderId,
+                    includeManagers = true
+                )
 
                 db.serviceOrderDao().markAsSynced(orderId)
                 true
             }
 
             else -> false
+        }
+    }
+
+    /**
+     * Cria documentos na coleção 'notifications' para todos os usuários administrativos
+     * (admin, assistant, support e opcionalmente manager), disparando o sino, popup e som no painel web.
+     */
+    private suspend fun sendAdminNotification(
+        type: String,
+        title: String,
+        content: String,
+        recordId: String,
+        includeManagers: Boolean
+    ) {
+        try {
+            val usersSnap = firestore.collection("users").get().await()
+            val allowedRoles = if (includeManagers) {
+                setOf("admin", "support", "assistant", "manager")
+            } else {
+                setOf("admin", "support", "assistant")
+            }
+
+            for (userDoc in usersSnap.documents) {
+                val role = (userDoc.getString("role") ?: "").trim().lowercase()
+                if (role !in allowedRoles) continue
+
+                val notifData = hashMapOf<String, Any>(
+                    "userId" to userDoc.id,
+                    "title" to title,
+                    "content" to content,
+                    "type" to type,
+                    "recordId" to recordId,
+                    "callId" to recordId,
+                    "read" to false,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+                try {
+                    firestore.collection("notifications").add(notifData).await()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Aviso ao enviar notificação para ${userDoc.id}: ${e.message}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Aviso ao listar usuários administrativos para notificação: ${e.message}")
         }
     }
 }

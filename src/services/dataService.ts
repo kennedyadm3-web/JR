@@ -1492,6 +1492,47 @@ export const dataService = {
     }, 2 * 60 * 1000);
   },
 
+  subscribePreCompletedRecords(callback: (records: MaintenanceRecord[]) => void): () => void {
+    try {
+      const q = query(
+        collection(db, COLLECTIONS.RECORDS),
+        where('status', '==', MaintenanceStatus.PRE_COMPLETED)
+      );
+
+      const unsub = onSnapshot(q, (snapshot) => {
+        clearCache('records_pre_completed');
+        const rawList = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord));
+        const { deduplicated } = deduplicateRecordsList(rawList);
+
+        const validPending = deduplicated.filter(r => {
+          const rawDate = r.completionDate || r.clientSignatureDate || r.executionDate || r.plannedDate || '';
+          const d = typeof rawDate === 'string' ? rawDate.slice(0, 10) : '';
+          const isRecent = !d || d >= '2026-09-28';
+          if (!isRecent) return false;
+
+          const isApproved = Boolean(r.adminApproved || r.approvedAt || r.approvedBy);
+          if (isApproved) return false;
+
+          const hasSignature = Boolean(r.clientSignature && typeof r.clientSignature === 'string' && r.clientSignature.trim().length > 10);
+          const hasSignee = Boolean(r.clientSigneeName && typeof r.clientSigneeName === 'string' && r.clientSigneeName.trim().length >= 3);
+          const hasRegistration = Boolean(r.clientSigneeRegistration && typeof r.clientSigneeRegistration === 'string' && r.clientSigneeRegistration.trim().length >= 3);
+          if (!hasSignature || !hasSignee || !hasRegistration) return false;
+
+          return r.status === MaintenanceStatus.PRE_COMPLETED;
+        });
+
+        callback(validPending);
+      }, (err) => {
+        console.warn('[Realtime Listener] Erro em subscribePreCompletedRecords:', err);
+      });
+
+      return () => unsub();
+    } catch (e) {
+      console.warn('[Realtime Listener Setup] Falha em subscribePreCompletedRecords:', e);
+      return () => {};
+    }
+  },
+
   async getRecentApprovedRecords(limitCount: number = 30): Promise<MaintenanceRecord[]> {
     return getCachedData(`records_approved_recent_${limitCount}`, async () => {
       try {

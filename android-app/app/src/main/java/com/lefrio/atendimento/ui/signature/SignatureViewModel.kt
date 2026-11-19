@@ -94,8 +94,9 @@ class SignatureViewModel(
                 }.format(Date())
 
                 val sigBase64 = com.lefrio.atendimento.ui.signature.components.convertFileToBase64(signatureFile)
+                val checklistItems = repository.getChecklistForOrderSync(orderId)
 
-                // 3. Grava no Room e enfileira para sincronização
+                // 3. Grava no Room, enfileira e envia IMEDIATAMENTE para o Firestore (com fallback offline)
                 repository.finalizeServiceOrder(
                     orderId = orderId,
                     signeeName = signeeName.trim(),
@@ -106,7 +107,8 @@ class SignatureViewModel(
                     latitude = latitude,
                     longitude = longitude,
                     accuracy = accuracy,
-                    signatureBase64 = sigBase64
+                    signatureBase64 = sigBase64,
+                    checklistItems = checklistItems
                 )
 
                 _uiState.value = SignatureUiState.Success(orderId, nowIso)

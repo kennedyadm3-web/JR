@@ -124,9 +124,13 @@ export default function App() {
     }
   }, [activePopup]);
 
+  const hasInitializedNotifsRef = React.useRef(false);
+  const knownPreCompletedIdsRef = React.useRef<Set<string> | null>(null);
+
   // Carrega e atualiza notificações do usuário em tempo real por assinatura (otimizado!)
   useEffect(() => {
     if (!profile) return;
+    hasInitializedNotifsRef.current = false;
     
     const unsubscribe = dataService.subscribeNotifications(profile.uid, (rawList) => {
       // REGRA: Avisos de atualização do APK Android pertencem EXCLUSIVAMENTE ao aplicativo Android.
@@ -138,8 +142,11 @@ export default function App() {
       });
 
       setNotifications(prev => {
-        // Se já havia notificações antes, verifica se chegaram novas não lidas
-        if (prev.length > 0) {
+        const isFirstLoad = !hasInitializedNotifsRef.current;
+        hasInitializedNotifsRef.current = true;
+
+        // Após a carga inicial, verifica se chegaram novas notificações não lidas
+        if (!isFirstLoad) {
           const prevIds = new Set(prev.map(n => n.id));
           const newUnreads = list.filter(n => !n.read && !prevIds.has(n.id));
           
@@ -160,6 +167,71 @@ export default function App() {
           }
         }
         return list;
+      });
+    });
+
+    return () => unsubscribe();
+  }, [profile]);
+
+  // Monitor em tempo real de atendimentos recém-finalizados (pre_completed) para equipe administrativa:
+  // Garante notificação sonora, popup e item no sino imediatamente quando o técnico finaliza no App Android
+  useEffect(() => {
+    if (!profile) return;
+    const isAdminStaff =
+      profile.role === UserRole.ADMIN ||
+      profile.role === UserRole.ASSISTANT ||
+      profile.role === UserRole.SUPPORT;
+    if (!isAdminStaff) return;
+
+    knownPreCompletedIdsRef.current = null;
+
+    const unsubscribe = dataService.subscribePreCompletedRecords((livePreCompleted) => {
+      const currentIds = new Set(livePreCompleted.map(r => r.id));
+
+      if (knownPreCompletedIdsRef.current === null) {
+        knownPreCompletedIdsRef.current = currentIds;
+        return;
+      }
+
+      const newlyFinished = livePreCompleted.filter(r => !knownPreCompletedIdsRef.current!.has(r.id));
+      knownPreCompletedIdsRef.current = currentIds;
+
+      if (newlyFinished.length === 0) return;
+
+      newlyFinished.forEach((rec: any) => {
+        const techName = (rec.technician1 || 'Técnico').toString().trim().toUpperCase();
+        const clientName = (rec.clientName || rec.client?.name || 'Cliente').toString().trim();
+        const addressStr = (rec.addressStreet || rec.address?.street || 'Endereço').toString().trim();
+        const synthNotif: NotificationItem = {
+          id: `live_finish_${rec.id}`,
+          userId: profile.uid,
+          title: `Atendimento Concluído: ${techName}`,
+          content: `O técnico ${techName} finalizou o atendimento no cliente ${clientName} (${addressStr}). Aguardando aprovação.`,
+          type: 'tech_finish',
+          recordId: rec.id,
+          read: false,
+          createdAt: new Date().toISOString()
+        };
+
+        // Evita duplicar se o próprio app Android já gravou a notificação oficial em `notifications`
+        setNotifications(prev => {
+          const alreadyExists = prev.some(n => n.type === 'tech_finish' && n.recordId === rec.id);
+          if (alreadyExists) return prev;
+
+          const soundPref = profile.notificationPreferences?.notifySoundEnabled;
+          const isSoundActive = soundPref !== undefined ? soundPref : soundService.isSoundEnabled();
+          if (isSoundActive) {
+            const volumePref = profile.notificationPreferences?.notificationSoundVolume;
+            soundService.testNotificationSound(volumePref);
+          }
+
+          const wantsPopups = profile.notificationPreferences?.notifyShowPopups ?? true;
+          if (wantsPopups) {
+            setActivePopup(synthNotif);
+          }
+
+          return [synthNotif, ...prev];
+        });
       });
     });
 
@@ -258,7 +330,9 @@ export default function App() {
 
   const handleMarkAsRead = async (id: string) => {
     try {
-      await dataService.markNotificationAsRead(id);
+      if (!id.startsWith('live_finish_')) {
+        await dataService.markNotificationAsRead(id);
+      }
       setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     } catch (err) {
       console.error(err);
@@ -268,7 +342,9 @@ export default function App() {
   const handleDeleteNotification = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
-      await dataService.deleteNotification(id);
+      if (!id.startsWith('live_finish_')) {
+        await dataService.deleteNotification(id);
+      }
       setNotifications(prev => prev.filter(n => n.id !== id));
     } catch (err) {
       console.error(err);
@@ -277,7 +353,9 @@ export default function App() {
 
   const handleMarkAllAsRead = async () => {
     try {
-      const promises = notifications.filter(n => !n.read).map(n => dataService.markNotificationAsRead(n.id));
+      const promises = notifications
+        .filter(n => !n.read && !n.id.startsWith('live_finish_'))
+        .map(n => dataService.markNotificationAsRead(n.id));
       await Promise.all(promises);
       setNotifications(prev => prev.map(n => ({ ...n, read: true })));
     } catch (err) {

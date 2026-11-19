@@ -981,6 +981,33 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     };
   }, [itineraryDate, activeTab, isTabletMode, userRole]);
 
+  // Assinatura em tempo real de atendimentos aguardando aprovação (custo mínimo: lê apenas docs status == 'pre_completed')
+  // Garante que atendimentos finalizados no app Android ou PWA cheguem imediatamente à aba Aprovação!
+  useEffect(() => {
+    if (isTabletMode || userRole === UserRole.TECHNICIAN) return;
+
+    const unsubscribe = dataService.subscribePreCompletedRecords((livePreCompleted) => {
+      const liveIds = new Set(livePreCompleted.map(r => r.id));
+      const liveKeys = new Set(livePreCompleted.map(r => `${r.month}_${r.addressId}`));
+
+      setRecords(prev => {
+        // Mantém registros anteriores que não foram substituídos pelos pre_completed em tempo real,
+        // e rebaixa registros que antes estavam como pre_completed mas já saíram da fila no servidor
+        const kept = prev.filter(r => {
+          if (liveIds.has(r.id)) return false;
+          if (r.addressId && r.month && liveKeys.has(`${r.month}_${r.addressId}`) && r.status !== MaintenanceStatus.COMPLETED) return false;
+          return true;
+        });
+        const merged = [...livePreCompleted, ...kept];
+        return dataService.deduplicateRecordsList(merged).deduplicated;
+      });
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [isTabletMode, userRole]);
+
   // Sincronização automática com cooldown de 5 minutos quando o usuário volta ao app (evita recarregar tudo ao alternar janelas)
   useEffect(() => {
     const SYNC_COOLDOWN_MS = 5 * 60 * 1000;

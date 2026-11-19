@@ -864,8 +864,14 @@ class ServiceOrderRepository(private val context: Context) {
         SyncWorker.triggerImmediateSync(context)
     }
 
+    suspend fun getChecklistForOrderSync(orderId: String): List<EquipmentChecklistEntity> = withContext(Dispatchers.IO) {
+        checklistDao.getChecklistForOrder(orderId)
+    }
+
     /**
      * Finaliza o atendimento com assinatura digital do cliente e auditoria GPS.
+     * Grava localmente (offline-first) e, havendo conexão, sincroniza IMEDIATAMENTE com o Firestore
+     * para aparecer na aba Aprovação e disparar a notificação ao administrativo sem atraso.
      */
     suspend fun finalizeServiceOrder(
         orderId: String,
@@ -879,13 +885,19 @@ class ServiceOrderRepository(private val context: Context) {
         accuracy: Float,
         signatureBase64: String? = null,
         checklistItems: List<EquipmentChecklistEntity>? = null
-    ) {
+    ) = withContext(Dispatchers.IO) {
         val existingOrder = orderDao.getOrderById(orderId)
         val isPreventive = existingOrder?.type?.contains("PREVENTIVA", ignoreCase = true) == true || orderId.startsWith("PREV_")
         val originalRecordId = existingOrder?.originalId ?: orderId.removePrefix("PREV_")
         val addressId = existingOrder?.addressId ?: ""
         val plannedDate = existingOrder?.plannedDate ?: ""
         val month = if (plannedDate.length >= 7) plannedDate.substring(0, 7) else SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date())
+
+        val effectiveChecklist = if (!checklistItems.isNullOrEmpty()) {
+            checklistItems
+        } else {
+            checklistDao.getChecklistForOrder(orderId)
+        }
 
         orderDao.finalizeOrderWithSignature(
             orderId = orderId,
@@ -900,7 +912,7 @@ class ServiceOrderRepository(private val context: Context) {
         )
 
         val checklistArr = JSONArray()
-        checklistItems?.forEach { item ->
+        effectiveChecklist.forEach { item ->
             val obj = JSONObject().apply {
                 put("equipmentId", item.equipmentId)
                 put("checked", item.isChecked)
@@ -912,7 +924,7 @@ class ServiceOrderRepository(private val context: Context) {
             checklistArr.put(obj)
         }
 
-        val executedQty = checklistItems?.count { it.isChecked && !it.isSkipped } ?: 0
+        val executedQty = effectiveChecklist.count { it.isChecked && !it.isSkipped }
 
         val payload = JSONObject().apply {
             put("clientRepresentative", signeeName)
@@ -930,6 +942,11 @@ class ServiceOrderRepository(private val context: Context) {
             put("originalRecordId", originalRecordId)
             put("addressId", addressId)
             put("month", month)
+            put("technician1", existingOrder?.technician1 ?: "")
+            put("technician2", existingOrder?.technician2 ?: "")
+            put("clientName", existingOrder?.clientName ?: "")
+            put("addressStreet", existingOrder?.addressStreet ?: "")
+            put("osNumber", existingOrder?.osNumber ?: "")
             put("executedQuantity", executedQty)
             put("checklist", checklistArr)
             if (!signatureBase64.isNullOrBlank()) {
@@ -946,6 +963,14 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
+        // ENVIO IMEDIATO: Se houver conexão estável, envia na hora para o Firestore (aprovação + notificação)
+        try {
+            com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
+        } catch (e: Exception) {
+            Log.w(TAG, "Envio imediato indisponível (será reenviado automaticamente via SyncWorker): ${e.message}")
+        }
+
+        // Garantia offline-first caso o aparelho esteja sem rede no momento
         SyncWorker.triggerImmediateSync(context)
     }
 
@@ -1128,7 +1153,14 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
-        // Dispara sincronização em segundo plano
+        // ENVIO IMEDIATO: Se houver internet, grava na hora no Firestore e notifica o administrativo
+        try {
+            com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
+        } catch (e: Exception) {
+            Log.w(TAG, "Envio imediato da O.S. indisponível (será reenviado via SyncWorker): ${e.message}")
+        }
+
+        // Dispara sincronização em segundo plano como garantia offline
         SyncWorker.triggerImmediateSync(context)
 
         return entity
