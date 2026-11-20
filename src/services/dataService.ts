@@ -1795,12 +1795,22 @@ export const dataService = {
       const isRecentOrFuture = !dateStr || dateStr >= '2026-09-28';
 
       // Se o atendimento está com status PENDING (devolvido para rascunho pelo admin ou pendente pelo técnico),
-      // limpa a data/horário de finalização do banco para reabrir a planilha no PWA do técnico mantendo os checklists e assinaturas intactos.
+      // limpa a data/horário de finalização do banco para reabrir a planilha no PWA/Android do técnico mantendo os checklists e assinaturas intactos.
       if (cleanedData.status === MaintenanceStatus.PENDING) {
         cleanedData.completionDate = deleteField();
         cleanedData.adminApproved = false;
         cleanedData.approvedAt = deleteField();
         cleanedData.approvedBy = deleteField();
+
+        // Se o agendamento foi excluído (sem data prevista e sem técnico), limpa completamente os flags de finalização
+        if (!cleanedData.plannedDate && !cleanedData.technician1) {
+          cleanedData.routeStatus = MaintenanceStatus.PENDING;
+          cleanedData.techFinalized = false;
+          cleanedData.techFinalizedAt = deleteField();
+          cleanedData.finishedAt = deleteField();
+          cleanedData.clientSignatureDate = deleteField();
+          await deleteDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, `PREV_${docId}`)).catch(() => {});
+        }
       }
 
       if (isFieldFinalized && !isFormallyApproved && cleanedData.status === MaintenanceStatus.COMPLETED && isRecentOrFuture) {
@@ -1815,6 +1825,7 @@ export const dataService = {
       // Se o registro possuía anteriormente um ID gerado aleatoriamente e diferente do ID determinístico, remove o legado
       if (record.id && record.id !== docId) {
         await deleteDoc(doc(db, COLLECTIONS.RECORDS, record.id)).catch(() => {});
+        await deleteDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, `PREV_${record.id}`)).catch(() => {});
       }
 
       // REGRA MANDATÓRIA: Endereços têm estritamente UMA ÚNICA data prevista.
@@ -1859,6 +1870,7 @@ export const dataService = {
   async deleteRecord(id: string) {
     try {
       await deleteDoc(doc(db, COLLECTIONS.RECORDS, id));
+      await deleteDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, `PREV_${id}`)).catch(() => {});
       await historyService.log(id, 'MaintenanceRecord', 'Delete', { message: 'Registro de manutenção removido' });
       clearCache('records_');
     } catch (e) {

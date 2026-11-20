@@ -230,6 +230,24 @@ class FirebaseSyncManager(private val context: Context) {
                     }
 
                     var savedPreventive = false
+                    val checkDocId = originalRecordId.ifBlank { targetRecId }
+                    if (checkDocId.isNotBlank()) {
+                        try {
+                            val currentSnap = firestore.collection("maintenanceRecords").document(checkDocId).get().await()
+                            if (currentSnap.exists()) {
+                                val currentPlannedDate = (currentSnap.getString("plannedDate") ?: "").trim()
+                                val currentTech1 = (currentSnap.getString("technician1") ?: "").trim()
+                                if (currentPlannedDate.isBlank() && currentTech1.isBlank()) {
+                                    // O agendamento foi excluído pelo setor administrativo!
+                                    // Remove localmente e cancela o reenvio para não ressuscitar o agendamento excluído.
+                                    Log.w(TAG, "Agendamento $checkDocId foi excluído pelo administrativo. Removendo ordem local $orderId.")
+                                    db.equipmentChecklistDao().deleteChecklistsForOrder(orderId)
+                                    db.serviceOrderDao().deleteOrderById(orderId)
+                                    return@withContext true
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
 
                     // 1. Atualiza pelo originalRecordId direto
                     if (originalRecordId.isNotBlank()) {

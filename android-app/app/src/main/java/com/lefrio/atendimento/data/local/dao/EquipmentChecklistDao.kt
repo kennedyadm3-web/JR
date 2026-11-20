@@ -110,4 +110,7 @@ interface EquipmentChecklistDao {
         WHERE orderId IN ('PREV_CORREIOS_ANADIA', 'PREV_BB_CENTRO', 'OS_CORRETIVA_1042', 'PREV_HOSPITAL_METRO', 'OS_CORRETIVA_1055')
     """)
     suspend fun deleteFakeSeedChecklists()
+
+    @Query("DELETE FROM equipment_checklists WHERE orderId = :orderId")
+    suspend fun deleteChecklistsForOrder(orderId: String)
 }

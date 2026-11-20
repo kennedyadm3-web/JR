@@ -198,6 +198,9 @@ interface ServiceOrderDao {
            OR clientName IN ('BANCO DO BRASIL - AGÊNCIA 0058', 'TRIBUNAL DE JUSTIÇA - ANEXO II', 'CORREIOS - AGÊNCIA ANADIA', 'HOSPITAL METROPOLITANO - ALA SUL', 'SEDUC - CENTRO DE FORMAÇÃO')
     """)
     suspend fun deleteFakeSeedOrders()
+
+    @Query("DELETE FROM service_orders WHERE id = :orderId")
+    suspend fun deleteOrderById(orderId: String)
 }
 
 data class ScheduledLocationTuple(

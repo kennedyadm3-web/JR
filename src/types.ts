@@ -265,6 +265,9 @@ export interface MaintenanceRecord {
   adminApproved?: boolean;
   approvedAt?: string;
   approvedBy?: string;
+  finishedAt?: string;
+  techFinalizedAt?: string;
+  techFinalized?: boolean;
 }
 
 export interface RouteMonthlyPlanning {

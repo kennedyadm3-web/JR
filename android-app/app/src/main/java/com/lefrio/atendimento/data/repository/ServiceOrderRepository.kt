@@ -97,7 +97,13 @@ class ServiceOrderRepository(private val context: Context) {
         val normTechName = technicianName.trim().uppercase()
         val normTechId = technicianId.trim().uppercase()
 
+        // Tenta enviar pendências locais antes de reconciliar com o servidor
+        try {
+            com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
+        } catch (_: Exception) {}
+
         var fetchSuccess = false
+        var serverQuerySucceeded = false
 
         // 1. TENTATIVA DIRETA E RESILIENTE NO FIRESTORE (Fonte primária de dados do aplicativo)
         try {
@@ -106,30 +112,37 @@ class ServiceOrderRepository(private val context: Context) {
 
             // A) Busca Manutenções Preventivas (maintenanceRecords) com queries direcionadas e paralelas
             val candidateDocsMap = LinkedHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
+            val querySuccessCount = java.util.concurrent.atomic.AtomicInteger(0)
             try {
                 coroutineScope {
                     val qDate = async {
                         try {
-                            firestore.collection("maintenanceRecords")
+                            val docs = firestore.collection("maintenanceRecords")
                                 .whereEqualTo("plannedDate", targetDate)
                                 .get().await().documents
+                            querySuccessCount.incrementAndGet()
+                            docs
                         } catch (_: Exception) { emptyList() }
                     }
                     val qTech1 = async {
                         try {
                             if (normTechName.isNotBlank()) {
-                                firestore.collection("maintenanceRecords")
+                                val docs = firestore.collection("maintenanceRecords")
                                     .whereEqualTo("technician1", normTechName)
                                     .get().await().documents
+                                querySuccessCount.incrementAndGet()
+                                docs
                             } else emptyList()
                         } catch (_: Exception) { emptyList() }
                     }
                     val qTech2 = async {
                         try {
                             if (normTechName.isNotBlank()) {
-                                firestore.collection("maintenanceRecords")
+                                val docs = firestore.collection("maintenanceRecords")
                                     .whereEqualTo("technician2", normTechName)
                                     .get().await().documents
+                                querySuccessCount.incrementAndGet()
+                                docs
                             } else emptyList()
                         } catch (_: Exception) { emptyList() }
                     }
@@ -146,12 +159,18 @@ class ServiceOrderRepository(private val context: Context) {
                     val monthSnap = firestore.collection("maintenanceRecords")
                         .whereEqualTo("month", currentMonth)
                         .get().await()
+                    querySuccessCount.incrementAndGet()
                     for (d in monthSnap.documents) {
                         candidateDocsMap[d.id] = d
                     }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Falha ao buscar maintenanceRecords: ${e.message}")
+            }
+
+            if (querySuccessCount.get() > 0) {
+                serverQuerySucceeded = true
+                fetchSuccess = true
             }
 
             // Filtra os documentos do técnico que possuem data agendada (plannedDate não vazio) no mês atual ou rota recente
@@ -349,24 +368,51 @@ class ServiceOrderRepository(private val context: Context) {
                         type = "MANUTENÇÃO PREVENTIVA",
                         technician1 = technicianName,
                         technician2 = doc.getString("technician2"),
+                        clientRepresentative = doc.getString("clientSigneeName")?.takeIf { it.isNotBlank() },
+                        clientSigneeDoc = doc.getString("clientSigneeRegistration")?.takeIf { it.isNotBlank() },
+                        clientSignatureDate = doc.getString("clientSignatureDate")?.takeIf { it.isNotBlank() },
+                        completionDate = doc.getString("completionDate")?.takeIf { it.isNotBlank() },
                         generalNotes = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão",
+                        isLockedForEdit = status == "finalizada",
                         isSyncedWithServer = true
                     )
                 )
 
+                // Extrai checklist salvo no servidor para refletir máquinas já atendidas ou zeradas pelo administrativo
+                val serverChecklistByEqId = mutableMapOf<String, Map<*, *>>()
+                val serverChecklistByName = mutableMapOf<String, Map<*, *>>()
+                val rawChecklist = doc.get("checklist") as? List<*>
+                if (rawChecklist != null) {
+                    for (entry in rawChecklist) {
+                        val map = entry as? Map<*, *> ?: continue
+                        val cid = (map["equipmentId"] as? String)?.trim()
+                        val cname = (map["name"] as? String)?.trim()?.uppercase()
+                        if (!cid.isNullOrBlank()) serverChecklistByEqId[cid] = map
+                        if (!cname.isNullOrBlank()) serverChecklistByName[cname] = map
+                    }
+                }
+
                 val realEquips = equipmentsMap[addrId] ?: emptyList()
                 if (realEquips.isNotEmpty()) {
                     for (eqDoc in realEquips) {
+                        val eqName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split"
+                        val srvItem = serverChecklistByEqId[eqDoc.id] ?: serverChecklistByName[eqName.trim().uppercase()]
                         checklistToSave.add(
                             EquipmentChecklistEntity(
                                 id = "CHECK_${orderId}_${eqDoc.id}",
                                 orderId = orderId,
                                 equipmentId = eqDoc.id,
-                                equipmentName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split",
+                                equipmentName = eqName,
                                 equipmentBrand = eqDoc.getString("brand"),
                                 equipmentBtus = eqDoc.getString("btus"),
                                 equipmentSector = eqDoc.getString("sector") ?: "Geral",
-                                equipmentPatrimony = eqDoc.getString("patrimony")
+                                equipmentPatrimony = eqDoc.getString("patrimony"),
+                                isChecked = (srvItem?.get("checked") as? Boolean) ?: false,
+                                isSkipped = (srvItem?.get("skipped") as? Boolean) ?: false,
+                                notes = (srvItem?.get("notes") as? String) ?: "",
+                                justification = (srvItem?.get("justification") as? String)?.takeIf { it.isNotBlank() },
+                                checkedAt = (srvItem?.get("checkedAt") as? String)?.takeIf { it.isNotBlank() },
+                                isSynced = true
                             )
                         )
                     }
@@ -377,15 +423,23 @@ class ServiceOrderRepository(private val context: Context) {
                     val count = if (totalMachines > 0) totalMachines else 4
                     for (m in 1..count) {
                         val eqId = "EQ_${doc.id}_$m"
+                        val eqName = "Ar Condicionado Split #0$m"
+                        val srvItem = serverChecklistByEqId[eqId] ?: serverChecklistByName[eqName.trim().uppercase()]
                         checklistToSave.add(
                             EquipmentChecklistEntity(
                                 id = "CHECK_${orderId}_${eqId}",
                                 orderId = orderId,
                                 equipmentId = eqId,
-                                equipmentName = "Ar Condicionado Split #0$m",
+                                equipmentName = eqName,
                                 equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
                                 equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
-                                equipmentSector = "Ambiente Climatizado / Sala $m"
+                                equipmentSector = "Ambiente Climatizado / Sala $m",
+                                isChecked = (srvItem?.get("checked") as? Boolean) ?: false,
+                                isSkipped = (srvItem?.get("skipped") as? Boolean) ?: false,
+                                notes = (srvItem?.get("notes") as? String) ?: "",
+                                justification = (srvItem?.get("justification") as? String)?.takeIf { it.isNotBlank() },
+                                checkedAt = (srvItem?.get("checkedAt") as? String)?.takeIf { it.isNotBlank() },
+                                isSynced = true
                             )
                         )
                     }
@@ -562,7 +616,7 @@ class ServiceOrderRepository(private val context: Context) {
                                 val orderId = "PREV_${recId}"
                                 val statusRaw = rec.optString("status", "aberta")
                                 val status = when (statusRaw) {
-                                    "completed" -> "finalizada"
+                                    "completed", "pre_completed" -> "finalizada"
                                     "in_progress" -> "em_andamento"
                                     else -> "aberta"
                                 }
@@ -582,15 +636,31 @@ class ServiceOrderRepository(private val context: Context) {
                                         type = "MANUTENÇÃO PREVENTIVA",
                                         technician1 = technicianName,
                                         technician2 = rec.optString("technician2", null),
+                                        clientRepresentative = rec.optString("clientSigneeName", "").takeIf { it.isNotBlank() },
+                                        clientSigneeDoc = rec.optString("clientSigneeRegistration", "").takeIf { it.isNotBlank() },
+                                        clientSignatureDate = rec.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
+                                        completionDate = rec.optString("completionDate", "").takeIf { it.isNotBlank() },
                                         generalNotes = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão",
+                                        isLockedForEdit = status == "finalizada",
                                         isSyncedWithServer = true
                                     )
                                 )
+
+                                val apiChecklistByEqId = mutableMapOf<String, JSONObject>()
+                                val apiChecklistArr = rec.optJSONArray("checklist")
+                                if (apiChecklistArr != null) {
+                                    for (cIdx in 0 until apiChecklistArr.length()) {
+                                        val cObj = apiChecklistArr.optJSONObject(cIdx) ?: continue
+                                        val cid = cObj.optString("equipmentId", "").trim()
+                                        if (cid.isNotBlank()) apiChecklistByEqId[cid] = cObj
+                                    }
+                                }
 
                                 val addrEquips = equipsByAddr[addrId] ?: emptyList()
                                 if (addrEquips.isNotEmpty()) {
                                     for (eq in addrEquips) {
                                         val eqId = eq.optString("id", UUID.randomUUID().toString())
+                                        val srvItem = apiChecklistByEqId[eqId]
                                         checklistToSave.add(
                                             EquipmentChecklistEntity(
                                                 id = "CHECK_${orderId}_${eqId}",
@@ -600,7 +670,13 @@ class ServiceOrderRepository(private val context: Context) {
                                                 equipmentBrand = eq.optString("brand", null),
                                                 equipmentBtus = eq.optString("btus", null),
                                                 equipmentSector = eq.optString("sector", "Geral"),
-                                                equipmentPatrimony = eq.optString("patrimony", null)
+                                                equipmentPatrimony = eq.optString("patrimony", null),
+                                                isChecked = srvItem?.optBoolean("checked", false) ?: false,
+                                                isSkipped = srvItem?.optBoolean("skipped", false) ?: false,
+                                                notes = srvItem?.optString("notes", "") ?: "",
+                                                justification = srvItem?.optString("justification", "")?.takeIf { it.isNotBlank() },
+                                                checkedAt = srvItem?.optString("checkedAt", "")?.takeIf { it.isNotBlank() },
+                                                isSynced = true
                                             )
                                         )
                                     }
@@ -609,6 +685,7 @@ class ServiceOrderRepository(private val context: Context) {
                                     val count = if (totalMac > 0) totalMac else 4
                                     for (m in 1..count) {
                                         val eqId = "EQ_${recId}_$m"
+                                        val srvItem = apiChecklistByEqId[eqId]
                                         checklistToSave.add(
                                             EquipmentChecklistEntity(
                                                 id = "CHECK_${orderId}_${eqId}",
@@ -617,7 +694,13 @@ class ServiceOrderRepository(private val context: Context) {
                                                 equipmentName = "Ar Condicionado Split #0$m",
                                                 equipmentBrand = if (m % 2 == 0) "Carrier" else "Gree",
                                                 equipmentBtus = if (m % 2 == 0) "12000 BTUs" else "18000 BTUs",
-                                                equipmentSector = "Setor Operacional / Sala $m"
+                                                equipmentSector = "Setor Operacional / Sala $m",
+                                                isChecked = srvItem?.optBoolean("checked", false) ?: false,
+                                                isSkipped = srvItem?.optBoolean("skipped", false) ?: false,
+                                                notes = srvItem?.optString("notes", "") ?: "",
+                                                justification = srvItem?.optString("justification", "")?.takeIf { it.isNotBlank() },
+                                                checkedAt = srvItem?.optString("checkedAt", "")?.takeIf { it.isNotBlank() },
+                                                isSynced = true
                                             )
                                         )
                                     }
@@ -666,9 +749,8 @@ class ServiceOrderRepository(private val context: Context) {
                                 )
                             }
 
-                            if (ordersToSave.isNotEmpty()) {
-                                fetchSuccess = true
-                            }
+                            serverQuerySucceeded = true
+                            fetchSuccess = true
                         }
                     }
                 } catch (e: Exception) {
@@ -677,37 +759,86 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
-        // 3. Gravação resiliente no banco Room preservando 100% dos dados locais do técnico
-        // Lemos com antecedência TODOS os checklists locais já gravados no aparelho
+        // 3. Reconciliação inteligente com o banco Room:
+        //    - Remove agendamentos que foram excluídos ou desvinculados pelo administrativo
+        //    - Preserva 100% de trabalhos offline ainda não enviados na fila de sincronização
+        val pendingTasks = syncDao.getPendingTasks()
+        val pendingRefIds = pendingTasks.map { it.referenceId }.toSet()
+        val pendingOrderIds = mutableSetOf<String>()
+        for (t in pendingTasks) {
+            pendingOrderIds.add(t.referenceId)
+            try {
+                val p = JSONObject(t.payloadJson)
+                val oid = p.optString("orderId", "")
+                if (oid.isNotBlank()) pendingOrderIds.add(oid)
+            } catch (_: Exception) {}
+        }
+
+        if (serverQuerySucceeded) {
+            val validServerOrderIds = ordersToSave.map { it.id }.toSet()
+            val allLocalOrders = orderDao.getAllOrders()
+            for (localOrder in allLocalOrders) {
+                if (localOrder.id !in validServerOrderIds) {
+                    val isPreventive = localOrder.id.startsWith("PREV_") || localOrder.type.contains("PREVENTIVA", ignoreCase = true)
+                    val hasPendingSync = localOrder.id in pendingOrderIds || !localOrder.isSyncedWithServer
+                    if (isPreventive || !hasPendingSync) {
+                        Log.d(TAG, "Removendo agendamento excluído/desvinculado no servidor: ${localOrder.id} (${localOrder.clientName})")
+                        checklistDao.deleteChecklistsForOrder(localOrder.id)
+                        orderDao.deleteOrderById(localOrder.id)
+                    }
+                }
+            }
+        }
+
+        // Lemos os checklists locais restantes após limpeza dos agendamentos excluídos
         val allLocalChecklists = checklistDao.getAllChecklists()
         val localById = allLocalChecklists.associateBy { it.id }
         val localByOrderAndEq = allLocalChecklists.associateBy { "${it.orderId}___${it.equipmentId}" }
         val localByOrderAndName = allLocalChecklists.associateBy { "${it.orderId}___${it.equipmentName.trim().uppercase()}" }
 
-        // Primeiro: Atualiza/insere ordens de serviço preservando dados locais
+        // Primeiro: Atualiza/insere ordens de serviço respeitando ações do admin (reabertura) e preservando trabalho offline pendente
         if (ordersToSave.isNotEmpty()) {
             for (i in ordersToSave.indices) {
                 val incoming = ordersToSave[i]
                 val existing = orderDao.getOrderById(incoming.id)
                 if (existing != null) {
-                    ordersToSave[i] = incoming.copy(
-                        status = if (existing.status == "finalizada" || existing.status == "em_andamento") existing.status else incoming.status,
-                        clientRepresentative = if (!existing.clientRepresentative.isNullOrBlank()) existing.clientRepresentative else incoming.clientRepresentative,
-                        clientSigneeDoc = if (!existing.clientSigneeDoc.isNullOrBlank()) existing.clientSigneeDoc else incoming.clientSigneeDoc,
-                        clientSignatureDate = existing.clientSignatureDate ?: incoming.clientSignatureDate,
-                        clientSignaturePath = existing.clientSignaturePath ?: incoming.clientSignaturePath,
-                        completionDate = existing.completionDate ?: incoming.completionDate,
-                        completionLatitude = if (existing.completionLatitude != null && existing.completionLatitude != 0.0) existing.completionLatitude else incoming.completionLatitude,
-                        completionLongitude = if (existing.completionLongitude != null && existing.completionLongitude != 0.0) existing.completionLongitude else incoming.completionLongitude,
-                        completionAccuracy = if (existing.completionAccuracy != null && existing.completionAccuracy != 0f) existing.completionAccuracy else incoming.completionAccuracy,
-                        isSyncedWithServer = if (!existing.isSyncedWithServer) false else incoming.isSyncedWithServer
-                    )
+                    val hasLocalUnsyncedWork = !existing.isSyncedWithServer || existing.id in pendingOrderIds
+                    if (hasLocalUnsyncedWork) {
+                        ordersToSave[i] = incoming.copy(
+                            status = if (existing.status == "finalizada" || existing.status == "em_andamento") existing.status else incoming.status,
+                            clientRepresentative = if (!existing.clientRepresentative.isNullOrBlank()) existing.clientRepresentative else incoming.clientRepresentative,
+                            clientSigneeDoc = if (!existing.clientSigneeDoc.isNullOrBlank()) existing.clientSigneeDoc else incoming.clientSigneeDoc,
+                            clientSignatureDate = existing.clientSignatureDate ?: incoming.clientSignatureDate,
+                            clientSignaturePath = existing.clientSignaturePath ?: incoming.clientSignaturePath,
+                            completionDate = existing.completionDate ?: incoming.completionDate,
+                            completionLatitude = if (existing.completionLatitude != null && existing.completionLatitude != 0.0) existing.completionLatitude else incoming.completionLatitude,
+                            completionLongitude = if (existing.completionLongitude != null && existing.completionLongitude != 0.0) existing.completionLongitude else incoming.completionLongitude,
+                            completionAccuracy = if (existing.completionAccuracy != null && existing.completionAccuracy != 0f) existing.completionAccuracy else incoming.completionAccuracy,
+                            isLockedForEdit = existing.isLockedForEdit || incoming.isLockedForEdit,
+                            isSyncedWithServer = false
+                        )
+                    } else {
+                        val reopenedByAdmin = existing.status == "finalizada" && incoming.status == "aberta"
+                        ordersToSave[i] = incoming.copy(
+                            status = if (reopenedByAdmin) "aberta" else if (incoming.status == "finalizada") "finalizada" else if (existing.status == "em_andamento") "em_andamento" else incoming.status,
+                            clientRepresentative = incoming.clientRepresentative ?: if (reopenedByAdmin) null else existing.clientRepresentative,
+                            clientSigneeDoc = incoming.clientSigneeDoc ?: if (reopenedByAdmin) null else existing.clientSigneeDoc,
+                            clientSignatureDate = if (reopenedByAdmin) null else (incoming.clientSignatureDate ?: existing.clientSignatureDate),
+                            clientSignaturePath = if (reopenedByAdmin) null else (existing.clientSignaturePath ?: incoming.clientSignaturePath),
+                            completionDate = if (reopenedByAdmin) null else (incoming.completionDate ?: existing.completionDate),
+                            completionLatitude = if (reopenedByAdmin) null else (existing.completionLatitude ?: incoming.completionLatitude),
+                            completionLongitude = if (reopenedByAdmin) null else (existing.completionLongitude ?: incoming.completionLongitude),
+                            completionAccuracy = if (reopenedByAdmin) null else (existing.completionAccuracy ?: incoming.completionAccuracy),
+                            isLockedForEdit = if (reopenedByAdmin) false else (incoming.status == "finalizada"),
+                            isSyncedWithServer = true
+                        )
+                    }
                 }
             }
             orderDao.insertAll(ordersToSave)
         }
 
-        // Segundo: Processa e preserva 100% dos checklists
+        // Segundo: Processa checklists refletindo estado real do servidor e preservando marcações offline pendentes
         if (checklistToSave.isNotEmpty()) {
             val processedOrderIds = ordersToSave.map { it.id }.toSet()
             val finalChecklistMap = mutableMapOf<String, EquipmentChecklistEntity>()
@@ -718,38 +849,41 @@ class ServiceOrderRepository(private val context: Context) {
                     ?: localByOrderAndName["${incoming.orderId}___${incoming.equipmentName.trim().uppercase()}"]
 
                 if (existing != null) {
-                    // PRESERVAÇÃO TOTAL: O status preenchido pelo técnico no celular é sagrado e tem precedência
-                    val isChecked = existing.isChecked || incoming.isChecked
-                    val isSkipped = existing.isSkipped || incoming.isSkipped
-                    val notes = if (existing.notes.isNotBlank()) existing.notes else incoming.notes
-                    val justification = existing.justification ?: incoming.justification
-                    val checkedAt = existing.checkedAt ?: incoming.checkedAt
-                    val localPhotoPaths = if (existing.localPhotoPathsJson != "[]") existing.localPhotoPathsJson else incoming.localPhotoPathsJson
-                    val remotePhotoUrls = if (existing.remotePhotoUrlsJson != "[]") existing.remotePhotoUrlsJson else incoming.remotePhotoUrlsJson
-                    val isSynced = if (!existing.isSynced) false else incoming.isSynced
-
-                    val merged = incoming.copy(
-                        id = existing.id,
-                        equipmentId = existing.equipmentId,
-                        isChecked = isChecked,
-                        isSkipped = isSkipped,
-                        notes = notes,
-                        justification = justification,
-                        checkedAt = checkedAt,
-                        localPhotoPathsJson = localPhotoPaths,
-                        remotePhotoUrlsJson = remotePhotoUrls,
-                        isSynced = isSynced
-                    )
+                    val hasLocalUnsyncedChecklist = !existing.isSynced || existing.id in pendingRefIds || existing.orderId in pendingOrderIds
+                    val merged = if (hasLocalUnsyncedChecklist) {
+                        incoming.copy(
+                            id = existing.id,
+                            equipmentId = existing.equipmentId,
+                            isChecked = existing.isChecked || incoming.isChecked,
+                            isSkipped = existing.isSkipped || incoming.isSkipped,
+                            notes = if (existing.notes.isNotBlank()) existing.notes else incoming.notes,
+                            justification = existing.justification ?: incoming.justification,
+                            checkedAt = existing.checkedAt ?: incoming.checkedAt,
+                            localPhotoPathsJson = if (existing.localPhotoPathsJson != "[]") existing.localPhotoPathsJson else incoming.localPhotoPathsJson,
+                            remotePhotoUrlsJson = if (existing.remotePhotoUrlsJson != "[]") existing.remotePhotoUrlsJson else incoming.remotePhotoUrlsJson,
+                            isSynced = false
+                        )
+                    } else {
+                        incoming.copy(
+                            id = existing.id,
+                            equipmentId = existing.equipmentId,
+                            localPhotoPathsJson = if (existing.localPhotoPathsJson != "[]") existing.localPhotoPathsJson else incoming.localPhotoPathsJson,
+                            remotePhotoUrlsJson = if (existing.remotePhotoUrlsJson != "[]") existing.remotePhotoUrlsJson else incoming.remotePhotoUrlsJson,
+                            isSynced = true
+                        )
+                    }
                     finalChecklistMap[merged.id] = merged
                 } else {
                     finalChecklistMap[incoming.id] = incoming
                 }
             }
 
-            // Não perde nenhum checklist local que já existia no celular para essas ordens
+            // Mantém eventuais itens locais ainda não enviados para essas ordens
             for (localItem in allLocalChecklists) {
                 if (localItem.orderId in processedOrderIds && !finalChecklistMap.containsKey(localItem.id)) {
-                    finalChecklistMap[localItem.id] = localItem
+                    if (!localItem.isSynced || localItem.id in pendingRefIds) {
+                        finalChecklistMap[localItem.id] = localItem
+                    }
                 }
             }
 

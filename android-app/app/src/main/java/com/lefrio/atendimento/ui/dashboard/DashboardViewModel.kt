@@ -3,11 +3,15 @@ package com.lefrio.atendimento.ui.dashboard
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.firebase.firestore.ListenerRegistration
+import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
 import com.lefrio.atendimento.data.sync.SyncWorker
 import com.lefrio.atendimento.util.NetworkMonitor
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -46,6 +50,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     private var currentTechName: String = ""
     private var currentTechId: String = ""
     private val selectedTechFlow = MutableStateFlow(Pair("", ""))
+    private var tech1Listener: ListenerRegistration? = null
+    private var tech2Listener: ListenerRegistration? = null
+    private var realtimeSyncJob: Job? = null
+    private var lastListenedTechName: String = ""
 
     init {
         // Observa conectividade de rede
@@ -126,6 +134,7 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         currentTechName = techName
         currentTechId = techId
         selectedTechFlow.value = Pair(techName, techId)
+        startRealtimeItineraryListeners(techName)
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             repository.syncDailyItinerary(
@@ -135,6 +144,73 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             )
             _uiState.update { it.copy(isLoading = false) }
         }
+    }
+
+    /**
+     * Escuta alterações em tempo real no Firestore (ex: administrativo excluiu agendamento,
+     * reabriu planilha ou escalou novo endereço) e reconcilia imediatamente o banco local Room.
+     */
+    private fun startRealtimeItineraryListeners(techName: String) {
+        val normTechName = techName.trim().uppercase()
+        if (normTechName.isBlank() || normTechName == lastListenedTechName) return
+        lastListenedTechName = normTechName
+
+        tech1Listener?.remove()
+        tech2Listener?.remove()
+        tech1Listener = null
+        tech2Listener = null
+
+        viewModelScope.launch {
+            try {
+                FirebaseConfig.ensureAuthenticated()
+                val firestore = FirebaseConfig.getFirestore()
+
+                var firstSnap1 = true
+                tech1Listener = firestore.collection("maintenanceRecords")
+                    .whereEqualTo("technician1", normTechName)
+                    .addSnapshotListener { _, error ->
+                        if (error != null) return@addSnapshotListener
+                        if (firstSnap1) {
+                            firstSnap1 = false
+                            return@addSnapshotListener
+                        }
+                        scheduleRealtimeSync()
+                    }
+
+                var firstSnap2 = true
+                tech2Listener = firestore.collection("maintenanceRecords")
+                    .whereEqualTo("technician2", normTechName)
+                    .addSnapshotListener { _, error ->
+                        if (error != null) return@addSnapshotListener
+                        if (firstSnap2) {
+                            firstSnap2 = false
+                            return@addSnapshotListener
+                        }
+                        scheduleRealtimeSync()
+                    }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun scheduleRealtimeSync() {
+        realtimeSyncJob?.cancel()
+        realtimeSyncJob = viewModelScope.launch {
+            delay(600)
+            if (currentTechName.isNotBlank()) {
+                repository.syncDailyItinerary(
+                    technicianName = currentTechName,
+                    technicianId = currentTechId,
+                    targetDate = _uiState.value.selectedDate
+                )
+            }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        realtimeSyncJob?.cancel()
+        tech1Listener?.remove()
+        tech2Listener?.remove()
     }
 
     fun setFilter(filter: String) {
