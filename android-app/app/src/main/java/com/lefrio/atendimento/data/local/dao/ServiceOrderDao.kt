@@ -45,6 +45,13 @@ interface ServiceOrderDao {
         timestamp: Long = System.currentTimeMillis()
     )
 
+    @Query("UPDATE service_orders SET generalNotes = :notes, isSyncedWithServer = 0, lastModifiedAt = :timestamp WHERE id = :orderId")
+    suspend fun updateGeneralNotes(
+        orderId: String,
+        notes: String,
+        timestamp: Long = System.currentTimeMillis()
+    )
+
     @Query("""
         UPDATE service_orders SET 
             clientRepresentative = :signeeName,

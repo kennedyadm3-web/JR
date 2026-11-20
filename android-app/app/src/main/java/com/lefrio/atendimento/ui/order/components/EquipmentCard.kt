@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
+import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.ui.theme.*
 import java.io.File
 
@@ -45,6 +46,7 @@ fun EquipmentCard(
     photos: List<String>,
     onToggleAttend: () -> Unit,
     onToggleSkip: () -> Unit,
+    onToggleRemoval: () -> Unit = {},
     onTakePhotoClick: () -> Unit,
     onDeletePhotoClick: (String) -> Unit,
     onSaveNotes: (String) -> Unit,
@@ -52,6 +54,8 @@ fun EquipmentCard(
 ) {
     var isExpanded by remember { mutableStateOf(false) }
     var notesText by remember(item.notes) { mutableStateOf(item.notes) }
+    val isRemoval = item.isRemovalRequested()
+    val isSkippedOnly = item.isSkipped && !isRemoval
 
     // Itens individuais do checklist PMOC
     var checkFiltros by remember(item.isChecked) { mutableStateOf(item.isChecked) }
@@ -63,14 +67,16 @@ fun EquipmentCard(
 
     // Cores dinâmicas de borda e status conforme estado
     val borderColor = when {
+        isRemoval -> Color(0xFFFDA4AF) // rose-300
         item.isChecked -> Color(0xFF6EE7B7) // emerald-300
-        item.isSkipped -> Color(0xFFFCD34D) // amber-300
+        isSkippedOnly -> Color(0xFFFCD34D) // amber-300
         else -> Color(0xFFE2E8F0) // slate-200
     }
 
     val badgeBgColor = when {
+        isRemoval -> Color(0xFFE11D48) // rose-600
         item.isChecked -> Color(0xFF059669) // emerald-600
-        item.isSkipped -> Color(0xFFD97706) // amber-600
+        isSkippedOnly -> Color(0xFFD97706) // amber-600
         else -> Color(0xFF0284C7) // sky-600
     }
 
@@ -179,6 +185,23 @@ fun EquipmentCard(
                                 color = TextSecondary
                             )
                         }
+
+                        if (isRemoval) {
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(Color(0xFFFFE4E6))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "REMOÇÃO SOLICITADA (NÃO EXISTE NO LOCAL)",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFFBE123C)
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -227,14 +250,14 @@ fun EquipmentCard(
                             enabled = !isOrderCompleted,
                             shape = RoundedCornerShape(8.dp),
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (item.isSkipped) Color(0xFFD97706) else Color(0xFFF8FAFC),
-                                contentColor = if (item.isSkipped) Color.White else Color(0xFF64748B)
+                                containerColor = if (isSkippedOnly) Color(0xFFD97706) else Color(0xFFF8FAFC),
+                                contentColor = if (isSkippedOnly) Color.White else Color(0xFF64748B)
                             ),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             modifier = Modifier.height(30.dp)
                         ) {
                             Text(
-                                text = if (item.isSkipped) "Pulada" else "Pular",
+                                text = if (isSkippedOnly) "Pulada" else "Pular",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
@@ -457,6 +480,37 @@ fun EquipmentCard(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = BluePrimary
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    HorizontalDivider(color = Color(0xFFE2E8F0), thickness = 1.dp)
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Solicitar Remoção de Máquina (igual ao sistema PWA)
+                    TextButton(
+                        onClick = onToggleRemoval,
+                        enabled = !isOrderCompleted,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = if (isRemoval) Color(0xFFBE123C) else Color(0xFF64748B)
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isRemoval) Icons.Default.Undo else Icons.Default.DeleteOutline,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isRemoval) {
+                                "Máquina marcada para remoção (Toque para desfazer)"
+                            } else {
+                                "Solicitar remoção desta máquina (não existe no local)"
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = if (isRemoval) FontWeight.Black else FontWeight.Bold
                         )
                     }
                 }

@@ -37,3 +37,9 @@ data class EquipmentChecklistEntity(
     val isSynced: Boolean = false,
     val updatedAt: Long = System.currentTimeMillis()
 )
+
+const val REMOVAL_JUSTIFICATION_MARKER = "[SOLICITAR_REMOCAO]"
+
+fun EquipmentChecklistEntity.isRemovalRequested(): Boolean {
+    return justification == REMOVAL_JUSTIFICATION_MARKER
+}

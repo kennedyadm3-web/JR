@@ -7,10 +7,12 @@ import com.google.firebase.firestore.Source
 import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
+import com.lefrio.atendimento.data.local.entity.REMOVAL_JUSTIFICATION_MARKER
 import com.lefrio.atendimento.data.local.entity.RouteExpenseEntity
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.SyncQueueEntity
 import com.lefrio.atendimento.data.local.entity.TechNotificationEntity
+import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.data.sync.SyncWorker
 import com.lefrio.atendimento.util.NetworkMonitor
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +46,7 @@ class ServiceOrderRepository(private val context: Context) {
     private val orderDao = db.serviceOrderDao()
     private val checklistDao = db.equipmentChecklistDao()
     private val syncDao = db.syncQueueDao()
+    private val extrasPrefs = context.getSharedPreferences("lefrio_order_extras_prefs", Context.MODE_PRIVATE)
     private val TAG = "ServiceOrderRepo"
 
     private fun matchesTechResilient(techField: String?, targetTechName: String, targetTechId: String): Boolean {
@@ -372,6 +375,16 @@ class ServiceOrderRepository(private val context: Context) {
                     else -> "aberta"
                 }
 
+                val serverRouteNotes = doc.getString("routeNotes")?.trim() ?: ""
+                @Suppress("UNCHECKED_CAST")
+                val serverOtherPhotos = (doc.get("otherPhotos") as? List<*>)
+                    ?.mapNotNull { it as? String }
+                    ?.filter { it.isNotBlank() }
+                    ?: emptyList()
+                if (serverOtherPhotos.isNotEmpty() && getOtherPhotos(orderId).isEmpty()) {
+                    saveOtherPhotosLocalOnly(orderId, serverOtherPhotos.take(4))
+                }
+
                 ordersToSave.add(
                     ServiceOrderEntity(
                         id = orderId,
@@ -391,13 +404,13 @@ class ServiceOrderRepository(private val context: Context) {
                         clientSigneeDoc = doc.getString("clientSigneeRegistration")?.takeIf { it.isNotBlank() },
                         clientSignatureDate = doc.getString("clientSignatureDate")?.takeIf { it.isNotBlank() },
                         completionDate = doc.getString("completionDate")?.takeIf { it.isNotBlank() },
-                        generalNotes = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão",
+                        generalNotes = serverRouteNotes,
                         isLockedForEdit = status == "finalizada",
                         isSyncedWithServer = true
                     )
                 )
 
-                // Extrai checklist salvo no servidor para refletir máquinas já atendidas ou zeradas pelo administrativo
+                // Extrai checklist salvo no servidor para refletir máquinas já atendidas, puladas ou marcadas para remoção
                 val serverChecklistByEqId = mutableMapOf<String, Map<*, *>>()
                 val serverChecklistByName = mutableMapOf<String, Map<*, *>>()
                 val rawChecklist = doc.get("checklist") as? List<*>
@@ -416,6 +429,7 @@ class ServiceOrderRepository(private val context: Context) {
                     for (eqDoc in realEquips) {
                         val eqName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split"
                         val srvItem = serverChecklistByEqId[eqDoc.id] ?: serverChecklistByName[eqName.trim().uppercase()]
+                        val isRemoval = (srvItem?.get("requestedRemoval") as? Boolean) == true
                         checklistToSave.add(
                             EquipmentChecklistEntity(
                                 id = "CHECK_${orderId}_${eqDoc.id}",
@@ -426,10 +440,10 @@ class ServiceOrderRepository(private val context: Context) {
                                 equipmentBtus = eqDoc.getString("btus"),
                                 equipmentSector = eqDoc.getString("sector") ?: "Geral",
                                 equipmentPatrimony = eqDoc.getString("patrimony"),
-                                isChecked = (srvItem?.get("checked") as? Boolean) ?: false,
-                                isSkipped = (srvItem?.get("skipped") as? Boolean) ?: false,
+                                isChecked = if (isRemoval) false else ((srvItem?.get("checked") as? Boolean) ?: false),
+                                isSkipped = if (isRemoval) true else ((srvItem?.get("skipped") as? Boolean) ?: false),
                                 notes = (srvItem?.get("notes") as? String) ?: "",
-                                justification = (srvItem?.get("justification") as? String)?.takeIf { it.isNotBlank() },
+                                justification = if (isRemoval) REMOVAL_JUSTIFICATION_MARKER else (srvItem?.get("justification") as? String)?.takeIf { it.isNotBlank() },
                                 checkedAt = (srvItem?.get("checkedAt") as? String)?.takeIf { it.isNotBlank() },
                                 isSynced = true
                             )
@@ -640,6 +654,17 @@ class ServiceOrderRepository(private val context: Context) {
                                     else -> "aberta"
                                 }
 
+                                val apiRouteNotes = rec.optString("routeNotes", "").trim()
+                                val apiOtherPhotosArr = rec.optJSONArray("otherPhotos")
+                                if (apiOtherPhotosArr != null && apiOtherPhotosArr.length() > 0 && getOtherPhotos(orderId).isEmpty()) {
+                                    val list = mutableListOf<String>()
+                                    for (pIdx in 0 until minOf(apiOtherPhotosArr.length(), 4)) {
+                                        val p = apiOtherPhotosArr.optString(pIdx, "")
+                                        if (p.isNotBlank()) list.add(p)
+                                    }
+                                    if (list.isNotEmpty()) saveOtherPhotosLocalOnly(orderId, list)
+                                }
+
                                 ordersToSave.add(
                                     ServiceOrderEntity(
                                         id = orderId,
@@ -659,7 +684,7 @@ class ServiceOrderRepository(private val context: Context) {
                                         clientSigneeDoc = rec.optString("clientSigneeRegistration", "").takeIf { it.isNotBlank() },
                                         clientSignatureDate = rec.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
                                         completionDate = rec.optString("completionDate", "").takeIf { it.isNotBlank() },
-                                        generalNotes = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão",
+                                        generalNotes = apiRouteNotes,
                                         isLockedForEdit = status == "finalizada",
                                         isSyncedWithServer = true
                                     )
@@ -680,6 +705,7 @@ class ServiceOrderRepository(private val context: Context) {
                                     for (eq in addrEquips) {
                                         val eqId = eq.optString("id", UUID.randomUUID().toString())
                                         val srvItem = apiChecklistByEqId[eqId]
+                                        val isRemoval = srvItem?.optBoolean("requestedRemoval", false) == true
                                         checklistToSave.add(
                                             EquipmentChecklistEntity(
                                                 id = "CHECK_${orderId}_${eqId}",
@@ -690,10 +716,10 @@ class ServiceOrderRepository(private val context: Context) {
                                                 equipmentBtus = eq.optString("btus", null),
                                                 equipmentSector = eq.optString("sector", "Geral"),
                                                 equipmentPatrimony = eq.optString("patrimony", null),
-                                                isChecked = srvItem?.optBoolean("checked", false) ?: false,
-                                                isSkipped = srvItem?.optBoolean("skipped", false) ?: false,
+                                                isChecked = if (isRemoval) false else (srvItem?.optBoolean("checked", false) ?: false),
+                                                isSkipped = if (isRemoval) true else (srvItem?.optBoolean("skipped", false) ?: false),
                                                 notes = srvItem?.optString("notes", "") ?: "",
-                                                justification = srvItem?.optString("justification", "")?.takeIf { it.isNotBlank() },
+                                                justification = if (isRemoval) REMOVAL_JUSTIFICATION_MARKER else srvItem?.optString("justification", "")?.takeIf { it.isNotBlank() },
                                                 checkedAt = srvItem?.optString("checkedAt", "")?.takeIf { it.isNotBlank() },
                                                 isSynced = true
                                             )
@@ -948,6 +974,195 @@ class ServiceOrderRepository(private val context: Context) {
     }
 
     /**
+     * Lê as fotos gerais de observação ("Outros", até 4 imagens) salvas localmente para o atendimento.
+     */
+    fun getOtherPhotos(orderId: String): List<String> {
+        val raw = extrasPrefs.getString("other_photos_$orderId", null) ?: return emptyList()
+        return try {
+            val arr = JSONArray(raw)
+            val list = mutableListOf<String>()
+            for (i in 0 until arr.length()) {
+                val p = arr.optString(i, "")
+                if (p.isNotBlank()) list.add(p)
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun saveOtherPhotosLocalOnly(orderId: String, photoPaths: List<String>) {
+        val arr = JSONArray()
+        photoPaths.take(4).forEach { arr.put(it) }
+        extrasPrefs.edit().putString("other_photos_$orderId", arr.toString()).apply()
+    }
+
+    /**
+     * Salva as fotos gerais de observação ("Outros") localmente (offline-first) e enfileira envio para o Firestore.
+     */
+    suspend fun saveOtherPhotos(orderId: String, photoPaths: List<String>) = withContext(Dispatchers.IO) {
+        val limited = photoPaths.take(4)
+        saveOtherPhotosLocalOnly(orderId, limited)
+        enqueueOrderExtrasSync(orderId, null, limited)
+    }
+
+    /**
+     * Salva o Relato Técnico (observações gerais do atendimento) no banco local Room e enfileira sincronização.
+     */
+    suspend fun saveGeneralNotes(orderId: String, notes: String) = withContext(Dispatchers.IO) {
+        orderDao.updateGeneralNotes(orderId, notes)
+        enqueueOrderExtrasSync(orderId, notes, getOtherPhotos(orderId))
+    }
+
+    private suspend fun enqueueOrderExtrasSync(
+        orderId: String,
+        routeNotesOverride: String?,
+        otherPhotos: List<String>
+    ) {
+        val existingOrder = orderDao.getOrderById(orderId)
+        val effectiveNotes = routeNotesOverride ?: existingOrder?.generalNotes ?: ""
+        val payload = JSONObject().apply {
+            put("orderId", orderId)
+            put("originalRecordId", existingOrder?.originalId ?: orderId.removePrefix("PREV_"))
+            put("routeNotes", effectiveNotes)
+            put("otherPhotoPaths", JSONArray(otherPhotos.take(4)))
+        }
+        syncDao.deletePendingByTypeAndRef("ORDER_EXTRAS", orderId)
+        syncDao.enqueue(
+            SyncQueueEntity(
+                entityType = "ORDER_EXTRAS",
+                referenceId = orderId,
+                actionType = "UPDATE",
+                payloadJson = payload.toString()
+            )
+        )
+        SyncWorker.triggerImmediateSync(context)
+    }
+
+    /**
+     * Cadastra uma nova máquina encontrada em campo (100% Offline-First).
+     * Grava imediatamente no checklist local Room e enfileira criação em 'equipments' + vínculo em 'maintenanceRecords'.
+     */
+    suspend fun addEquipmentToOrder(
+        orderId: String,
+        addressId: String,
+        sector: String,
+        name: String,
+        brand: String,
+        btus: String,
+        patrimony: String
+    ): EquipmentChecklistEntity = withContext(Dispatchers.IO) {
+        val existingItems = checklistDao.getChecklistForOrder(orderId)
+        val nextNum = existingItems.size + 1
+        val resolvedLabel = nextNum.toString().padStart(2, '0')
+        val cleanName = name.trim().ifBlank { "SPLIT HI-WALL" }
+        val cleanSector = sector.trim().ifBlank { "Geral" }
+        val cleanBrand = brand.trim().ifBlank { "Não informada" }
+        val cleanBtus = btus.trim().ifBlank { "12000" }
+        val cleanPatrimony = patrimony.trim()
+
+        val equipmentId = "TECH_EQ_${System.currentTimeMillis()}_${(100..999).random()}"
+        val checklistId = "CHECK_${orderId}_${equipmentId}"
+
+        val entity = EquipmentChecklistEntity(
+            id = checklistId,
+            orderId = orderId,
+            equipmentId = equipmentId,
+            equipmentName = cleanName,
+            equipmentBrand = cleanBrand,
+            equipmentBtus = cleanBtus,
+            equipmentSector = cleanSector,
+            equipmentPatrimony = cleanPatrimony.ifBlank { null },
+            isChecked = false,
+            isSkipped = false,
+            notes = "Adicionado pelo técnico na visita",
+            justification = null,
+            checkedAt = null,
+            localPhotoPathsJson = "[]",
+            isSynced = false,
+            updatedAt = System.currentTimeMillis()
+        )
+
+        // 1. Grava imediatamente no banco local Room (funciona 100% sem internet)
+        checklistDao.insertOrUpdate(entity)
+
+        // Atualiza cache em memória de equipamentos do endereço
+        if (addressId.isNotBlank()) {
+            val existingCache = cachedEquipmentsByAddress.getOrPut(addressId) { java.util.Collections.synchronizedList(mutableListOf()) }
+            synchronized(existingCache) {
+                existingCache.add(
+                    EquipmentOption(
+                        id = equipmentId,
+                        addressId = addressId,
+                        name = cleanName,
+                        brand = cleanBrand,
+                        sector = cleanSector,
+                        btu = cleanBtus
+                    )
+                )
+            }
+        }
+
+        // 2. Enfileira na sync_queue para envio seguro ao Firestore ('equipments' + 'maintenanceRecords')
+        val existingOrder = orderDao.getOrderById(orderId)
+        val payload = JSONObject().apply {
+            put("equipmentId", equipmentId)
+            put("checklistId", checklistId)
+            put("orderId", orderId)
+            put("originalRecordId", existingOrder?.originalId ?: orderId.removePrefix("PREV_"))
+            put("addressId", addressId)
+            put("name", cleanName)
+            put("label", resolvedLabel)
+            put("patrimony", cleanPatrimony)
+            put("sector", cleanSector)
+            put("brand", cleanBrand)
+            put("btus", cleanBtus)
+            put("notes", "Adicionado pelo técnico na visita")
+        }
+
+        syncDao.enqueue(
+            SyncQueueEntity(
+                entityType = "ADD_EQUIPMENT",
+                referenceId = equipmentId,
+                actionType = "CREATE",
+                payloadJson = payload.toString()
+            )
+        )
+
+        SyncWorker.triggerImmediateSync(context)
+        entity
+    }
+
+    /**
+     * Marca ou desmarca solicitação de remoção de uma máquina que não existe no local (igual ao PWA).
+     */
+    suspend fun toggleEquipmentRemoval(item: EquipmentChecklistEntity) = withContext(Dispatchers.IO) {
+        val currentlyRemoval = item.isRemovalRequested()
+        val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(Date())
+
+        val currentPhotos = try {
+            val arr = JSONArray(item.localPhotoPathsJson)
+            List(arr.length()) { idx -> arr.optString(idx, "") }.filter { it.isNotBlank() }
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+        saveEquipmentChecklist(
+            checklistId = item.id,
+            orderId = item.orderId,
+            equipmentId = item.equipmentId,
+            isChecked = false,
+            isSkipped = !currentlyRemoval,
+            notes = item.notes,
+            justification = if (!currentlyRemoval) REMOVAL_JUSTIFICATION_MARKER else null,
+            checkedAt = if (!currentlyRemoval) nowIso else null,
+            localPhotoPaths = currentPhotos
+        )
+    }
+
+    /**
      * Grava a inspeção de um equipamento no checklist com garantia local imediata.
      */
     suspend fun saveEquipmentChecklist(
@@ -1000,14 +1215,17 @@ class ServiceOrderRepository(private val context: Context) {
             orderDao.updateStatus(orderId, "em_andamento")
         }
 
+        val isRemovalReq = justification == REMOVAL_JUSTIFICATION_MARKER
         val payload = JSONObject().apply {
             put("orderId", orderId)
             put("equipmentId", equipmentId)
-            put("isChecked", isChecked)
-            put("isSkipped", isSkipped)
+            put("isChecked", if (isRemovalReq) false else isChecked)
+            put("isSkipped", if (isRemovalReq) false else isSkipped)
+            put("requestedRemoval", isRemovalReq)
             put("notes", notes)
-            put("justification", justification ?: "")
+            put("justification", if (isRemovalReq) "" else (justification ?: ""))
             put("checkedAt", checkedAt ?: "")
+            put("localPhotoPaths", JSONArray(localPhotoPaths.take(3)))
         }
 
         val targetRefId = existing?.id ?: checklistId
@@ -1044,7 +1262,9 @@ class ServiceOrderRepository(private val context: Context) {
         longitude: Double,
         accuracy: Float,
         signatureBase64: String? = null,
-        checklistItems: List<EquipmentChecklistEntity>? = null
+        checklistItems: List<EquipmentChecklistEntity>? = null,
+        routeNotes: String? = null,
+        otherPhotoPaths: List<String>? = null
     ): Boolean = withContext(Dispatchers.IO) {
         val existingOrder = orderDao.getOrderById(orderId)
         val isPreventive = existingOrder?.type?.contains("PREVENTIVA", ignoreCase = true) == true || orderId.startsWith("PREV_")
@@ -1053,6 +1273,13 @@ class ServiceOrderRepository(private val context: Context) {
         val plannedDate = existingOrder?.plannedDate ?: ""
         val month = if (plannedDate.length >= 7) plannedDate.substring(0, 7) else SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date())
 
+        val legacyDefaultNote = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão"
+        val effectiveRouteNotes = (routeNotes ?: existingOrder?.generalNotes ?: "")
+            .let { if (it.trim() == legacyDefaultNote) "" else it.trim() }
+
+        val effectiveOtherPhotos = (otherPhotoPaths ?: getOtherPhotos(orderId)).take(4)
+        saveOtherPhotosLocalOnly(orderId, effectiveOtherPhotos)
+
         val effectiveChecklist = if (!checklistItems.isNullOrEmpty()) {
             checklistItems
         } else {
@@ -1060,6 +1287,7 @@ class ServiceOrderRepository(private val context: Context) {
         }
 
         // 1. PERSISTÊNCIA LOCAL IMEDIATA E ATÔMICA NO SQLITE (ROOM) — NUNCA DEPENDE DE INTERNET!
+        orderDao.updateGeneralNotes(orderId, effectiveRouteNotes)
         orderDao.finalizeOrderWithSignature(
             orderId = orderId,
             signeeName = signeeName,
@@ -1074,18 +1302,26 @@ class ServiceOrderRepository(private val context: Context) {
 
         val checklistArr = JSONArray()
         effectiveChecklist.forEach { item ->
+            val isRemovalReq = item.isRemovalRequested()
+            val itemPhotosArr = try {
+                JSONArray(item.localPhotoPathsJson)
+            } catch (_: Exception) {
+                JSONArray()
+            }
             val obj = JSONObject().apply {
                 put("equipmentId", item.equipmentId)
-                put("checked", item.isChecked)
-                put("skipped", item.isSkipped)
-                put("justification", item.justification ?: "")
+                put("checked", if (isRemovalReq) false else item.isChecked)
+                put("skipped", if (isRemovalReq) false else item.isSkipped)
+                put("requestedRemoval", isRemovalReq)
+                put("justification", if (isRemovalReq) "" else (item.justification ?: ""))
                 put("notes", item.notes ?: "")
                 put("checkedAt", item.checkedAt ?: completionDate)
+                put("localPhotoPaths", itemPhotosArr)
             }
             checklistArr.put(obj)
         }
 
-        val executedQty = effectiveChecklist.count { it.isChecked && !it.isSkipped }
+        val executedQty = effectiveChecklist.count { it.isChecked && !it.isSkipped && !it.isRemovalRequested() }
 
         val payload = JSONObject().apply {
             put("clientRepresentative", signeeName)
@@ -1110,6 +1346,8 @@ class ServiceOrderRepository(private val context: Context) {
             put("addressStreet", existingOrder?.addressStreet ?: "")
             put("osNumber", existingOrder?.osNumber ?: "")
             put("executedQuantity", executedQty)
+            put("routeNotes", effectiveRouteNotes)
+            put("otherPhotoPaths", JSONArray(effectiveOtherPhotos))
             put("checklist", checklistArr)
             if (!signatureBase64.isNullOrBlank()) {
                 put("clientSignature", signatureBase64)

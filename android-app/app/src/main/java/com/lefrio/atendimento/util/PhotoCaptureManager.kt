@@ -109,4 +109,61 @@ class PhotoCaptureManager(private val context: Context) {
             null
         }
     }
+
+    /**
+     * Converte uma foto local para Data URL JPEG compacta (compatível com PWA e abaixo do limite de 1MB do Firestore).
+     */
+    fun encodeFileToDataUrl(
+        photoFile: File,
+        maxDimension: Int = 800,
+        quality: Int = 60
+    ): String? {
+        return try {
+            if (!photoFile.exists() || photoFile.length() <= 0L) return null
+
+            val boundsOptions = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeFile(photoFile.absolutePath, boundsOptions)
+
+            val origW = boundsOptions.outWidth
+            val origH = boundsOptions.outHeight
+            if (origW <= 0 || origH <= 0) return null
+
+            var inSampleSize = 1
+            while ((origW / inSampleSize) > maxDimension * 2 || (origH / inSampleSize) > maxDimension * 2) {
+                inSampleSize *= 2
+            }
+
+            val decodeOptions = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+            }
+            val decoded = BitmapFactory.decodeFile(photoFile.absolutePath, decodeOptions) ?: return null
+
+            val scale = minOf(
+                1f,
+                maxDimension.toFloat() / decoded.width.toFloat(),
+                maxDimension.toFloat() / decoded.height.toFloat()
+            )
+            val scaledBitmap = if (scale < 1f) {
+                val targetW = (decoded.width * scale).toInt().coerceAtLeast(1)
+                val targetH = (decoded.height * scale).toInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(decoded, targetW, targetH, true).also {
+                    if (it !== decoded) decoded.recycle()
+                }
+            } else {
+                decoded
+            }
+
+            val baos = java.io.ByteArrayOutputStream()
+            scaledBitmap.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+            scaledBitmap.recycle()
+
+            val bytes = baos.toByteArray()
+            val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+            "data:image/jpeg;base64,$base64"
+        } catch (t: Throwable) {
+            null
+        }
+    }
 }

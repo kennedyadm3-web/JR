@@ -1,8 +1,8 @@
 {
-  "versionCode": 20,
-  "versionName": "1.3.6",
+  "versionCode": 21,
+  "versionName": "1.3.7",
   "downloadUrl": "https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk",
-  "releaseNotes": "Versão 1.3.6 Oficial: Blindagem Offline-First completa — atendimento, fotos, assinatura e finalização 100% funcionais sem internet ou com sinal instável, fila durável com retentativa automática garantida, proteção anti-perda de dados locais e status claro de envio em cada endereço.",
+  "releaseNotes": "Versão 1.3.7 Oficial: Adição e solicitação de remoção de máquinas em campo, campo Relato Técnico sincronizado com o administrativo e folha do PMOC, e seção de Fotos de Observações/Outros (até 4 imagens), tudo 100% offline-first.",
   "isMandatory": false,
-  "updatedAt": "2026-11-20T01:00:00.000Z"
+  "updatedAt": "2026-11-20T01:45:00.000Z"
 }

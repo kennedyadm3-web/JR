@@ -6,10 +6,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
+import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
 import com.lefrio.atendimento.ui.signature.components.SignaturePath
 import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
 import com.lefrio.atendimento.util.GpsAuditManager
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -24,11 +27,15 @@ data class OrderDetailUiState(
     val progressPercentage: Float = 0f,
     val fiscalName: String = "",
     val fiscalDoc: String = "",
+    val routeNotes: String = "",
+    val otherPhotos: List<String> = emptyList(),
+    val isSavingEquipment: Boolean = false,
     val hasSignature: Boolean = false,
     val isFinalizing: Boolean = false,
     val finalizeSuccess: Boolean = false,
     val finalizeSyncedImmediately: Boolean = false,
     val isLoading: Boolean = true,
+    val infoMessage: String? = null,
     val errorMessage: String? = null
 )
 
@@ -41,19 +48,38 @@ class OrderDetailViewModel(
 
     private val _uiState = MutableStateFlow(OrderDetailUiState())
     val uiState: StateFlow<OrderDetailUiState> = _uiState.asStateFlow()
+    private var routeNotesSaveJob: Job? = null
+    private var routeNotesInitialized = false
+
+    companion object {
+        private const val LEGACY_PMOC_DEFAULT_NOTE = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão"
+    }
 
     init {
         loadOrderDetails()
     }
 
     private fun loadOrderDetails() {
+        val initialOtherPhotos = repository.getOtherPhotos(orderId)
+        _uiState.update { it.copy(otherPhotos = initialOtherPhotos) }
+
         viewModelScope.launch {
             repository.getOrderById(orderId).collect { orderEntity ->
+                val rawNote = orderEntity?.generalNotes?.trim() ?: ""
+                val cleanNote = if (rawNote == LEGACY_PMOC_DEFAULT_NOTE) "" else rawNote
+
                 _uiState.update { state ->
+                    val resolvedRouteNotes = if (!routeNotesInitialized) {
+                        if (orderEntity != null) routeNotesInitialized = true
+                        cleanNote
+                    } else {
+                        state.routeNotes
+                    }
                     state.copy(
                         order = orderEntity,
                         fiscalName = state.fiscalName.ifBlank { orderEntity?.clientRepresentative ?: "" },
                         fiscalDoc = state.fiscalDoc.ifBlank { orderEntity?.clientSigneeDoc ?: "" },
+                        routeNotes = resolvedRouteNotes,
                         hasSignature = state.hasSignature || (orderEntity?.clientSignaturePath != null),
                         isLoading = false
                     )
@@ -97,8 +123,104 @@ class OrderDetailViewModel(
         _uiState.update { it.copy(hasSignature = hasSig) }
     }
 
+    fun updateRouteNotes(notes: String) {
+        routeNotesInitialized = true
+        _uiState.update { it.copy(routeNotes = notes) }
+        routeNotesSaveJob?.cancel()
+        routeNotesSaveJob = viewModelScope.launch {
+            delay(500)
+            repository.saveGeneralNotes(orderId, notes)
+        }
+    }
+
+    fun attachOtherPhoto(photoPath: String) {
+        val current = _uiState.value.otherPhotos
+        if (current.size >= 4) {
+            _uiState.update { it.copy(errorMessage = "Você pode adicionar no máximo 4 fotos de observação.") }
+            return
+        }
+        val updated = (current + photoPath).take(4)
+        _uiState.update { it.copy(otherPhotos = updated, infoMessage = "Foto de observação salva no aparelho!") }
+        viewModelScope.launch {
+            repository.saveOtherPhotos(orderId, updated)
+        }
+    }
+
+    fun removeOtherPhoto(photoPath: String) {
+        val updated = _uiState.value.otherPhotos.filterNot { it == photoPath }
+        _uiState.update { it.copy(otherPhotos = updated) }
+        viewModelScope.launch {
+            repository.saveOtherPhotos(orderId, updated)
+        }
+    }
+
+    fun addNewEquipment(
+        sector: String,
+        typeName: String,
+        brand: String,
+        btus: String,
+        patrimony: String,
+        onAdded: () -> Unit = {}
+    ) {
+        val cleanSector = sector.trim()
+        if (cleanSector.isBlank()) {
+            _uiState.update { it.copy(errorMessage = "Informe o Nome Completo do Setor da máquina.") }
+            return
+        }
+        val currentOrder = _uiState.value.order
+        if (currentOrder == null) {
+            _uiState.update { it.copy(errorMessage = "Atendimento ainda carregando. Tente novamente.") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isSavingEquipment = true) }
+            try {
+                repository.addEquipmentToOrder(
+                    orderId = orderId,
+                    addressId = currentOrder.addressId,
+                    sector = cleanSector,
+                    name = typeName.trim().ifBlank { "SPLIT HI-WALL" },
+                    brand = brand.trim().ifBlank { "Não informada" },
+                    btus = btus.trim().ifBlank { "12000" },
+                    patrimony = patrimony.trim()
+                )
+                _uiState.update {
+                    it.copy(
+                        isSavingEquipment = false,
+                        infoMessage = "Nova máquina salva! O administrativo homologará junto com a folha."
+                    )
+                }
+                onAdded()
+            } catch (t: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        isSavingEquipment = false,
+                        errorMessage = "Erro ao adicionar máquina: ${t.message}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun toggleRemoveEquipment(item: EquipmentChecklistEntity) {
+        viewModelScope.launch {
+            repository.toggleEquipmentRemoval(item)
+            val msg = if (item.isRemovalRequested()) {
+                "Solicitação de remoção desfeita."
+            } else {
+                "Remoção solicitada para esta máquina (será confirmada pelo administrativo)."
+            }
+            _uiState.update { it.copy(infoMessage = msg) }
+        }
+    }
+
     fun clearErrorMessage() {
         _uiState.update { it.copy(errorMessage = null) }
+    }
+
+    fun clearInfoMessage() {
+        _uiState.update { it.copy(infoMessage = null) }
     }
 
     /**
@@ -159,6 +281,7 @@ class OrderDetailViewModel(
                 } else null
 
                 // 3. Grava finalização no banco local Room e enfileira para sincronização
+                routeNotesSaveJob?.cancel()
                 val syncedNow = repository.finalizeServiceOrder(
                     orderId = orderId,
                     signeeName = name,
@@ -170,7 +293,9 @@ class OrderDetailViewModel(
                     longitude = longitude,
                     accuracy = accuracy,
                     signatureBase64 = sigBase64,
-                    checklistItems = currentState.checklistItems
+                    checklistItems = currentState.checklistItems,
+                    routeNotes = currentState.routeNotes,
+                    otherPhotoPaths = currentState.otherPhotos
                 )
 
                 _uiState.update {
@@ -228,7 +353,8 @@ class OrderDetailViewModel(
      * Alterna o status de 'Pular' da máquina.
      */
     fun toggleSkipEquipment(item: EquipmentChecklistEntity, justification: String? = "Pular máquina") {
-        val newSkipped = !item.isSkipped
+        val currentlySkippedOnly = item.isSkipped && !item.isRemovalRequested()
+        val newSkipped = !currentlySkippedOnly
         val currentPhotos = parsePhotoPaths(item.localPhotoPathsJson)
         val nowStr = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date())
 

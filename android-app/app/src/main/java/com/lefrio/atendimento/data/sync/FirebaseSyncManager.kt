@@ -8,7 +8,9 @@ import com.google.firebase.firestore.Source
 import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.SyncQueueEntity
+import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.util.NetworkMonitor
+import com.lefrio.atendimento.util.PhotoCaptureManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -16,6 +18,7 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -147,15 +150,139 @@ class FirebaseSyncManager(private val context: Context) {
                 true
             }
 
+            "ADD_EQUIPMENT" -> {
+                val eqId = payload.optString("equipmentId", task.referenceId)
+                val checklistId = payload.optString("checklistId", "")
+                val orderId = payload.optString("orderId", "")
+                val originalRecordId = payload.optString("originalRecordId", orderId.removePrefix("PREV_"))
+                val addressId = payload.optString("addressId", "")
+                val eqName = payload.optString("name", "SPLIT HI-WALL")
+                val label = payload.optString("label", "01")
+                val patrimony = payload.optString("patrimony", "")
+                val sector = payload.optString("sector", "Geral")
+                val brand = payload.optString("brand", "Não informada")
+                val btus = payload.optString("btus", "12000")
+                val notes = payload.optString("notes", "Adicionado pelo técnico na visita")
+
+                val eqMap = hashMapOf<String, Any>(
+                    "addressId" to addressId,
+                    "name" to eqName,
+                    "label" to label,
+                    "patrimony" to patrimony,
+                    "sector" to sector,
+                    "brand" to brand,
+                    "btus" to btus,
+                    "addedByTech" to true,
+                    "isPendingApproval" to true,
+                    "status" to "active",
+                    "active" to true,
+                    "createdAt" to System.currentTimeMillis(),
+                    "updatedAt" to System.currentTimeMillis()
+                )
+
+                withTimeout(15_000L) {
+                    firestore.collection("equipments").document(eqId)
+                        .set(eqMap, SetOptions.merge())
+                        .await()
+                }
+
+                // Vincula no checklist do atendimento preventivo no servidor
+                if (orderId.startsWith("PREV_") && originalRecordId.isNotBlank()) {
+                    val recRef = firestore.collection("maintenanceRecords").document(originalRecordId)
+                    val recSnap = withTimeout(12_000L) { recRef.get(Source.SERVER).await() }
+                    if (recSnap.exists()) {
+                        val pDate = (recSnap.getString("plannedDate") ?: "").trim()
+                        val t1 = (recSnap.getString("technician1") ?: "").trim()
+                        if (pDate.isNotBlank() || t1.isNotBlank()) {
+                            @Suppress("UNCHECKED_CAST")
+                            val currentListRaw = recSnap.get("checklist") as? List<Map<String, Any>> ?: emptyList()
+                            val updatedList = currentListRaw.map { it.toMutableMap() }.toMutableList()
+                            if (updatedList.none { (it["equipmentId"] as? String) == eqId }) {
+                                updatedList.add(
+                                    hashMapOf(
+                                        "equipmentId" to eqId,
+                                        "checked" to false,
+                                        "skipped" to false,
+                                        "requestedRemoval" to false,
+                                        "notes" to notes,
+                                        "photos" to emptyList<String>()
+                                    )
+                                )
+                                withTimeout(12_000L) {
+                                    recRef.set(
+                                        hashMapOf(
+                                            "checklist" to updatedList,
+                                            "updatedAt" to System.currentTimeMillis()
+                                        ),
+                                        SetOptions.merge()
+                                    ).await()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (checklistId.isNotBlank()) {
+                    db.equipmentChecklistDao().markAsSynced(checklistId)
+                }
+                true
+            }
+
+            "ORDER_EXTRAS" -> {
+                val orderId = payload.optString("orderId", task.referenceId)
+                val originalRecordId = payload.optString("originalRecordId", orderId.removePrefix("PREV_"))
+                val routeNotes = payload.optString("routeNotes", "")
+                val otherPaths = parseJsonStringArray(payload.optJSONArray("otherPhotoPaths"))
+                val encodedOtherPhotos = encodePhotosToDataUrls(otherPaths, maxCount = 4, maxDimension = 720, quality = 55)
+
+                if (orderId.startsWith("PREV_") && originalRecordId.isNotBlank()) {
+                    val recRef = firestore.collection("maintenanceRecords").document(originalRecordId)
+                    val recSnap = withTimeout(12_000L) { recRef.get(Source.SERVER).await() }
+                    if (recSnap.exists()) {
+                        val pDate = (recSnap.getString("plannedDate") ?: "").trim()
+                        val t1 = (recSnap.getString("technician1") ?: "").trim()
+                        if (pDate.isBlank() && t1.isBlank()) {
+                            return@withContext true
+                        }
+                        val updates = hashMapOf<String, Any>(
+                            "routeNotes" to routeNotes,
+                            "otherPhotos" to encodedOtherPhotos,
+                            "updatedAt" to System.currentTimeMillis()
+                        )
+                        withTimeout(15_000L) {
+                            recRef.set(updates, SetOptions.merge()).await()
+                        }
+                    }
+                } else {
+                    withTimeout(15_000L) {
+                        firestore.collection("serviceOrders").document(orderId)
+                            .set(
+                                hashMapOf<String, Any>(
+                                    "generalNotes" to routeNotes,
+                                    "routeNotes" to routeNotes,
+                                    "otherPhotos" to encodedOtherPhotos,
+                                    "updatedAt" to System.currentTimeMillis()
+                                ),
+                                SetOptions.merge()
+                            )
+                            .await()
+                    }
+                }
+                true
+            }
+
             "CHECKLIST_ITEM" -> {
                 val orderId = payload.getString("orderId")
                 val checklistId = task.referenceId
                 val eqId = payload.getString("equipmentId")
-                val isChecked = payload.getBoolean("isChecked")
-                val isSkipped = payload.getBoolean("isSkipped")
+                val isRemovalRequested = payload.optBoolean("requestedRemoval", false)
+                val isChecked = if (isRemovalRequested) false else payload.getBoolean("isChecked")
+                val isSkipped = if (isRemovalRequested) false else payload.getBoolean("isSkipped")
                 val notes = payload.optString("notes", "")
-                val justification = payload.optString("justification", "")
+                val justification = if (isRemovalRequested) "" else payload.optString("justification", "")
                 val checkedAt = payload.optString("checkedAt", "")
+                val rawPhotoPaths = parseJsonStringArray(payload.optJSONArray("localPhotoPaths"))
+                val encodedPhotos = encodePhotosToDataUrls(rawPhotoPaths, maxCount = 3, maxDimension = 720, quality = 55)
 
                 val itemMap = hashMapOf<String, Any>(
                     "id" to checklistId,
@@ -164,11 +291,17 @@ class FirebaseSyncManager(private val context: Context) {
                     "isChecked" to isChecked,
                     "skipped" to isSkipped,
                     "isSkipped" to isSkipped,
+                    "requestedRemoval" to isRemovalRequested,
                     "notes" to notes,
                     "justification" to justification,
                     "checkedAt" to checkedAt,
+                    "photos" to encodedPhotos,
                     "updatedAt" to System.currentTimeMillis()
                 )
+                if (isRemovalRequested) {
+                    itemMap["removalReason"] = "Máquina não existe no local (solicitado pelo técnico)"
+                    itemMap["requestedRemovalAt"] = checkedAt
+                }
 
                 // 1. Se for Manutenção Preventiva (PREV_xxx), exige confirmação real do servidor em maintenanceRecords
                 if (orderId.startsWith("PREV_")) {
@@ -195,17 +328,25 @@ class FirebaseSyncManager(private val context: Context) {
                             "equipmentId" to eqId,
                             "checked" to isChecked,
                             "skipped" to isSkipped,
+                            "requestedRemoval" to isRemovalRequested,
                             "notes" to notes,
                             "justification" to justification,
-                            "checkedAt" to checkedAt
+                            "checkedAt" to checkedAt,
+                            "photos" to encodedPhotos
                         )
+                        if (isRemovalRequested) {
+                            newItem["removalReason"] = "Máquina não existe no local (solicitado pelo técnico)"
+                            newItem["requestedRemovalAt"] = checkedAt
+                        }
                         if (existingIndex >= 0) {
                             updatedList[existingIndex] = newItem
                         } else {
                             updatedList.add(newItem)
                         }
                         val executedCount = updatedList.count {
-                            (it["checked"] as? Boolean == true) && (it["skipped"] as? Boolean != true)
+                            (it["checked"] as? Boolean == true) &&
+                                (it["skipped"] as? Boolean != true) &&
+                                (it["requestedRemoval"] as? Boolean != true)
                         }
                         val serverStatus = recSnap.getString("status") ?: "pending"
                         val nextStatus = when {
@@ -213,7 +354,7 @@ class FirebaseSyncManager(private val context: Context) {
                             executedCount > 0 -> "in_progress"
                             else -> serverStatus
                         }
-                        withTimeout(12_000L) {
+                        withTimeout(15_000L) {
                             recRef.set(
                                 hashMapOf(
                                     "checklist" to updatedList,
@@ -226,7 +367,7 @@ class FirebaseSyncManager(private val context: Context) {
                         }
                     }
                 } else {
-                    withTimeout(12_000L) {
+                    withTimeout(15_000L) {
                         firestore.collection("serviceOrders")
                             .document(orderId)
                             .collection("checklist")
@@ -265,20 +406,56 @@ class FirebaseSyncManager(private val context: Context) {
                 val addressStreet = payload.optString("addressStreet", "").trim().ifBlank { "Endereço" }
                 val osNumber = payload.optString("osNumber", "").trim()
 
-                val checklistArr = payload.optJSONArray("checklist") ?: org.json.JSONArray()
+                val routeNotes = payload.optString("routeNotes", "")
+                val otherPhotoPaths = parseJsonStringArray(payload.optJSONArray("otherPhotoPaths"))
+
+                val checklistArr = payload.optJSONArray("checklist") ?: JSONArray()
+                // Calcula quantas fotos existem no total para ajustar compressão e nunca estourar o limite de 1MB do Firestore
+                var totalPhotoCount = otherPhotoPaths.size
+                for (i in 0 until checklistArr.length()) {
+                    val obj = checklistArr.getJSONObject(i)
+                    totalPhotoCount += (obj.optJSONArray("localPhotoPaths")?.length() ?: 0)
+                }
+                val photoMaxDim = if (totalPhotoCount > 6) 560 else 720
+                val photoQuality = if (totalPhotoCount > 6) 45 else 55
+                var remainingPhotoBudgetBytes = 680_000 // Reserva margem segura abaixo de 1MB para assinatura + checklist
+
+                val encodedOtherPhotos = mutableListOf<String>()
+                for (p in encodePhotosToDataUrls(otherPhotoPaths, maxCount = 4, maxDimension = photoMaxDim, quality = photoQuality)) {
+                    if (p.length <= remainingPhotoBudgetBytes) {
+                        encodedOtherPhotos.add(p)
+                        remainingPhotoBudgetBytes -= p.length
+                    }
+                }
+
                 val checklistItems = mutableListOf<Map<String, Any>>()
                 for (i in 0 until checklistArr.length()) {
                     val obj = checklistArr.getJSONObject(i)
-                    checklistItems.add(
-                        mapOf(
-                            "equipmentId" to obj.optString("equipmentId", ""),
-                            "checked" to obj.optBoolean("checked", false),
-                            "skipped" to obj.optBoolean("skipped", false),
-                            "justification" to obj.optString("justification", ""),
-                            "notes" to obj.optString("notes", ""),
-                            "checkedAt" to obj.optString("checkedAt", "")
-                        )
+                    val isRemovalReq = obj.optBoolean("requestedRemoval", false)
+                    val itemRawPhotos = parseJsonStringArray(obj.optJSONArray("localPhotoPaths"))
+                    val encodedItemPhotos = mutableListOf<String>()
+                    for (p in encodePhotosToDataUrls(itemRawPhotos, maxCount = 3, maxDimension = photoMaxDim, quality = photoQuality)) {
+                        if (p.length <= remainingPhotoBudgetBytes) {
+                            encodedItemPhotos.add(p)
+                            remainingPhotoBudgetBytes -= p.length
+                        }
+                    }
+
+                    val itemEntry = hashMapOf<String, Any>(
+                        "equipmentId" to obj.optString("equipmentId", ""),
+                        "checked" to if (isRemovalReq) false else obj.optBoolean("checked", false),
+                        "skipped" to if (isRemovalReq) false else obj.optBoolean("skipped", false),
+                        "requestedRemoval" to isRemovalReq,
+                        "justification" to if (isRemovalReq) "" else obj.optString("justification", ""),
+                        "notes" to obj.optString("notes", ""),
+                        "checkedAt" to obj.optString("checkedAt", ""),
+                        "photos" to encodedItemPhotos
                     )
+                    if (isRemovalReq) {
+                        itemEntry["removalReason"] = "Máquina não existe no local (solicitado pelo técnico)"
+                        itemEntry["requestedRemovalAt"] = obj.optString("checkedAt", completionDate)
+                    }
+                    checklistItems.add(itemEntry)
                 }
 
                 val nowIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).apply {
@@ -313,6 +490,8 @@ class FirebaseSyncManager(private val context: Context) {
                         "approvedAt" to FieldValue.delete(),
                         "approvedBy" to FieldValue.delete(),
                         "executedQuantity" to executedQuantity,
+                        "routeNotes" to routeNotes,
+                        "otherPhotos" to encodedOtherPhotos,
                         "completionLatitude" to completionLatitude,
                         "completionLongitude" to completionLongitude,
                         "completionAccuracy" to completionAccuracy,
@@ -394,6 +573,9 @@ class FirebaseSyncManager(private val context: Context) {
                         "techFinalized" to true,
                         "adminFinalized" to false,
                         "clientSignature" to clientSignature,
+                        "generalNotes" to routeNotes,
+                        "routeNotes" to routeNotes,
+                        "otherPhotos" to encodedOtherPhotos,
                         "completionLatitude" to completionLatitude,
                         "completionLongitude" to completionLongitude,
                         "completionAccuracy" to completionAccuracy,
@@ -519,6 +701,38 @@ class FirebaseSyncManager(private val context: Context) {
 
             else -> false
         }
+    }
+
+    private fun parseJsonStringArray(arr: JSONArray?): List<String> {
+        if (arr == null) return emptyList()
+        val list = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val v = arr.optString(i, "")
+            if (v.isNotBlank()) list.add(v)
+        }
+        return list
+    }
+
+    private fun encodePhotosToDataUrls(
+        rawPaths: List<String>,
+        maxCount: Int,
+        maxDimension: Int = 720,
+        quality: Int = 55
+    ): List<String> {
+        if (rawPaths.isEmpty()) return emptyList()
+        val photoMgr = PhotoCaptureManager(context)
+        val result = mutableListOf<String>()
+        for (path in rawPaths.take(maxCount)) {
+            if (path.startsWith("data:image/") || path.startsWith("http://") || path.startsWith("https://")) {
+                result.add(path)
+            } else {
+                val encoded = photoMgr.encodeFileToDataUrl(File(path), maxDimension, quality)
+                if (!encoded.isNullOrBlank()) {
+                    result.add(encoded)
+                }
+            }
+        }
+        return result
     }
 
     /**

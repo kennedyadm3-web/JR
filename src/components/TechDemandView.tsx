@@ -5523,6 +5523,21 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                             })()}
                           </div>
                         </div>
+
+                        {/* RELATO TÉCNICO / OBSERVAÇÕES GERAIS DO ATENDIMENTO */}
+                        {record.routeNotes && record.routeNotes.trim().length > 0 && (
+                          <div className="mt-4 p-4 bg-blue-50/60 border border-blue-200 rounded-2xl">
+                            <div className="flex items-center gap-2 mb-1.5">
+                              <FileText className="w-4 h-4 text-blue-600 shrink-0" />
+                              <span className="text-[10px] font-black uppercase tracking-wider text-blue-900">
+                                Relato Técnico / Observações Gerais do Atendimento
+                              </span>
+                            </div>
+                            <p className="text-xs font-semibold text-slate-800 whitespace-pre-line leading-relaxed bg-white border border-blue-100 rounded-xl px-3.5 py-2.5">
+                              {record.routeNotes}
+                            </p>
+                          </div>
+                        )}
                       </div>
 
                       {showApprovalPhotos && (
@@ -7019,16 +7034,16 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
             </tbody>
           </table>
 
-          {/* Route general notes */}
+          {/* Route general notes / Relato Técnico */}
           {printGeneralNotesOption && (
             isPrintingBlank ? (
               <div className="border border-black p-2 mt-4 text-[9px] h-14">
                 <span className="font-bold uppercase">Observações do Cliente / Técnico:</span>
               </div>
             ) : (
-              isPrintingChecklist.routeNotes && (
-                <div className="border border-black p-2 mt-4 text-[9px]">
-                  <span className="font-bold uppercase">Obs Geral: </span>
+              isPrintingChecklist.routeNotes && isPrintingChecklist.routeNotes.trim().length > 0 && (
+                <div className="border border-black p-2 mt-4 text-[9px] whitespace-pre-line">
+                  <span className="font-bold uppercase">Observações / Relato Técnico: </span>
                   {isPrintingChecklist.routeNotes}
                 </div>
               )
@@ -7106,32 +7121,56 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
               })
               .filter(item => item.photos.length > 0);
 
-            if (equipsWithPhotos.length === 0) return null;
+            const otherPhotos = (isPrintingChecklist.otherPhotos || []).filter(p => p && p.trim() !== "");
+
+            if (equipsWithPhotos.length === 0 && otherPhotos.length === 0) return null;
 
             return (
               <div className="pt-8 border-t border-black mt-8" style={{ pageBreakBefore: 'always' }}>
                 <h3 className="text-center font-bold text-xs uppercase mb-4">ANEXO FOTOGRÁFICO DO ATENDIMENTO</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  {equipsWithPhotos.map(({ eq, photos }) => (
-                    <div key={eq.id} className="border border-black p-2 rounded-md flex flex-col gap-2 bg-white" style={{ pageBreakInside: 'avoid' }}>
-                      <span className="font-bold text-[9px] uppercase block border-b border-black pb-1">
-                        {eq.label || eq.name} - {eq.sector || 'Sem setor'} ({eq.brand || 'Sem marca'}{eq.btus ? ` - ${formatBtus(eq.btus)} BTUs` : ''})
-                      </span>
-                      <div className="grid grid-cols-2 gap-2 mt-1">
-                        {photos.map((photo, pIdx) => (
-                          <div key={pIdx} className="w-full flex justify-center border border-gray-300 rounded overflow-hidden bg-gray-50 h-32">
-                            <img 
-                              src={photo} 
-                              alt={`Foto ${pIdx + 1} - ${eq.name}`} 
-                              className="h-full w-full object-cover"
-                              referrerPolicy="no-referrer"
-                            />
-                          </div>
-                        ))}
+                {equipsWithPhotos.length > 0 && (
+                  <div className="grid grid-cols-2 gap-4">
+                    {equipsWithPhotos.map(({ eq, photos }) => (
+                      <div key={eq.id} className="border border-black p-2 rounded-md flex flex-col gap-2 bg-white" style={{ pageBreakInside: 'avoid' }}>
+                        <span className="font-bold text-[9px] uppercase block border-b border-black pb-1">
+                          {eq.label || eq.name} - {eq.sector || 'Sem setor'} ({eq.brand || 'Sem marca'}{eq.btus ? ` - ${formatBtus(eq.btus)} BTUs` : ''})
+                        </span>
+                        <div className="grid grid-cols-2 gap-2 mt-1">
+                          {photos.map((photo, pIdx) => (
+                            <div key={pIdx} className="w-full flex justify-center border border-gray-300 rounded overflow-hidden bg-gray-50 h-32">
+                              <img 
+                                src={photo} 
+                                alt={`Foto ${pIdx + 1} - ${eq.name}`} 
+                                className="h-full w-full object-cover"
+                                referrerPolicy="no-referrer"
+                              />
+                            </div>
+                          ))}
+                        </div>
                       </div>
+                    ))}
+                  </div>
+                )}
+
+                {otherPhotos.length > 0 && (
+                  <div className="border border-black p-2.5 rounded-md bg-white mt-4" style={{ pageBreakInside: 'avoid' }}>
+                    <span className="font-bold text-[9px] uppercase block border-b border-black pb-1 mb-2">
+                      OBSERVAÇÕES / FOTOS GERAIS DO LOCAL ({otherPhotos.length})
+                    </span>
+                    <div className="grid grid-cols-2 gap-2">
+                      {otherPhotos.map((photo, pIdx) => (
+                        <div key={pIdx} className="w-full flex justify-center border border-gray-300 rounded overflow-hidden bg-gray-50 h-36">
+                          <img
+                            src={photo}
+                            alt={`Foto Geral ${pIdx + 1}`}
+                            className="h-full w-full object-cover"
+                            referrerPolicy="no-referrer"
+                          />
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </div>
+                )}
               </div>
             );
           })()}

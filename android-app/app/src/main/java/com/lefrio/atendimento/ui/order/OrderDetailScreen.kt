@@ -12,7 +12,10 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -22,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -53,7 +57,26 @@ fun OrderDetailScreen(
 
     var currentPhotoFile by remember { mutableStateOf<File?>(null) }
     var currentTargetItem by remember { mutableStateOf<EquipmentChecklistEntity?>(null) }
+    var photoTargetIsOther by remember { mutableStateOf(false) }
     var showPhotoSourceDialog by remember { mutableStateOf(false) }
+
+    // Estado do formulário inline "+ Máquina" (igual ao sistema PWA)
+    var showAddEquipmentForm by remember { mutableStateOf(false) }
+    var newEqPatrimony by remember { mutableStateOf("") }
+    var newEqSector by remember { mutableStateOf("") }
+    var newEqType by remember { mutableStateOf("SPLIT HI-WALL") }
+    var newEqBrand by remember { mutableStateOf("") }
+    var newEqBtus by remember { mutableStateOf("12000") }
+    var typeMenuExpanded by remember { mutableStateOf(false) }
+    val machineTypeOptions = listOf(
+        "SPLIT HI-WALL",
+        "SPLIT",
+        "ACJ",
+        "PISO TETO",
+        "CASSETE",
+        "MULTI SPLIT",
+        "FANCOIL"
+    )
 
     LaunchedEffect(uiState.finalizeSuccess) {
         if (uiState.finalizeSuccess) {
@@ -63,6 +86,13 @@ fun OrderDetailScreen(
                 "Atendimento salvo com segurança no aparelho! Será enviado automaticamente assim que houver internet estável."
             }
             Toast.makeText(context, toastMsg, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    LaunchedEffect(uiState.infoMessage) {
+        uiState.infoMessage?.let { msg ->
+            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+            viewModel.clearInfoMessage()
         }
     }
 
@@ -78,10 +108,14 @@ fun OrderDetailScreen(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
         try {
-            if (success && currentPhotoFile != null && currentTargetItem != null) {
+            if (success && currentPhotoFile != null) {
                 val compressed = photoCaptureManager.compressPhoto(currentPhotoFile!!)
-                viewModel.attachPhotoToEquipment(currentTargetItem!!, compressed.absolutePath)
-                Toast.makeText(context, "Foto salva com sucesso!", Toast.LENGTH_SHORT).show()
+                if (photoTargetIsOther) {
+                    viewModel.attachOtherPhoto(compressed.absolutePath)
+                } else if (currentTargetItem != null) {
+                    viewModel.attachPhotoToEquipment(currentTargetItem!!, compressed.absolutePath)
+                    Toast.makeText(context, "Foto salva com sucesso!", Toast.LENGTH_SHORT).show()
+                }
             }
         } catch (t: Throwable) {
             Toast.makeText(context, "Erro ao processar foto: ${t.message ?: "Falha na imagem"}", Toast.LENGTH_SHORT).show()
@@ -93,15 +127,20 @@ fun OrderDetailScreen(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         try {
-            if (uri != null && currentTargetItem != null && uiState.order != null) {
+            if (uri != null && uiState.order != null) {
+                val targetKey = if (photoTargetIsOther) "OTHER_${System.currentTimeMillis()}" else (currentTargetItem?.equipmentId ?: "EQ")
                 val savedFile = photoCaptureManager.saveGalleryImageUri(
                     sourceUri = uri,
                     orderId = uiState.order!!.id,
-                    equipmentId = currentTargetItem!!.equipmentId
+                    equipmentId = targetKey
                 )
                 if (savedFile != null) {
-                    viewModel.attachPhotoToEquipment(currentTargetItem!!, savedFile.absolutePath)
-                    Toast.makeText(context, "Imagem anexada com sucesso!", Toast.LENGTH_SHORT).show()
+                    if (photoTargetIsOther) {
+                        viewModel.attachOtherPhoto(savedFile.absolutePath)
+                    } else if (currentTargetItem != null) {
+                        viewModel.attachPhotoToEquipment(currentTargetItem!!, savedFile.absolutePath)
+                        Toast.makeText(context, "Imagem anexada com sucesso!", Toast.LENGTH_SHORT).show()
+                    }
                 } else {
                     Toast.makeText(context, "Não foi possível carregar o arquivo da imagem", Toast.LENGTH_SHORT).show()
                 }
@@ -117,8 +156,9 @@ fun OrderDetailScreen(
     ) { isGranted ->
         if (isGranted) {
             try {
-                if (currentTargetItem != null && uiState.order != null) {
-                    val (uri, file) = photoCaptureManager.createPhotoUri(uiState.order!!.id, currentTargetItem!!.equipmentId)
+                if (uiState.order != null && (photoTargetIsOther || currentTargetItem != null)) {
+                    val targetKey = if (photoTargetIsOther) "OTHER_${System.currentTimeMillis()}" else currentTargetItem!!.equipmentId
+                    val (uri, file) = photoCaptureManager.createPhotoUri(uiState.order!!.id, targetKey)
                     currentPhotoFile = file
                     cameraLauncher.launch(uri)
                 }
@@ -134,8 +174,9 @@ fun OrderDetailScreen(
         try {
             val permissionCheck = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
             if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
-                if (currentTargetItem != null && uiState.order != null) {
-                    val (uri, file) = photoCaptureManager.createPhotoUri(uiState.order!!.id, currentTargetItem!!.equipmentId)
+                if (uiState.order != null && (photoTargetIsOther || currentTargetItem != null)) {
+                    val targetKey = if (photoTargetIsOther) "OTHER_${System.currentTimeMillis()}" else currentTargetItem!!.equipmentId
+                    val (uri, file) = photoCaptureManager.createPhotoUri(uiState.order!!.id, targetKey)
                     currentPhotoFile = file
                     cameraLauncher.launch(uri)
                 }
@@ -382,7 +423,7 @@ fun OrderDetailScreen(
                     }
                 }
 
-                // Barra de Progresso dos Equipamentos
+                // Barra de Progresso dos Equipamentos + Botão "+ Máquina" (igual ao PWA)
                 item {
                     Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)) {
                         Row(
@@ -390,18 +431,45 @@ fun OrderDetailScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Máquinas da Planilha (${uiState.completedCount}/${uiState.totalCount})",
-                                fontWeight = FontWeight.Black,
-                                fontSize = 13.sp,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "${(uiState.progressPercentage * 100).toInt()}% atendido",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = BluePrimary
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Máquinas da Planilha (${uiState.completedCount}/${uiState.totalCount})",
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 13.sp,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "${(uiState.progressPercentage * 100).toInt()}% atendido",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp,
+                                    color = BluePrimary
+                                )
+                            }
+
+                            if (order.status != "finalizada") {
+                                Button(
+                                    onClick = { showAddEquipmentForm = !showAddEquipmentForm },
+                                    shape = RoundedCornerShape(9.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFF59E0B),
+                                        contentColor = Color(0xFF0F172A)
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    modifier = Modifier.height(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (showAddEquipmentForm) Icons.Default.Close else Icons.Default.Add,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (showAddEquipmentForm) "FECHAR" else "+ MÁQUINA",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Black
+                                    )
+                                }
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(6.dp))
@@ -419,6 +487,206 @@ fun OrderDetailScreen(
                     Spacer(modifier = Modifier.height(6.dp))
                 }
 
+                // Formulário Inline para Adicionar Nova Máquina em Campo (igual ao PWA)
+                if (showAddEquipmentForm && order.status != "finalizada") {
+                    item {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                                .border(1.5.dp, Color(0xFFFCD34D), RoundedCornerShape(16.dp)),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFFFFFBEB)),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            imageVector = Icons.Default.AddCircle,
+                                            contentDescription = null,
+                                            tint = Color(0xFFD97706),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "NOVA MÁQUINA ENCONTRADA NO LOCAL",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = Color(0xFF78350F)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { showAddEquipmentForm = false },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Fechar",
+                                            tint = Color(0xFFB45309),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+
+                                OutlinedTextField(
+                                    value = newEqSector,
+                                    onValueChange = { newEqSector = it },
+                                    label = { Text("Nome Completo do Setor *", fontSize = 11.sp) },
+                                    placeholder = { Text("Ex: Sala de Reunião 2º Andar", fontSize = 11.sp) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = Color.White,
+                                        unfocusedContainerColor = Color.White
+                                    )
+                                )
+
+                                // Seletor de Tipo de Máquina
+                                Box(modifier = Modifier.fillMaxWidth()) {
+                                    OutlinedTextField(
+                                        value = newEqType,
+                                        onValueChange = {},
+                                        readOnly = true,
+                                        label = { Text("Tipo de Máquina", fontSize = 11.sp) },
+                                        trailingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowDropDown,
+                                                contentDescription = null,
+                                                tint = Color(0xFFB45309)
+                                            )
+                                        },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { typeMenuExpanded = true },
+                                        enabled = false,
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            disabledContainerColor = Color.White,
+                                            disabledTextColor = TextPrimary,
+                                            disabledBorderColor = Color(0xFF94A3B8),
+                                            disabledLabelColor = TextSecondary
+                                        )
+                                    )
+                                    DropdownMenu(
+                                        expanded = typeMenuExpanded,
+                                        onDismissRequest = { typeMenuExpanded = false }
+                                    ) {
+                                        machineTypeOptions.forEach { option ->
+                                            DropdownMenuItem(
+                                                text = { Text(option, fontSize = 12.sp, fontWeight = FontWeight.Bold) },
+                                                onClick = {
+                                                    newEqType = option
+                                                    typeMenuExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    OutlinedTextField(
+                                        value = newEqBrand,
+                                        onValueChange = { newEqBrand = it },
+                                        label = { Text("Marca", fontSize = 11.sp) },
+                                        placeholder = { Text("Ex: Carrier", fontSize = 11.sp) },
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        singleLine = true,
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = Color.White,
+                                            unfocusedContainerColor = Color.White
+                                        )
+                                    )
+
+                                    OutlinedTextField(
+                                        value = newEqBtus,
+                                        onValueChange = { newEqBtus = it },
+                                        label = { Text("Capacidade (BTUs)", fontSize = 11.sp) },
+                                        placeholder = { Text("12000", fontSize = 11.sp) },
+                                        modifier = Modifier.weight(1f),
+                                        shape = RoundedCornerShape(10.dp),
+                                        singleLine = true,
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedContainerColor = Color.White,
+                                            unfocusedContainerColor = Color.White
+                                        )
+                                    )
+                                }
+
+                                OutlinedTextField(
+                                    value = newEqPatrimony,
+                                    onValueChange = { newEqPatrimony = it },
+                                    label = { Text("Patrimônio (Opcional)", fontSize = 11.sp) },
+                                    placeholder = { Text("Em branco se não possuir", fontSize = 11.sp) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(10.dp),
+                                    singleLine = true,
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = Color.White,
+                                        unfocusedContainerColor = Color.White
+                                    )
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedButton(
+                                        onClick = { showAddEquipmentForm = false },
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Text("Cancelar", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF78350F))
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Button(
+                                        onClick = {
+                                            viewModel.addNewEquipment(
+                                                sector = newEqSector,
+                                                typeName = newEqType,
+                                                brand = newEqBrand,
+                                                btus = newEqBtus,
+                                                patrimony = newEqPatrimony,
+                                                onAdded = {
+                                                    newEqSector = ""
+                                                    newEqBrand = ""
+                                                    newEqPatrimony = ""
+                                                    newEqBtus = "12000"
+                                                    showAddEquipmentForm = false
+                                                }
+                                            )
+                                        },
+                                        enabled = !uiState.isSavingEquipment,
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD97706))
+                                    ) {
+                                        if (uiState.isSavingEquipment) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(16.dp),
+                                                color = Color.White,
+                                                strokeWidth = 2.dp
+                                            )
+                                        } else {
+                                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(15.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Salvar Nova Máquina", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Lista de Equipamentos (Cards expansíveis inline como no PWA)
                 itemsIndexed(uiState.checklistItems, key = { _, item -> item.id }) { index, item ->
                     val photos = viewModel.parsePhotoPaths(item.localPhotoPathsJson)
@@ -432,7 +700,11 @@ fun OrderDetailScreen(
                         onToggleSkip = {
                             viewModel.toggleSkipEquipment(item)
                         },
+                        onToggleRemoval = {
+                            viewModel.toggleRemoveEquipment(item)
+                        },
                         onTakePhotoClick = {
+                            photoTargetIsOther = false
                             currentTargetItem = item
                             showPhotoSourceDialog = true
                         },
@@ -444,6 +716,213 @@ fun OrderDetailScreen(
                         },
                         isOrderCompleted = order.status == "finalizada"
                     )
+                }
+
+                // SEÇÃO 1 ENTRE LISTA DE MÁQUINAS E CLIENTE: RELATO TÉCNICO (Observações Gerais do Atendimento)
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(BluePrimary.copy(alpha = 0.12f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Description,
+                                        contentDescription = null,
+                                        tint = BluePrimary,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "RELATO TÉCNICO",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 13.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Observações gerais do atendimento (enviadas ao administrativo e à folha do PMOC)",
+                                        fontSize = 10.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            OutlinedTextField(
+                                value = uiState.routeNotes,
+                                onValueChange = { viewModel.updateRouteNotes(it) },
+                                placeholder = {
+                                    Text(
+                                        "Descreva observações gerais desta visita, pendências, recomendações ao cliente...",
+                                        fontSize = 11.sp
+                                    )
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 96.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                enabled = order.status != "finalizada",
+                                minLines = 3,
+                                maxLines = 6,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color(0xFFF8FAFC),
+                                    unfocusedContainerColor = Color(0xFFF8FAFC)
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // SEÇÃO 2 ENTRE LISTA DE MÁQUINAS E CLIENTE: FOTOS DE OBSERVAÇÕES / OUTROS (até 4 fotos - igual ao PWA)
+                item {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(0xFFFEF3C7)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PhotoCamera,
+                                        contentDescription = null,
+                                        tint = Color(0xFFD97706),
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "FOTOS DE OBSERVAÇÕES / OUTROS (${uiState.otherPhotos.size}/4)",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 12.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Adicione até 4 fotos de aspectos gerais do local (parede, fiação, telhado, etc.).",
+                                        fontSize = 10.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(uiState.otherPhotos) { photoEntry ->
+                                    val imageModel: Any = remember(photoEntry) {
+                                        if (photoEntry.startsWith("data:image/")) {
+                                            try {
+                                                val base64Part = photoEntry.substringAfter("base64,")
+                                                android.util.Base64.decode(base64Part, android.util.Base64.DEFAULT)
+                                            } catch (_: Exception) {
+                                                photoEntry
+                                            }
+                                        } else if (photoEntry.startsWith("http://") || photoEntry.startsWith("https://")) {
+                                            photoEntry
+                                        } else {
+                                            File(photoEntry)
+                                        }
+                                    }
+
+                                    Box(
+                                        modifier = Modifier
+                                            .size(86.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(Color(0xFFE2E8F0))
+                                            .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(12.dp))
+                                    ) {
+                                        AsyncImage(
+                                            model = imageModel,
+                                            contentDescription = "Foto de observação",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
+                                        )
+                                        if (order.status != "finalizada") {
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(4.dp)
+                                                    .size(22.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFFE11D48))
+                                                    .clickable { viewModel.removeOtherPhoto(photoEntry) },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Close,
+                                                    contentDescription = "Remover foto",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (order.status != "finalizada" && uiState.otherPhotos.size < 4) {
+                                    item {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(86.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                                .background(Color(0xFFF8FAFC))
+                                                .border(1.5.dp, Color(0xFFCBD5E1), RoundedCornerShape(12.dp))
+                                                .clickable {
+                                                    photoTargetIsOther = true
+                                                    currentTargetItem = null
+                                                    showPhotoSourceDialog = true
+                                                },
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                Icon(
+                                                    imageVector = Icons.Default.AddAPhoto,
+                                                    contentDescription = "Adicionar foto de observação",
+                                                    tint = BluePrimary,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    text = "+ FOTO",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Black,
+                                                    color = BluePrimary
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // SEÇÃO DO RESPONSÁVEL DO CLIENTE E ASSINATURA DIGITAL (Fim da Folha de Atendimento)
@@ -687,7 +1166,7 @@ fun OrderDetailScreen(
             onDismissRequest = { showPhotoSourceDialog = false },
             title = {
                 Text(
-                    text = "Anexar Evidência da Máquina",
+                    text = if (photoTargetIsOther) "Anexar Foto de Observação" else "Anexar Evidência da Máquina",
                     fontWeight = FontWeight.Black,
                     fontSize = 15.sp,
                     color = TextPrimary
