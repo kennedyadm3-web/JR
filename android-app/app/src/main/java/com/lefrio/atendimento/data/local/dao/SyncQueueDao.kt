@@ -7,11 +7,20 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface SyncQueueDao {
 
-    @Query("SELECT * FROM sync_queue WHERE status = 'PENDING' ORDER BY createdAt ASC")
+    @Query("SELECT * FROM sync_queue WHERE status IN ('PENDING', 'FAILED', 'SYNCING') ORDER BY createdAt ASC")
     suspend fun getPendingTasks(): List<SyncQueueEntity>
 
-    @Query("SELECT COUNT(*) FROM sync_queue WHERE status = 'PENDING'")
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE status != 'SUCCESS'")
     fun getPendingTasksCountFlow(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE status != 'SUCCESS'")
+    suspend fun getPendingTasksCountSync(): Int
+
+    @Query("SELECT COUNT(*) FROM sync_queue WHERE status != 'SUCCESS' AND (referenceId = :orderId OR payloadJson LIKE '%' || :orderId || '%')")
+    suspend fun countPendingTasksForOrder(orderId: String): Int
+
+    @Query("DELETE FROM sync_queue WHERE entityType = :entityType AND referenceId = :referenceId AND status != 'SUCCESS'")
+    suspend fun deletePendingByTypeAndRef(entityType: String, referenceId: String)
 
     @Insert
     suspend fun enqueue(task: SyncQueueEntity): Long

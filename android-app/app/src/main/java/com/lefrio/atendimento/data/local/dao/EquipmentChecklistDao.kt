@@ -113,4 +113,7 @@ interface EquipmentChecklistDao {
 
     @Query("DELETE FROM equipment_checklists WHERE orderId = :orderId")
     suspend fun deleteChecklistsForOrder(orderId: String)
+
+    @Query("UPDATE equipment_checklists SET isSynced = 1 WHERE orderId = :orderId")
+    suspend fun markAllAsSyncedForOrder(orderId: String)
 }

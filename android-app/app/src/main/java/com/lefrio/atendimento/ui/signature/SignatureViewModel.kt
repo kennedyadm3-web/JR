@@ -17,7 +17,11 @@ import java.util.*
 sealed class SignatureUiState {
     object Idle : SignatureUiState()
     object Finalizing : SignatureUiState()
-    data class Success(val orderId: String, val completionDate: String) : SignatureUiState()
+    data class Success(
+        val orderId: String,
+        val completionDate: String,
+        val syncedImmediately: Boolean = true
+    ) : SignatureUiState()
     data class Error(val message: String) : SignatureUiState()
 }
 
@@ -97,7 +101,7 @@ class SignatureViewModel(
                 val checklistItems = repository.getChecklistForOrderSync(orderId)
 
                 // 3. Grava no Room, enfileira e envia IMEDIATAMENTE para o Firestore (com fallback offline)
-                repository.finalizeServiceOrder(
+                val syncedNow = repository.finalizeServiceOrder(
                     orderId = orderId,
                     signeeName = signeeName.trim(),
                     signeeDoc = signeeDoc.trim(),
@@ -111,7 +115,7 @@ class SignatureViewModel(
                     checklistItems = checklistItems
                 )
 
-                _uiState.value = SignatureUiState.Success(orderId, nowIso)
+                _uiState.value = SignatureUiState.Success(orderId, nowIso, syncedNow)
             } catch (e: Exception) {
                 _uiState.value = SignatureUiState.Error(e.message ?: "Erro ao finalizar atendimento.")
             }

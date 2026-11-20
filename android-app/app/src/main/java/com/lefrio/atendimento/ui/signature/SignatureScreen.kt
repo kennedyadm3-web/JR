@@ -93,13 +93,13 @@ fun SignatureScreen(
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(RoundedCornerShape(32.dp))
-                                .background(Color(0xFFD1FAE5)),
+                                .background(if (success.syncedImmediately) Color(0xFFD1FAE5) else Color(0xFFFEF3C7)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.CheckCircle,
+                                imageVector = if (success.syncedImmediately) Icons.Default.CloudDone else Icons.Default.CloudUpload,
                                 contentDescription = null,
-                                tint = Color(0xFF059669),
+                                tint = if (success.syncedImmediately) Color(0xFF059669) else Color(0xFFD97706),
                                 modifier = Modifier.size(36.dp)
                             )
                         }
@@ -107,14 +107,20 @@ fun SignatureScreen(
                         Spacer(modifier = Modifier.height(16.dp))
 
                         Text(
-                            text = "Atendimento Concluído!",
+                            text = if (success.syncedImmediately) "Atendimento Concluído!" else "Salvo com Segurança!",
                             fontWeight = FontWeight.Black,
                             fontSize = 18.sp,
                             color = TextPrimary
                         )
 
+                        Spacer(modifier = Modifier.height(4.dp))
+
                         Text(
-                            text = "A Ordem de Serviço #${order?.osNumber} foi finalizada e assinada com sucesso.",
+                            text = if (success.syncedImmediately) {
+                                "A Ordem de Serviço #${order?.osNumber} foi finalizada, assinada e enviada ao servidor."
+                            } else {
+                                "A Ordem de Serviço #${order?.osNumber} foi salva no aparelho sem risco de perda e será enviada automaticamente ao servidor assim que a internet estabilizar."
+                            },
                             fontSize = 12.sp,
                             color = TextSecondary,
                             textAlign = TextAlign.Center
@@ -129,7 +135,7 @@ fun SignatureScreen(
                                 .background(Color(0xFFF1F5F9))
                                 .padding(12.dp)
                         ) {
-                            Column {
+                            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(
                                     text = "Recebedor: $signeeName",
                                     fontSize = 11.sp,
@@ -142,9 +148,19 @@ fun SignatureScreen(
                                     color = TextSecondary
                                 )
                                 Text(
-                                    text = "Encerramento: ${success.completionDate}",
+                                    text = "Encerramento: ${com.lefrio.atendimento.util.DateTimeUtils.formatDetailedTimestamp(success.completionDate).ifBlank { success.completionDate }}",
                                     fontSize = 11.sp,
                                     color = TextSecondary
+                                )
+                                Text(
+                                    text = if (success.syncedImmediately) {
+                                        "Envio: Entregue ao servidor ✓"
+                                    } else {
+                                        "Envio: Na fila segura do aparelho (envio automático)"
+                                    },
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (success.syncedImmediately) Color(0xFF059669) else Color(0xFFD97706)
                                 )
                             }
                         }

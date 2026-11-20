@@ -155,6 +155,10 @@ class AppUpdateManager(private val context: Context) {
     }
 
     suspend fun checkForUpdates(isManualCheck: Boolean = false): AppUpdateInfo = withContext(Dispatchers.IO) {
+        if (!NetworkMonitor.hasValidatedInternet(context)) {
+            return@withContext AppUpdateInfo(isAvailable = false)
+        }
+
         val currentCode = getCurrentVersionCode()
 
         var remoteVersionCode = 1L
@@ -163,15 +167,17 @@ class AppUpdateManager(private val context: Context) {
         var releaseNotes = "Melhorias de desempenho e estabilidade."
         var isMandatory = false
 
-        // 1. Tenta buscar informações no Firestore
+        // 1. Tenta buscar informações no Firestore com timeout seguro
         var infoFound = false
         try {
-            val doc = firestore.collection("app_config")
-                .document("android_version")
-                .get()
-                .await()
+            val doc = kotlinx.coroutines.withTimeoutOrNull(6_000L) {
+                firestore.collection("app_config")
+                    .document("android_version")
+                    .get(com.google.firebase.firestore.Source.SERVER)
+                    .await()
+            }
 
-            if (doc.exists()) {
+            if (doc != null && doc.exists()) {
                 remoteVersionCode = doc.getLong("versionCode") ?: 1L
                 remoteVersionName = doc.getString("versionName") ?: "1.0.0"
                 downloadUrl = doc.getString("downloadUrl") ?: ""

@@ -2,11 +2,13 @@ package com.lefrio.atendimento.data.sync
 
 import android.content.Context
 import androidx.work.*
+import com.lefrio.atendimento.data.local.AppDatabase
+import com.lefrio.atendimento.util.NetworkMonitor
 import java.util.concurrent.TimeUnit
 
 /**
  * Worker do Android WorkManager para sincronização periódica e reativa em segundo plano.
- * Ativado quando a rede é restabelecida ou a cada 15 minutos.
+ * Garante entrega 100% confiável ao servidor mesmo se o app for fechado ou a conexão oscilar.
  */
 class SyncWorker(
     context: Context,
@@ -14,21 +16,31 @@ class SyncWorker(
 ) : CoroutineWorker(context, workerParams) {
 
     override suspend fun doWork(): Result {
+        if (!NetworkMonitor.hasValidatedInternet(applicationContext)) {
+            return Result.retry()
+        }
+
         val syncManager = FirebaseSyncManager(applicationContext)
         return try {
-            val syncedCount = syncManager.processPendingSyncQueue()
-            Result.success()
-        } catch (e: Exception) {
-            if (runAttemptCount < 5) {
+            syncManager.processPendingSyncQueue()
+            val remaining = AppDatabase.getInstance(applicationContext)
+                .syncQueueDao()
+                .getPendingTasksCountSync()
+
+            if (remaining > 0) {
+                // Ainda restam tarefas pendentes (ex: conexão oscilou): agenda retentativa automática
                 Result.retry()
             } else {
-                Result.failure()
+                Result.success()
             }
+        } catch (e: Exception) {
+            Result.retry()
         }
     }
 
     companion object {
-        private const val WORK_NAME = "LeFrioBackgroundSyncWork"
+        private const val PERIODIC_WORK_NAME = "LeFrioBackgroundSyncWork"
+        private const val IMMEDIATE_WORK_NAME = "LeFrioImmediateSyncWork"
 
         fun schedulePeriodicSync(context: Context) {
             val constraints = Constraints.Builder()
@@ -37,11 +49,11 @@ class SyncWorker(
 
             val syncRequest = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(constraints)
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
-                WORK_NAME,
+                PERIODIC_WORK_NAME,
                 ExistingPeriodicWorkPolicy.KEEP,
                 syncRequest
             )
@@ -54,9 +66,14 @@ class SyncWorker(
 
             val oneTimeRequest = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setConstraints(constraints)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .build()
 
-            WorkManager.getInstance(context).enqueue(oneTimeRequest)
+            WorkManager.getInstance(context).enqueueUniqueWork(
+                IMMEDIATE_WORK_NAME,
+                ExistingWorkPolicy.REPLACE,
+                oneTimeRequest
+            )
         }
     }
 }

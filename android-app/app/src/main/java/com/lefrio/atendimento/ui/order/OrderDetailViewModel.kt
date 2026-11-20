@@ -27,6 +27,7 @@ data class OrderDetailUiState(
     val hasSignature: Boolean = false,
     val isFinalizing: Boolean = false,
     val finalizeSuccess: Boolean = false,
+    val finalizeSyncedImmediately: Boolean = false,
     val isLoading: Boolean = true,
     val errorMessage: String? = null
 )
@@ -158,7 +159,7 @@ class OrderDetailViewModel(
                 } else null
 
                 // 3. Grava finalização no banco local Room e enfileira para sincronização
-                repository.finalizeServiceOrder(
+                val syncedNow = repository.finalizeServiceOrder(
                     orderId = orderId,
                     signeeName = name,
                     signeeDoc = doc,
@@ -176,6 +177,7 @@ class OrderDetailViewModel(
                     it.copy(
                         isFinalizing = false,
                         finalizeSuccess = true,
+                        finalizeSyncedImmediately = syncedNow,
                         errorMessage = null
                     )
                 }

@@ -57,7 +57,12 @@ fun OrderDetailScreen(
 
     LaunchedEffect(uiState.finalizeSuccess) {
         if (uiState.finalizeSuccess) {
-            Toast.makeText(context, "Atendimento finalizado e assinado com sucesso!", Toast.LENGTH_LONG).show()
+            val toastMsg = if (uiState.finalizeSyncedImmediately) {
+                "Atendimento finalizado e enviado ao servidor com sucesso!"
+            } else {
+                "Atendimento salvo com segurança no aparelho! Será enviado automaticamente assim que houver internet estável."
+            }
+            Toast.makeText(context, toastMsg, Toast.LENGTH_LONG).show()
         }
     }
 
@@ -178,27 +183,28 @@ fun OrderDetailScreen(
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         if (isFinalized) {
+                            val isSynced = order.isSyncedWithServer
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(48.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(Color(0xFFD1FAE5)),
+                                    .background(if (isSynced) Color(0xFFD1FAE5) else Color(0xFFFEF3C7)),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Icon(
-                                        imageVector = Icons.Default.CheckCircle,
+                                        imageVector = if (isSynced) Icons.Default.CloudDone else Icons.Default.CloudUpload,
                                         contentDescription = null,
-                                        tint = Color(0xFF059669),
+                                        tint = if (isSynced) Color(0xFF059669) else Color(0xFFD97706),
                                         modifier = Modifier.size(20.dp)
                                     )
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "ATENDIMENTO FINALIZADO E REGISTRADO",
+                                        text = if (isSynced) "FINALIZADO E ENVIADO AO SERVIDOR" else "SALVO NO APARELHO • AGUARDANDO INTERNET",
                                         fontWeight = FontWeight.Black,
-                                        fontSize = 12.sp,
-                                        color = Color(0xFF065F46)
+                                        fontSize = 11.sp,
+                                        color = if (isSynced) Color(0xFF065F46) else Color(0xFF92400E)
                                     )
                                 }
                             }

@@ -66,9 +66,10 @@ fun SyncStatusBar(
     }
 
     val message = when {
-        !isOnline -> "Modo Offline ativo • Dados gravados no aparelho"
-        isSyncing -> "Fazendo varredura no servidor para buscar seu roteiro do dia..."
-        pendingTasksCount > 0 -> "$pendingTasksCount alteração(ões) salva(s) localmente • Sincronizando..."
+        !isOnline && pendingTasksCount > 0 -> "Offline • $pendingTasksCount dado(s) salvo(s) com segurança no aparelho"
+        !isOnline -> "Modo Offline • Dados gravados com segurança no aparelho"
+        isSyncing -> "Sincronizando atendimentos e roteiro com o servidor..."
+        pendingTasksCount > 0 -> "$pendingTasksCount pendência(s) aguardando envio • Toque para enviar"
         else -> "Online • Dados 100% sincronizados com o servidor"
     }
 
@@ -78,7 +79,7 @@ fun SyncStatusBar(
             .padding(horizontal = 16.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(bgColor)
-            .clickable(enabled = isOnline && !isSyncing) { onForceSyncClick() }
+            .clickable(enabled = !isSyncing) { onForceSyncClick() }
             .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Row(
@@ -109,7 +110,15 @@ fun SyncStatusBar(
 
             if (isOnline && !isSyncing) {
                 Text(
-                    text = if (pendingTasksCount > 0) "SINCRONIZAR AGORA" else "VARREDURA",
+                    text = if (pendingTasksCount > 0) "ENVIAR AGORA" else "ATUALIZAR",
+                    color = textColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Black,
+                    modifier = Modifier.padding(start = 6.dp)
+                )
+            } else if (!isOnline && pendingTasksCount > 0) {
+                Text(
+                    text = "SEGURO LOCAL",
                     color = textColor,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Black,

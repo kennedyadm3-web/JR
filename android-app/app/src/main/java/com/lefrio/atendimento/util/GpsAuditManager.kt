@@ -8,6 +8,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class GpsLocationResult(
     val latitude: Double = 0.0,
@@ -23,14 +24,15 @@ class GpsAuditManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     suspend fun getCurrentLocation(): GpsLocationResult {
+        val cancellationTokenSource = CancellationTokenSource()
         return try {
-            val cancellationTokenSource = CancellationTokenSource()
-
-            // Tenta obter localização atual precisa
-            val location: Location? = fusedLocationClient.getCurrentLocation(
-                Priority.PRIORITY_HIGH_ACCURACY,
-                cancellationTokenSource.token
-            ).await()
+            // Tenta obter localização atual com timeout curto (3s) para nunca travar finalização offline/indoor
+            val location: Location? = withTimeoutOrNull(3_000L) {
+                fusedLocationClient.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    cancellationTokenSource.token
+                ).await()
+            }
 
             if (location != null) {
                 GpsLocationResult(
@@ -40,8 +42,11 @@ class GpsAuditManager(private val context: Context) {
                     isCaptured = true
                 )
             } else {
-                // Fallback para última localização conhecida
-                val lastLocation: Location? = fusedLocationClient.lastLocation.await()
+                cancellationTokenSource.cancel()
+                // Fallback instantâneo para última localização conhecida (1.2s máx)
+                val lastLocation: Location? = withTimeoutOrNull(1_200L) {
+                    fusedLocationClient.lastLocation.await()
+                }
                 if (lastLocation != null) {
                     GpsLocationResult(
                         latitude = lastLocation.latitude,
@@ -55,6 +60,10 @@ class GpsAuditManager(private val context: Context) {
             }
         } catch (e: Exception) {
             GpsLocationResult(isCaptured = false)
+        } finally {
+            try {
+                cancellationTokenSource.cancel()
+            } catch (_: Exception) {}
         }
     }
 }

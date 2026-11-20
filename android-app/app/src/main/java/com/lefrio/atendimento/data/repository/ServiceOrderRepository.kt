@@ -3,6 +3,7 @@ package com.lefrio.atendimento.data.repository
 import android.content.Context
 import android.util.Log
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Source
 import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
@@ -11,6 +12,7 @@ import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.SyncQueueEntity
 import com.lefrio.atendimento.data.local.entity.TechNotificationEntity
 import com.lefrio.atendimento.data.sync.SyncWorker
+import com.lefrio.atendimento.util.NetworkMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -18,6 +20,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -97,7 +101,14 @@ class ServiceOrderRepository(private val context: Context) {
         val normTechName = technicianName.trim().uppercase()
         val normTechId = technicianId.trim().uppercase()
 
-        // Tenta enviar pendências locais antes de reconciliar com o servidor
+        // GARANTIA OFFLINE-FIRST: Se o dispositivo não tem internet validada,
+        // NUNCA consulta cache vazio nem apaga o banco local Room — retorna imediatamente os dados salvos!
+        if (!NetworkMonitor.hasValidatedInternet(context)) {
+            Log.d(TAG, "Modo offline ativo em syncDailyItinerary. Mantendo 100% do roteiro local intacto.")
+            return@withContext orderDao.getAllOrders().size
+        }
+
+        // Tenta enviar pendências locais ANTES de reconciliar com o servidor
         try {
             com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
         } catch (_: Exception) {}
@@ -105,21 +116,23 @@ class ServiceOrderRepository(private val context: Context) {
         var fetchSuccess = false
         var serverQuerySucceeded = false
 
-        // 1. TENTATIVA DIRETA E RESILIENTE NO FIRESTORE (Fonte primária de dados do aplicativo)
+        // 1. TENTATIVA DIRETA E RESILIENTE NO FIRESTORE (Source.SERVER com timeout para garantir resposta real da nuvem)
         try {
-            FirebaseConfig.ensureAuthenticated()
+            withTimeout(10_000L) { FirebaseConfig.ensureAuthenticated() }
             val firestore = FirebaseConfig.getFirestore()
 
-            // A) Busca Manutenções Preventivas (maintenanceRecords) com queries direcionadas e paralelas
+            // A) Busca Manutenções Preventivas (maintenanceRecords) com queries direcionadas e paralelas no SERVIDOR
             val candidateDocsMap = LinkedHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
             val querySuccessCount = java.util.concurrent.atomic.AtomicInteger(0)
             try {
                 coroutineScope {
                     val qDate = async {
                         try {
-                            val docs = firestore.collection("maintenanceRecords")
-                                .whereEqualTo("plannedDate", targetDate)
-                                .get().await().documents
+                            val docs = withTimeout(12_000L) {
+                                firestore.collection("maintenanceRecords")
+                                    .whereEqualTo("plannedDate", targetDate)
+                                    .get(Source.SERVER).await().documents
+                            }
                             querySuccessCount.incrementAndGet()
                             docs
                         } catch (_: Exception) { emptyList() }
@@ -127,9 +140,11 @@ class ServiceOrderRepository(private val context: Context) {
                     val qTech1 = async {
                         try {
                             if (normTechName.isNotBlank()) {
-                                val docs = firestore.collection("maintenanceRecords")
-                                    .whereEqualTo("technician1", normTechName)
-                                    .get().await().documents
+                                val docs = withTimeout(12_000L) {
+                                    firestore.collection("maintenanceRecords")
+                                        .whereEqualTo("technician1", normTechName)
+                                        .get(Source.SERVER).await().documents
+                                }
                                 querySuccessCount.incrementAndGet()
                                 docs
                             } else emptyList()
@@ -138,9 +153,11 @@ class ServiceOrderRepository(private val context: Context) {
                     val qTech2 = async {
                         try {
                             if (normTechName.isNotBlank()) {
-                                val docs = firestore.collection("maintenanceRecords")
-                                    .whereEqualTo("technician2", normTechName)
-                                    .get().await().documents
+                                val docs = withTimeout(12_000L) {
+                                    firestore.collection("maintenanceRecords")
+                                        .whereEqualTo("technician2", normTechName)
+                                        .get(Source.SERVER).await().documents
+                                }
                                 querySuccessCount.incrementAndGet()
                                 docs
                             } else emptyList()
@@ -156,16 +173,18 @@ class ServiceOrderRepository(private val context: Context) {
 
                 // Fallback para busca por mês caso o nome do técnico tenha variação de grafia/acento
                 if (candidateDocsMap.isEmpty()) {
-                    val monthSnap = firestore.collection("maintenanceRecords")
-                        .whereEqualTo("month", currentMonth)
-                        .get().await()
+                    val monthSnap = withTimeout(12_000L) {
+                        firestore.collection("maintenanceRecords")
+                            .whereEqualTo("month", currentMonth)
+                            .get(Source.SERVER).await()
+                    }
                     querySuccessCount.incrementAndGet()
                     for (d in monthSnap.documents) {
                         candidateDocsMap[d.id] = d
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Falha ao buscar maintenanceRecords: ${e.message}")
+                Log.w(TAG, "Falha ao buscar maintenanceRecords no servidor: ${e.message}")
             }
 
             if (querySuccessCount.get() > 0) {
@@ -779,12 +798,16 @@ class ServiceOrderRepository(private val context: Context) {
             val allLocalOrders = orderDao.getAllOrders()
             for (localOrder in allLocalOrders) {
                 if (localOrder.id !in validServerOrderIds) {
-                    val isPreventive = localOrder.id.startsWith("PREV_") || localOrder.type.contains("PREVENTIVA", ignoreCase = true)
                     val hasPendingSync = localOrder.id in pendingOrderIds || !localOrder.isSyncedWithServer
-                    if (isPreventive || !hasPendingSync) {
+                    // REGRA DE INTEGRIDADE ABSOLUTA:
+                    // NUNCA apaga nenhum atendimento (preventivo ou corretivo) que possua alterações locais não enviadas!
+                    // Apenas atendimentos já 100% sincronizados que saíram do roteiro no servidor são removidos.
+                    if (!hasPendingSync) {
                         Log.d(TAG, "Removendo agendamento excluído/desvinculado no servidor: ${localOrder.id} (${localOrder.clientName})")
                         checklistDao.deleteChecklistsForOrder(localOrder.id)
                         orderDao.deleteOrderById(localOrder.id)
+                    } else {
+                        Log.w(TAG, "Preservando atendimento com dados offline pendentes de envio: ${localOrder.id} (${localOrder.clientName})")
                     }
                 }
             }
@@ -903,6 +926,7 @@ class ServiceOrderRepository(private val context: Context) {
             put("status", newStatus)
         }
 
+        syncDao.deletePendingByTypeAndRef("ORDER_STATUS", orderId)
         syncDao.enqueue(
             SyncQueueEntity(
                 entityType = "ORDER_STATUS",
@@ -986,10 +1010,12 @@ class ServiceOrderRepository(private val context: Context) {
             put("checkedAt", checkedAt ?: "")
         }
 
+        val targetRefId = existing?.id ?: checklistId
+        syncDao.deletePendingByTypeAndRef("CHECKLIST_ITEM", targetRefId)
         syncDao.enqueue(
             SyncQueueEntity(
                 entityType = "CHECKLIST_ITEM",
-                referenceId = existing?.id ?: checklistId,
+                referenceId = targetRefId,
                 actionType = "UPDATE",
                 payloadJson = payload.toString()
             )
@@ -1019,7 +1045,7 @@ class ServiceOrderRepository(private val context: Context) {
         accuracy: Float,
         signatureBase64: String? = null,
         checklistItems: List<EquipmentChecklistEntity>? = null
-    ) = withContext(Dispatchers.IO) {
+    ): Boolean = withContext(Dispatchers.IO) {
         val existingOrder = orderDao.getOrderById(orderId)
         val isPreventive = existingOrder?.type?.contains("PREVENTIVA", ignoreCase = true) == true || orderId.startsWith("PREV_")
         val originalRecordId = existingOrder?.originalId ?: orderId.removePrefix("PREV_")
@@ -1033,6 +1059,7 @@ class ServiceOrderRepository(private val context: Context) {
             checklistDao.getChecklistForOrder(orderId)
         }
 
+        // 1. PERSISTÊNCIA LOCAL IMEDIATA E ATÔMICA NO SQLITE (ROOM) — NUNCA DEPENDE DE INTERNET!
         orderDao.finalizeOrderWithSignature(
             orderId = orderId,
             signeeName = signeeName,
@@ -1066,6 +1093,7 @@ class ServiceOrderRepository(private val context: Context) {
             put("clientSigneeDoc", signeeDoc)
             put("clientSigneeRegistration", signeeDoc)
             put("clientSignatureDate", signatureDate)
+            put("signatureFilePath", signatureFilePath)
             put("completionDate", completionDate)
             put("finishedAt", completionDate)
             put("techFinalizedAt", completionDate)
@@ -1088,6 +1116,7 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
+        syncDao.deletePendingByTypeAndRef("FINALIZE_SERVICE", orderId)
         syncDao.enqueue(
             SyncQueueEntity(
                 entityType = "FINALIZE_SERVICE",
@@ -1097,15 +1126,22 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
-        // ENVIO IMEDIATO: Se houver conexão estável, envia na hora para o Firestore (aprovação + notificação)
-        try {
-            com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
-        } catch (e: Exception) {
-            Log.w(TAG, "Envio imediato indisponível (será reenviado automaticamente via SyncWorker): ${e.message}")
+        // 2. Agenda WorkManager imediatamente (garante entrega mesmo se o app for fechado ou o celular reiniciar)
+        SyncWorker.triggerImmediateSync(context)
+
+        // 3. ENVIO IMEDIATO APENAS SE HOUVER INTERNET REAL VALIDADA (com timeout curto de 8s para nunca travar a tela)
+        if (NetworkMonitor.hasValidatedInternet(context)) {
+            try {
+                withTimeoutOrNull(8_000L) {
+                    com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Envio imediato indisponível (garantido na fila offline): ${e.message}")
+            }
         }
 
-        // Garantia offline-first caso o aparelho esteja sem rede no momento
-        SyncWorker.triggerImmediateSync(context)
+        val updatedOrder = orderDao.getOrderById(orderId)
+        return@withContext updatedOrder?.isSyncedWithServer == true
     }
 
     // --- OPERAÇÕES DE DESPESAS DE ROTA ---
@@ -1287,15 +1323,19 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
-        // ENVIO IMEDIATO: Se houver internet, grava na hora no Firestore e notifica o administrativo
-        try {
-            com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
-        } catch (e: Exception) {
-            Log.w(TAG, "Envio imediato da O.S. indisponível (será reenviado via SyncWorker): ${e.message}")
-        }
-
         // Dispara sincronização em segundo plano como garantia offline
         SyncWorker.triggerImmediateSync(context)
+
+        // ENVIO IMEDIATO APENAS SE HOUVER INTERNET VALIDADA (timeout curto para nunca travar offline)
+        if (NetworkMonitor.hasValidatedInternet(context)) {
+            try {
+                withTimeoutOrNull(8_000L) {
+                    com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Envio imediato da O.S. indisponível (será reenviado via SyncWorker): ${e.message}")
+            }
+        }
 
         return entity
     }
@@ -1481,8 +1521,31 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
-        // 2. Tenta buscar na API HTTP rápida do sistema (/api/equipments?addressId=...)
+        // 2. PRIORIDADE OFFLINE-FIRST: Busca imediatamente no banco Room local (instantâneo e sem depender de internet)
         if (resultList.isEmpty()) {
+            try {
+                val localEquips = checklistDao.getDistinctEquipmentsForAddress(cleanAid)
+                for (le in localEquips) {
+                    if (seenIds.add(le.id)) {
+                        val opt = EquipmentOption(
+                            id = le.id,
+                            addressId = cleanAid,
+                            name = le.name,
+                            brand = le.brand,
+                            sector = le.sector,
+                            btu = le.btu
+                        )
+                        resultList.add(opt)
+                        cachedEquipmentsByAddress.getOrPut(cleanAid) { mutableListOf() }.add(opt)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Busca local Room de equipamentos falhou: ${e.message}")
+            }
+        }
+
+        // 3. Apenas se ainda estiver vazio E houver internet validada, consulta API/Firestore com timeout curto
+        if (resultList.isEmpty() && NetworkMonitor.hasValidatedInternet(context)) {
             val apiEndpoints = listOf(
                 "${FirebaseConfig.SHARED_API_BASE}/api/equipments?addressId=${java.net.URLEncoder.encode(cleanAid, "UTF-8")}",
                 "http://10.0.2.2:3000/api/equipments?addressId=${java.net.URLEncoder.encode(cleanAid, "UTF-8")}"
@@ -1525,38 +1588,17 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
-        // 3. Tenta buscar no banco Room local (offline-first dos checklists gravados das ordens deste endereço)
-        if (resultList.isEmpty()) {
-            try {
-                val localEquips = checklistDao.getDistinctEquipmentsForAddress(cleanAid)
-                for (le in localEquips) {
-                    if (seenIds.add(le.id)) {
-                        val opt = EquipmentOption(
-                            id = le.id,
-                            addressId = cleanAid,
-                            name = le.name,
-                            brand = le.brand,
-                            sector = le.sector,
-                            btu = le.btu
-                        )
-                        resultList.add(opt)
-                        cachedEquipmentsByAddress.getOrPut(cleanAid) { mutableListOf() }.add(opt)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Busca local Room de equipamentos falhou: ${e.message}")
-            }
-        }
-
-        // 4. Última tentativa: busca remota direta no Firestore
-        if (resultList.isEmpty()) {
+        // 4. Última tentativa online: busca remota direta no Firestore com timeout
+        if (resultList.isEmpty() && NetworkMonitor.hasValidatedInternet(context)) {
             try {
                 val firestore = FirebaseConfig.getFirestore()
-                val snap = firestore.collection("equipments")
-                    .whereEqualTo("addressId", cleanAid)
-                    .limit(40)
-                    .get()
-                    .await()
+                val snap = withTimeout(6_000L) {
+                    firestore.collection("equipments")
+                        .whereEqualTo("addressId", cleanAid)
+                        .limit(40)
+                        .get(Source.SERVER)
+                        .await()
+                }
                 for (doc in snap.documents) {
                     val docId = doc.id
                     if (seenIds.add(docId)) {

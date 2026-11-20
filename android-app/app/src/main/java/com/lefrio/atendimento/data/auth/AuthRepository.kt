@@ -8,12 +8,15 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthException
 import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
 import com.google.firebase.auth.FirebaseAuthInvalidUserException
+import com.google.firebase.firestore.Source
 import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
+import com.lefrio.atendimento.util.NetworkMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 data class TechnicianUser(
     val uid: String,
@@ -163,36 +166,39 @@ class AuthRepository(private val context: Context) {
             techDao.insertAll(DEFAULT_TECHNICIANS)
         }
 
-        // Tenta sincronização com o Firestore
-        try {
-            FirebaseConfig.ensureAuthenticated()
-            val firestore = FirebaseConfig.getFirestore()
-            val snap = firestore.collection("technicians").get().await()
-            if (!snap.isEmpty) {
-                val remoteList = mutableListOf<TechnicianEntity>()
-                for (doc in snap.documents) {
-                    val name = doc.getString("name") ?: continue
-                    val pin = (doc.get("pin")?.toString() ?: "").trim()
-                    val active = doc.getBoolean("active") ?: true
-                    remoteList.add(
-                        TechnicianEntity(
-                            id = doc.id,
-                            name = name,
-                            pin = pin,
-                            email = doc.getString("email"),
-                            phone = doc.getString("phone"),
-                            active = active
-                        )
-                    )
+        // Tenta sincronização com o Firestore apenas se houver internet validada e com timeout curto
+        if (NetworkMonitor.hasValidatedInternet(context)) {
+            try {
+                withTimeout(8_000L) {
+                    FirebaseConfig.ensureAuthenticated()
+                    val firestore = FirebaseConfig.getFirestore()
+                    val snap = firestore.collection("technicians").get(Source.SERVER).await()
+                    if (!snap.isEmpty) {
+                        val remoteList = mutableListOf<TechnicianEntity>()
+                        for (doc in snap.documents) {
+                            val name = doc.getString("name") ?: continue
+                            val pin = (doc.get("pin")?.toString() ?: "").trim()
+                            val active = doc.getBoolean("active") ?: true
+                            remoteList.add(
+                                TechnicianEntity(
+                                    id = doc.id,
+                                    name = name,
+                                    pin = pin,
+                                    email = doc.getString("email"),
+                                    phone = doc.getString("phone"),
+                                    active = active
+                                )
+                            )
+                        }
+                        if (remoteList.isNotEmpty()) {
+                            techDao.clearAll()
+                            techDao.insertAll(remoteList)
+                        }
+                    }
                 }
-                if (remoteList.isNotEmpty()) {
-                    techDao.clearAll()
-                    techDao.insertAll(remoteList)
-                    return@withContext remoteList.filter { it.active }.sortedBy { it.name }
-                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Sincronização Firestore de técnicos ignorada (offline/timeout): ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.d(TAG, "Sincronização Firestore de técnicos ignorada (offline/erro): ${e.message}")
         }
 
         val cached = techDao.getActiveTechniciansSync()
@@ -230,19 +236,21 @@ class AuthRepository(private val context: Context) {
         // PIN validado com sucesso!
         setSelectedTechnician(tech)
 
-        try {
-            val updateManager = com.lefrio.atendimento.util.AppUpdateManager(context)
-            val currentVersion = updateManager.getCurrentVersionName()
-            FirebaseConfig.getFirestore().collection("technicians").document(tech.id).set(
-                mapOf(
-                    "appVersion" to currentVersion,
-                    "appVersionCode" to updateManager.getCurrentVersionCode(),
-                    "lastAppActive" to System.currentTimeMillis(),
-                    "deviceModel" to android.os.Build.MODEL
-                ),
-                com.google.firebase.firestore.SetOptions.merge()
-            )
-        } catch (ignored: Exception) {}
+        if (NetworkMonitor.hasValidatedInternet(context)) {
+            try {
+                val updateManager = com.lefrio.atendimento.util.AppUpdateManager(context)
+                val currentVersion = updateManager.getCurrentVersionName()
+                FirebaseConfig.getFirestore().collection("technicians").document(tech.id).set(
+                    mapOf(
+                        "appVersion" to currentVersion,
+                        "appVersionCode" to updateManager.getCurrentVersionCode(),
+                        "lastAppActive" to System.currentTimeMillis(),
+                        "deviceModel" to android.os.Build.MODEL
+                    ),
+                    com.google.firebase.firestore.SetOptions.merge()
+                )
+            } catch (ignored: Exception) {}
+        }
 
         val techUser = TechnicianUser(
             uid = tech.id,

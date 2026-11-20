@@ -273,19 +273,41 @@ fun ServiceOrderCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
+                    val (footerIcon, footerTint, footerLabel) = when {
+                        order.status == "finalizada" && order.isSyncedWithServer -> Triple(
+                            Icons.Default.CloudDone,
+                            Color(0xFF059669),
+                            "Concluído • Enviado"
+                        )
+                        order.status == "finalizada" && !order.isSyncedWithServer -> Triple(
+                            Icons.Default.CloudUpload,
+                            Color(0xFFD97706),
+                            "Salvo no aparelho • Aguardando envio"
+                        )
+                        order.status == "em_andamento" && !order.isSyncedWithServer -> Triple(
+                            Icons.Default.CloudUpload,
+                            Color(0xFFD97706),
+                            "Em andamento • Salvo no aparelho"
+                        )
+                        else -> Triple(
+                            Icons.Default.Schedule,
+                            Color(0xFF64748B),
+                            "Programado para Hoje"
+                        )
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = if (order.status == "finalizada") Icons.Default.CheckCircle else Icons.Default.Schedule,
+                            imageVector = footerIcon,
                             contentDescription = null,
-                            tint = if (order.status == "finalizada") Color(0xFF059669) else Color(0xFF64748B),
+                            tint = footerTint,
                             modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (order.status == "finalizada") "Concluído com Assinatura" else "Programado para Hoje",
+                            text = footerLabel,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (order.status == "finalizada") Color(0xFF059669) else Color(0xFF64748B),
+                            color = footerTint,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )

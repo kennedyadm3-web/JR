@@ -8,6 +8,7 @@ import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
+import com.lefrio.atendimento.data.sync.FirebaseSyncManager
 import com.lefrio.atendimento.data.sync.SyncWorker
 import com.lefrio.atendimento.util.NetworkMonitor
 import kotlinx.coroutines.Job
@@ -56,12 +57,34 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     private var lastListenedTechName: String = ""
 
     init {
-        // Observa conectividade de rede
+        // Observa conectividade de rede validada
         viewModelScope.launch {
+            var hadOffline = false
             networkMonitor.isOnline.collect { online ->
                 _uiState.update { it.copy(isOnline = online) }
-                if (online) {
+                if (!online) {
+                    hadOffline = true
+                } else {
                     SyncWorker.triggerImmediateSync(getApplication())
+                    if (currentTechName.isNotBlank()) {
+                        if (tech1Listener == null) {
+                            lastListenedTechName = ""
+                            startRealtimeItineraryListeners(currentTechName)
+                        }
+                        if (hadOffline) {
+                            hadOffline = false
+                            launch {
+                                try {
+                                    FirebaseSyncManager(getApplication()).processPendingSyncQueue()
+                                    repository.syncDailyItinerary(
+                                        technicianName = currentTechName,
+                                        technicianId = currentTechId,
+                                        targetDate = _uiState.value.selectedDate
+                                    )
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -229,16 +252,43 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun forceSync() {
         viewModelScope.launch {
+            if (!NetworkMonitor.hasValidatedInternet(getApplication())) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        isSyncing = false,
+                        syncMessage = "Sem internet estável no momento. Seus dados continuam salvos com segurança no aparelho e serão enviados automaticamente quando a conexão voltar."
+                    )
+                }
+                return@launch
+            }
+
             _uiState.update { it.copy(isLoading = true, isSyncing = true, syncMessage = null) }
+            val syncManager = FirebaseSyncManager(getApplication())
+            val syncedPending = try {
+                syncManager.processPendingSyncQueue()
+            } catch (_: Exception) {
+                0
+            }
+
             var foundCount = 0
             if (currentTechName.isNotBlank()) {
                 foundCount = repository.syncDailyItinerary(currentTechName, currentTechId, _uiState.value.selectedDate)
             }
-            SyncWorker.triggerImmediateSync(getApplication())
-            val msg = if (foundCount > 0) {
-                "Varredura do servidor concluída! $foundCount endereço(s)/ordem(ns) no seu roteiro."
-            } else {
-                "Varredura concluída: Servidor verificado, nenhum novo endereço pendente."
+            val remainingPending = try {
+                db.syncQueueDao().getPendingTasksCountSync()
+            } catch (_: Exception) {
+                0
+            }
+            if (remainingPending > 0) {
+                SyncWorker.triggerImmediateSync(getApplication())
+            }
+
+            val msg = when {
+                remainingPending > 0 -> "Conexão instável: $syncedPending enviado(s), $remainingPending pendência(s) protegida(s) no aparelho para nova tentativa automática."
+                syncedPending > 0 -> "Sincronização concluída! $syncedPending pendência(s) enviada(s) ao servidor e $foundCount endereço(s) no roteiro."
+                foundCount > 0 -> "Sincronização concluída! $foundCount endereço(s)/ordem(ns) no seu roteiro."
+                else -> "Sincronização concluída: Servidor verificado, nenhum novo endereço pendente."
             }
             _uiState.update { it.copy(isLoading = false, isSyncing = false, syncMessage = msg) }
         }
