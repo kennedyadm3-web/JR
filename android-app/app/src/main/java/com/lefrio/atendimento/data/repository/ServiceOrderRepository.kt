@@ -72,6 +72,24 @@ class ServiceOrderRepository(private val context: Context) {
         return false
     }
 
+    private fun isIsoDate(value: String): Boolean {
+        return value.length == 10 && value[4] == '-' && value[7] == '-'
+    }
+
+    private fun subtractDays(isoDate: String, days: Int): String {
+        return try {
+            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+            val parsed = sdf.parse(isoDate.take(10)) ?: Date()
+            val cal = java.util.Calendar.getInstance().apply {
+                time = parsed
+                add(java.util.Calendar.DAY_OF_YEAR, -days)
+            }
+            sdf.format(cal.time)
+        } catch (_: Exception) {
+            isoDate.take(10)
+        }
+    }
+
     fun getAllOrders(): Flow<List<ServiceOrderEntity>> = orderDao.getAllOrdersFlow()
 
     fun getAllOrdersProgress(): Flow<List<com.lefrio.atendimento.data.local.dao.OrderChecklistProgress>> =
@@ -173,21 +191,43 @@ class ServiceOrderRepository(private val context: Context) {
                         }
                     }
                 }
-
-                // Fallback para busca por mês caso o nome do técnico tenha variação de grafia/acento
-                if (candidateDocsMap.isEmpty()) {
-                    val monthSnap = withTimeout(12_000L) {
-                        firestore.collection("maintenanceRecords")
-                            .whereEqualTo("month", currentMonth)
-                            .get(Source.SERVER).await()
-                    }
-                    querySuccessCount.incrementAndGet()
-                    for (d in monthSnap.documents) {
-                        candidateDocsMap[d.id] = d
-                    }
-                }
             } catch (e: Exception) {
                 Log.w(TAG, "Falha ao buscar maintenanceRecords no servidor: ${e.message}")
+            }
+
+            // Janela válida: nunca exibir datas futuras; se não houver hoje, buscar a última agendada nos últimos 7 dias
+            val minPastDate = subtractDays(targetDate, 7)
+            val prevMonth = if (minPastDate.length >= 7) minPastDate.substring(0, 7) else currentMonth
+
+            val isEligibleTechDoc: (com.google.firebase.firestore.DocumentSnapshot) -> Boolean = { doc ->
+                val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
+                val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
+                val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+
+                val isMyTech = matchesTechResilient(t1, normTechName, normTechId) ||
+                               matchesTechResilient(t2, normTechName, normTechId)
+
+                isMyTech && isIsoDate(pDate) && pDate <= targetDate && pDate >= minPastDate
+            }
+
+            // Fallback para busca por mês caso o nome do técnico tenha variação de grafia/acento ou não tenha docs na consulta direta
+            if (candidateDocsMap.values.none(isEligibleTechDoc)) {
+                try {
+                    val monthsToCheck = listOf(currentMonth, prevMonth).distinct()
+                    for (m in monthsToCheck) {
+                        val monthSnap = withTimeout(12_000L) {
+                            firestore.collection("maintenanceRecords")
+                                .whereEqualTo("month", m)
+                                .get(Source.SERVER).await()
+                        }
+                        querySuccessCount.incrementAndGet()
+                        for (d in monthSnap.documents) {
+                            candidateDocsMap[d.id] = d
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Fallback por mês em maintenanceRecords falhou: ${e.message}")
+                }
             }
 
             if (querySuccessCount.get() > 0) {
@@ -195,48 +235,34 @@ class ServiceOrderRepository(private val context: Context) {
                 fetchSuccess = true
             }
 
-            // Filtra os documentos do técnico que possuem data agendada (plannedDate não vazio) no mês atual ou rota recente
-            val techScheduledDocs = candidateDocsMap.values.filter { doc ->
-                val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
-                val month = (doc.getString("month") ?: "").trim()
-                val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
-                val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+            // Filtra estritamente documentos do técnico com data válida entre (hoje - 7 dias) e hoje (NUNCA datas futuras)
+            val techEligibleDocs = candidateDocsMap.values.filter(isEligibleTechDoc)
 
-                val isMyTech = matchesTechResilient(t1, normTechName, normTechId) ||
-                               matchesTechResilient(t2, normTechName, normTechId)
-
-                val isRelevantMonth = pDate.startsWith(currentMonth) || month == currentMonth || pDate == targetDate
-                isMyTech && pDate.isNotBlank() && isRelevantMonth
-            }
-
-            // Determina as datas ativas do roteiro do técnico (alinhado com a regra do PWA)
-            val allTechDatesDesc = techScheduledDocs
-                .mapNotNull { (it.getString("plannedDate") ?: "").trim().take(10).takeIf { d -> d.isNotBlank() } }
+            // Regra de exibição:
+            // 1. Se houver manutenção preventiva agendada para a data atual (targetDate), exibe SOMENTE a data atual.
+            // 2. Caso contrário, exibe SOMENTE a última data agendada para este técnico nos últimos 7 dias.
+            // 3. Nunca exibe endereços com data futura (ex: dia 23/11 quando ainda é dia 22/11).
+            val eligibleDatesDesc = techEligibleDocs
+                .map { (it.getString("plannedDate") ?: "").trim().take(10) }
                 .distinct()
                 .sortedDescending()
 
-            val activeRouteDates = mutableSetOf<String>()
-            if (allTechDatesDesc.contains(targetDate)) {
-                activeRouteDates.add(targetDate)
-                allTechDatesDesc.firstOrNull { it < targetDate }?.let { activeRouteDates.add(it) }
-            } else if (allTechDatesDesc.isNotEmpty()) {
-                val pastOrToday = allTechDatesDesc.filter { it <= targetDate }
-                val futureDates = allTechDatesDesc.reversed().filter { it > targetDate }
-                val effectiveDate = pastOrToday.firstOrNull() ?: futureDates.firstOrNull() ?: targetDate
-                activeRouteDates.add(effectiveDate)
-                if (pastOrToday.size > 1) activeRouteDates.add(pastOrToday[1])
-                if (futureDates.isNotEmpty()) activeRouteDates.add(futureDates[0])
-            } else {
-                activeRouteDates.add(targetDate)
+            val activePreventiveDate: String? = when {
+                eligibleDatesDesc.contains(targetDate) -> targetDate
+                else -> eligibleDatesDesc.firstOrNull { it < targetDate && it >= minPastDate }
             }
 
-            val matchedDocs = techScheduledDocs.filter { doc ->
-                val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
-                pDate in activeRouteDates
+            val matchedDocs = if (activePreventiveDate != null) {
+                techEligibleDocs.filter { doc ->
+                    val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
+                    pDate == activePreventiveDate
+                }
+            } else {
+                emptyList()
             }
             val matchedAddressIds = matchedDocs.mapNotNull { it.getString("addressId")?.trim()?.takeIf { id -> id.isNotBlank() } }.toSet()
 
-            Log.d(TAG, "Preventivas da rota ativa para $normTechName (${activeRouteDates.joinToString()}): ${matchedDocs.size}")
+            Log.d(TAG, "Preventivas da rota ativa para $normTechName (alvo=$targetDate, efetiva=${activePreventiveDate ?: "nenhuma"}, janela=$minPastDate..$targetDate): ${matchedDocs.size}")
 
             // Busca em PARALELO apenas os endereços que não possuem dados embutidos suficientes
             val addressMap = java.util.concurrent.ConcurrentHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
@@ -489,7 +515,7 @@ class ServiceOrderRepository(private val context: Context) {
                     val tName = (doc.getString("technicianName") ?: doc.getString("technician1") ?: "").trim().uppercase()
                     val t2Id = (doc.getString("technician2Id") ?: "").trim().uppercase()
                     val t2Name = (doc.getString("technician2") ?: "").trim().uppercase()
-                    val pDate = (doc.getString("plannedDate") ?: (doc.getString("openedAt")?.take(10) ?: "")).trim()
+                    val pDate = (doc.getString("plannedDate") ?: (doc.getString("openedAt")?.take(10) ?: "")).trim().take(10)
                     val status = doc.getString("status") ?: "aberta"
 
                     val matchesTech = matchesTechResilient(tId, normTechName, normTechId) ||
@@ -497,7 +523,8 @@ class ServiceOrderRepository(private val context: Context) {
                                       matchesTechResilient(t2Id, normTechName, normTechId) ||
                                       matchesTechResilient(t2Name, normTechName, normTechId)
 
-                    val matchesDate = pDate.startsWith(targetDate) || pDate.startsWith(currentMonth)
+                    val isFutureDate = isIsoDate(pDate) && pDate > targetDate
+                    val matchesDate = !isFutureDate && (pDate.isBlank() || pDate >= minPastDate || pDate.startsWith(currentMonth))
 
                     if (matchesTech && matchesDate && status != "cancelada") {
                         val cId = doc.getString("clientId") ?: ""
@@ -611,8 +638,30 @@ class ServiceOrderRepository(private val context: Context) {
                                 }
                             }
 
+                            val apiMinPastDate = subtractDays(targetDate, 7)
+                            val eligibleApiRecords = mutableListOf<JSONObject>()
                             for (i in 0 until recordsArr.length()) {
                                 val rec = recordsArr.getJSONObject(i)
+                                val rDate = rec.optString("plannedDate", "").trim().take(10)
+                                if (isIsoDate(rDate) && rDate <= targetDate && rDate >= apiMinPastDate) {
+                                    eligibleApiRecords.add(rec)
+                                }
+                            }
+                            val apiDatesDesc = eligibleApiRecords
+                                .map { it.optString("plannedDate", "").trim().take(10) }
+                                .distinct()
+                                .sortedDescending()
+                            val apiActiveDate = when {
+                                apiDatesDesc.contains(targetDate) -> targetDate
+                                else -> apiDatesDesc.firstOrNull { it < targetDate && it >= apiMinPastDate }
+                            }
+                            val filteredApiRecords = if (apiActiveDate != null) {
+                                eligibleApiRecords.filter { it.optString("plannedDate", "").trim().take(10) == apiActiveDate }
+                            } else {
+                                emptyList()
+                            }
+
+                            for (rec in filteredApiRecords) {
                                 val recId = rec.optString("id", UUID.randomUUID().toString())
                                 val addrId = rec.optString("addressId", "")
                                 val addrObj = addrsMap[addrId]
@@ -754,6 +803,8 @@ class ServiceOrderRepository(private val context: Context) {
 
                             for (i in 0 until osArr.length()) {
                                 val os = osArr.getJSONObject(i)
+                                val osDate = os.optString("plannedDate", "").trim().take(10)
+                                if (isIsoDate(osDate) && osDate > targetDate) continue
                                 val osId = os.optString("id", UUID.randomUUID().toString())
                                 val clientId = os.optString("clientId", "")
                                 val addrId = os.optString("addressId", "")

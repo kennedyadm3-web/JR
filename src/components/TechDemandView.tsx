@@ -663,9 +663,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   const [loginPin, setLoginPin] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  // Solicita permissão de localização no Android/Navegador logo na abertura e mantém cache atualizado
+  // Solicita permissão de localização apenas para técnicos em campo (PWA/Tablet), nunca para usuários administrativos
   useEffect(() => {
-    if (!isTabletMode) return;
+    if (!isTabletMode || userRole !== UserRole.TECHNICIAN) return;
 
     console.log("[GPS] Rastreamento de localização ativado para os técnicos.");
     
@@ -711,7 +711,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         navigator.geolocation.clearWatch(watchId);
       };
     }
-  }, [isTabletMode]);
+  }, [isTabletMode, userRole]);
 
   useEffect(() => {
     if (userRole === UserRole.TECHNICIAN) {
@@ -6072,18 +6072,60 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
             techs={techs}
             month={month}
             onMonthChange={setMonth}
-            onRefreshEquipments={async () => {
-              const freshEqs = await dataService.getEquipments();
-              setEquipments(freshEqs || []);
+            onEquipmentsLoaded={(loadedAddressId, loadedList) => {
+              const cleanAddr = String(loadedAddressId || '').trim();
+              if (!cleanAddr) return;
+              setEquipments(prev => {
+                const others = prev.filter(e => String(e.addressId || '').trim() !== cleanAddr);
+                return [...others, ...loadedList];
+              });
             }}
-            onPrintChecklist={(record, options) => {
+            onRefreshEquipments={async (targetAddressId?: string) => {
+              if (targetAddressId) {
+                const cleanAddr = String(targetAddressId).trim();
+                const freshAddrEqs = await dataService.getEquipments(cleanAddr, false);
+                setEquipments(prev => {
+                  const others = prev.filter(e => String(e.addressId || '').trim() !== cleanAddr);
+                  return [...others, ...(freshAddrEqs || [])];
+                });
+              }
+            }}
+            onPrintChecklist={async (record, options) => {
+               const addrId = String(record.addressId || '').trim();
+               if (addrId && !equipmentsByAddressMap.has(addrId)) {
+                 try {
+                   const addrEqs = await dataService.getEquipments(addrId, false);
+                   if (addrEqs && addrEqs.length > 0) {
+                     setEquipments(prev => {
+                       const others = prev.filter(e => String(e.addressId || '').trim() !== addrId);
+                       return [...others, ...addrEqs];
+                     });
+                   }
+                 } catch (e) {
+                   console.warn('Erro ao carregar equipamentos antes de imprimir PMOC:', e);
+                 }
+               }
                setIsPrintingBlank(false);
                setPrintPhotosOption(options?.printPhotos ?? true);
                setPrintGeneralNotesOption(options?.printGeneralNotes ?? true);
                setIsPrintingChecklist(record);
                setTimeout(() => window.print(), 200);
             }}
-            onPrintBlankChecklist={(record, options) => {
+            onPrintBlankChecklist={async (record, options) => {
+               const addrId = String(record.addressId || '').trim();
+               if (addrId && !equipmentsByAddressMap.has(addrId)) {
+                 try {
+                   const addrEqs = await dataService.getEquipments(addrId, false);
+                   if (addrEqs && addrEqs.length > 0) {
+                     setEquipments(prev => {
+                       const others = prev.filter(e => String(e.addressId || '').trim() !== addrId);
+                       return [...others, ...addrEqs];
+                     });
+                   }
+                 } catch (e) {
+                   console.warn('Erro ao carregar equipamentos antes de imprimir PMOC em branco:', e);
+                 }
+               }
                setIsPrintingBlank(true);
                setPrintPhotosOption(options?.printPhotos ?? true);
                setPrintGeneralNotesOption(options?.printGeneralNotes ?? true);

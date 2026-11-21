@@ -18,11 +18,12 @@ import {
   writeBatch,
   getDocsFromCache,
   getDocFromCache,
+  getCountFromServer,
   onSnapshot
 } from 'firebase/firestore';
 
 // Wrappers resilientes para funcionamento offline sem internet e proteção contra carregamento infinito
-const fetchWithTimeout = <T>(promise: Promise<T>, ms: number = 8000, errorMsg = 'Timeout'): Promise<T> => {
+const fetchWithTimeout = <T>(promise: Promise<T>, ms: number = 25000, errorMsg = 'Timeout'): Promise<T> => {
   let timer: any;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${errorMsg} (${ms}ms)`)), ms);
@@ -32,29 +33,86 @@ const fetchWithTimeout = <T>(promise: Promise<T>, ms: number = 8000, errorMsg = 
   });
 };
 
-const getDocs = async (q: any): Promise<any> => {
+const isClientOffline = (): boolean => {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+};
+
+const isRetryableFirestoreError = (error: any): boolean => {
+  const msg = String(error?.message || error || '').toLowerCase();
+  const code = String(error?.code || '').toLowerCase();
+  if (code === 'permission-denied' || msg.includes('permission') || msg.includes('insufficient')) {
+    return false;
+  }
+  if (code === 'resource-exhausted' || msg.includes('quota')) {
+    return false;
+  }
+  return (
+    msg.includes('timeout') ||
+    msg.includes('unavailable') ||
+    msg.includes('deadline') ||
+    msg.includes('network') ||
+    msg.includes('offline') ||
+    code === 'unavailable' ||
+    code === 'deadline-exceeded'
+  );
+};
+
+const getDocs = async (q: any, timeoutMs: number = 25000): Promise<any> => {
+  const attemptFetch = async (ms: number) => fetchWithTimeout(firestoreGetDocs(q), ms, 'Firestore getDocs timeout');
+
   try {
-    return await fetchWithTimeout(firestoreGetDocs(q), 8000, 'Firestore getDocs timeout');
-  } catch (error) {
-    console.warn('[Offline Mode/Timeout] Falha ao obter dados do servidor. Buscando do cache local...', error);
-    try {
+    if (isClientOffline()) {
       return await getDocsFromCache(q);
+    }
+    return await attemptFetch(timeoutMs);
+  } catch (firstError) {
+    // Tenta 1 reconexão automática para falhas transitórias / lentidão momentânea de rede
+    if (!isClientOffline() && isRetryableFirestoreError(firstError)) {
+      console.warn('[Firestore] Tentativa 1 falhou/expirou em getDocs. Tentando novamente...', firstError);
+      try {
+        await new Promise(resolve => setTimeout(resolve, 600));
+        return await attemptFetch(Math.max(timeoutMs, 30000));
+      } catch (retryError) {
+        firstError = retryError;
+      }
+    }
+
+    console.warn('[Offline Mode/Timeout] Falha ao obter dados do servidor. Verificando cache local...', firstError);
+    try {
+      const cacheSnap = await getDocsFromCache(q);
+      // CRÍTICO: Só usa o cache local se realmente existirem documentos em cache OU se o dispositivo estiver offline.
+      // Nunca devolve snapshot vazio silenciosamente quando o usuário está online e ocorreu erro/timeout de rede!
+      if (!cacheSnap.empty || isClientOffline()) {
+        return cacheSnap;
+      }
+      throw firstError;
     } catch (cacheErr) {
-      console.error('[Offline Mode] Falha crítica ao ler do cache local:', cacheErr);
-      throw error;
+      if (cacheErr !== firstError) {
+        console.error('[Offline Mode] Falha ao ler do cache local:', cacheErr);
+      }
+      throw firstError;
     }
   }
 };
 
-const getDoc = async (docRef: any): Promise<any> => {
+const getDoc = async (docRef: any, timeoutMs: number = 15000): Promise<any> => {
   try {
-    return await fetchWithTimeout(firestoreGetDoc(docRef), 8000, 'Firestore getDoc timeout');
-  } catch (error) {
-    console.warn('[Offline Mode/Timeout] Falha ao obter documento do servidor. Buscando do cache local...', error);
-    try {
+    if (isClientOffline()) {
       return await getDocFromCache(docRef);
+    }
+    return await fetchWithTimeout(firestoreGetDoc(docRef), timeoutMs, 'Firestore getDoc timeout');
+  } catch (error) {
+    console.warn('[Offline Mode/Timeout] Falha ao obter documento do servidor. Verificando cache local...', error);
+    try {
+      const cacheSnap = await getDocFromCache(docRef);
+      if (cacheSnap.exists() || isClientOffline()) {
+        return cacheSnap;
+      }
+      throw error;
     } catch (cacheErr) {
-      console.error('[Offline Mode] Falha crítica ao ler documento do cache local:', cacheErr);
+      if (cacheErr !== error) {
+        console.error('[Offline Mode] Falha crítica ao ler documento do cache local:', cacheErr);
+      }
       throw error;
     }
   }
@@ -328,6 +386,7 @@ interface CacheEntry {
 }
 
 const memoryCache: Record<string, CacheEntry> = {};
+const inFlightRequests: Record<string, Promise<any>> = {};
 
 // TTLs customizados por tipo de coleção para manter a operação em custo mínimo (em milissegundos)
 const TTL_CONFIG: Record<string, number> = {
@@ -336,6 +395,7 @@ const TTL_CONFIG: Record<string, number> = {
   technicians: 25 * 60 * 1000,
   route_configs: 25 * 60 * 1000,
   serviceCatalog: 25 * 60 * 1000,
+  service_catalog: 25 * 60 * 1000,
   service_order_settings: 25 * 60 * 1000,
   addresses: 15 * 60 * 1000,
   travelCards: 15 * 60 * 1000,
@@ -351,6 +411,9 @@ const TTL_CONFIG: Record<string, number> = {
   // Registros agendados e por data: 2 minutos (alta fidelidade para técnicos em campo)
   records_plannedDate: 2 * 60 * 1000,
   records_month: 2 * 60 * 1000,
+
+  // Ordens de Serviço: 3 minutos (invalidado imediatamente em criações/edições/cancelamentos)
+  service_orders: 3 * 60 * 1000,
   
   // Padrão geral: 60 segundos (em vez de 10s anteriores)
   default: 60 * 1000
@@ -382,6 +445,7 @@ const getCachedData = async (key: string, fetchFn: () => Promise<any>, customTtl
                    key.startsWith('route_configs') || 
                    key.startsWith('addresses') || 
                    key.startsWith('serviceCatalog') || 
+                   key.startsWith('service_catalog') || 
                    key.startsWith('service_order_settings');
 
   if (isStatic && typeof window !== 'undefined' && window.sessionStorage) {
@@ -397,19 +461,33 @@ const getCachedData = async (key: string, fetchFn: () => Promise<any>, customTtl
     } catch {}
   }
 
-  // 3. Busca fresca
-  const freshData = await fetchFn();
-  const entry = { data: freshData, timestamp: now };
-  memoryCache[key] = entry;
-
-  // Persiste no sessionStorage para dados estáticos
-  if (isStatic && typeof window !== 'undefined' && window.sessionStorage) {
-    try {
-      window.sessionStorage.setItem(`lefrio_cache_${key}`, JSON.stringify(entry));
-    } catch {}
+  // 3. Deduplicação de requisições simultâneas (evita sobrecarga de banda e timeouts por chamadas duplicadas)
+  if (inFlightRequests[key]) {
+    return inFlightRequests[key];
   }
 
-  return freshData;
+  // 4. Busca fresca
+  const requestPromise = (async () => {
+    try {
+      const freshData = await fetchFn();
+      const entry = { data: freshData, timestamp: Date.now() };
+      memoryCache[key] = entry;
+
+      // Persiste no sessionStorage para dados estáticos
+      if (isStatic && typeof window !== 'undefined' && window.sessionStorage) {
+        try {
+          window.sessionStorage.setItem(`lefrio_cache_${key}`, JSON.stringify(entry));
+        } catch {}
+      }
+
+      return freshData;
+    } finally {
+      delete inFlightRequests[key];
+    }
+  })();
+
+  inFlightRequests[key] = requestPromise;
+  return requestPromise;
 };
 
 const clearCache = (prefix?: string) => {
@@ -1492,7 +1570,9 @@ export const dataService = {
     }, 2 * 60 * 1000);
   },
 
-  subscribePreCompletedRecords(callback: (records: MaintenanceRecord[]) => void): () => void {
+  subscribePreCompletedRecords(
+    callback: (records: MaintenanceRecord[], meta?: { fromCache: boolean }) => void
+  ): () => void {
     try {
       const q = query(
         collection(db, COLLECTIONS.RECORDS),
@@ -1521,7 +1601,7 @@ export const dataService = {
           return r.status === MaintenanceStatus.PRE_COMPLETED;
         });
 
-        callback(validPending);
+        callback(validPending, { fromCache: snapshot.metadata.fromCache });
       }, (err) => {
         console.warn('[Realtime Listener] Erro em subscribePreCompletedRecords:', err);
       });
@@ -2567,7 +2647,10 @@ export const dataService = {
     }
   },
 
-  subscribeNotifications(userId: string, callback: (notifications: NotificationItem[]) => void) {
+  subscribeNotifications(
+    userId: string,
+    callback: (notifications: NotificationItem[], meta?: { fromCache: boolean }) => void
+  ) {
     const q = query(
       collection(db, COLLECTIONS.NOTIFICATIONS),
       where('userId', '==', userId),
@@ -2575,7 +2658,7 @@ export const dataService = {
     );
     return onSnapshot(q, (snapshot) => {
       const items = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as NotificationItem));
-      callback(items);
+      callback(items, { fromCache: snapshot.metadata.fromCache });
     }, (error) => {
       console.error('Error in notifications subscription:', error);
     });
@@ -3271,17 +3354,46 @@ export const dataService = {
     }
   },
 
-  // Equipments
+  // Equipments (Carregamento 100% sob demanda por endereço quando addressId é informado)
   async getEquipments(addressId?: string, includeDeactivated: boolean = false): Promise<Equipment[]> {
-    const cacheKey = addressId 
-      ? `equipments_address_${addressId}_${includeDeactivated ? 'all' : 'active'}` 
+    const cleanAddressId = addressId ? String(addressId).trim() : '';
+    const cacheKey = cleanAddressId
+      ? `equipments_address_${cleanAddressId}_${includeDeactivated ? 'all' : 'active'}`
       : `equipments_all_${includeDeactivated ? 'all' : 'active'}`;
+
+    const sortEquipments = (items: Equipment[]) =>
+      items.sort((a, b) => {
+        const labelA = parseInt(a.label, 10) || 0;
+        const labelB = parseInt(b.label, 10) || 0;
+        if (labelA !== labelB) {
+          return labelA - labelB;
+        }
+        return (a.id || '').localeCompare(b.id || '');
+      });
+
     return getCachedData(cacheKey, async () => {
       try {
-        // 1. Tenta buscar pelo endpoint otimizado do backend (instantâneo, sem timeout e protegido)
+        // Quando addressId é informado: consulta DIRETA no Firestore filtrando somente esse endereço (rápida, leve e sem carregar todos os outros endereços)
+        if (cleanAddressId) {
+          try {
+            const q = query(collection(db, COLLECTIONS.EQUIPMENTS), where('addressId', '==', cleanAddressId));
+            const snapshot = await getDocs(q);
+            let items = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Equipment));
+
+            if (!includeDeactivated) {
+              items = items.filter(eq => eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
+            }
+
+            return sortEquipments(items);
+          } catch (fsErr) {
+            console.warn('[getEquipments] Fallback para API ao buscar endereço sob demanda:', fsErr);
+          }
+        }
+
+        // Fallback ou consulta global: tenta endpoint do backend
         try {
           const params = new URLSearchParams();
-          if (addressId) params.append('addressId', addressId);
+          if (cleanAddressId) params.append('addressId', cleanAddressId);
           if (includeDeactivated) params.append('includeDeactivated', 'true');
           const res = await fetch(`/api/equipments?${params.toString()}`);
           if (res.ok) {
@@ -3294,28 +3406,18 @@ export const dataService = {
           console.warn('[getEquipments] API indisponível, usando fallback Firestore:', apiErr);
         }
 
-        // 2. Fallback direto ao Firestore
-        let q;
-        if (addressId) {
-          q = query(collection(db, COLLECTIONS.EQUIPMENTS), where('addressId', '==', addressId));
-        } else {
-          q = collection(db, COLLECTIONS.EQUIPMENTS);
-        }
+        // Fallback direto ao Firestore
+        const q = cleanAddressId
+          ? query(collection(db, COLLECTIONS.EQUIPMENTS), where('addressId', '==', cleanAddressId))
+          : collection(db, COLLECTIONS.EQUIPMENTS);
         const snapshot = await getDocs(q);
         let items = snapshot.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Equipment));
-        
+
         if (!includeDeactivated) {
           items = items.filter(eq => eq.status !== 'deactivated' && eq.active !== false && !eq.isDeactivated);
         }
 
-        return items.sort((a, b) => {
-          const labelA = parseInt(a.label, 10) || 0;
-          const labelB = parseInt(b.label, 10) || 0;
-          if (labelA !== labelB) {
-            return labelA - labelB;
-          }
-          return a.id.localeCompare(b.id);
-        });
+        return sortEquipments(items);
       } catch (e) {
         handleFirestoreError(e, OperationType.LIST, COLLECTIONS.EQUIPMENTS);
         return [];
@@ -3327,11 +3429,23 @@ export const dataService = {
     const cacheKey = 'equipments_deactivated_all';
     return getCachedData(cacheKey, async () => {
       try {
-        const snapshot = await getDocs(collection(db, COLLECTIONS.EQUIPMENTS));
-        const items = snapshot.docs
-          .map(doc => ({ id: doc.id, ...(doc.data() as any) } as Equipment))
-          .filter(eq => eq.status === 'deactivated' || eq.active === false || eq.isDeactivated === true);
-        
+        // Consultas direcionadas apenas para equipamentos desativados (evita baixar toda a coleção de equipamentos ativos)
+        const colRef = collection(db, COLLECTIONS.EQUIPMENTS);
+        const [snapStatus, snapFlag, snapActive] = await Promise.all([
+          getDocs(query(colRef, where('status', '==', 'deactivated'))).catch(() => null),
+          getDocs(query(colRef, where('isDeactivated', '==', true))).catch(() => null),
+          getDocs(query(colRef, where('active', '==', false))).catch(() => null),
+        ]);
+
+        const map = new Map<string, Equipment>();
+        [snapStatus, snapFlag, snapActive].forEach((snap) => {
+          if (!snap) return;
+          snap.docs.forEach((d) => {
+            map.set(d.id, { id: d.id, ...(d.data() as any) } as Equipment);
+          });
+        });
+
+        const items = Array.from(map.values());
         return items.sort((a, b) => {
           const dateA = a.deactivatedAt ? new Date(a.deactivatedAt).getTime() : 0;
           const dateB = b.deactivatedAt ? new Date(b.deactivatedAt).getTime() : 0;
@@ -3890,33 +4004,141 @@ export const dataService = {
   },
 
   // Service Orders (Ordens de Serviço - OS)
-  async getServiceOrders(clientId?: string, limitCount?: number): Promise<ServiceOrder[]> {
-    const cacheKey = clientId 
-      ? `service_orders_client_${clientId}${limitCount ? `_limit_${limitCount}` : ''}` 
+  // Utiliza busca em lotes paginados (chunks) para evitar timeouts em coleções com anexos/fotos Base64
+  async getServiceOrders(
+    clientId?: string,
+    limitCount?: number,
+    options?: {
+      forceRefresh?: boolean;
+      onProgress?: (partialOrders: ServiceOrder[], loadedCount: number) => void;
+    }
+  ): Promise<ServiceOrder[]> {
+    const cacheKey = clientId
+      ? `service_orders_client_${clientId}${limitCount ? `_limit_${limitCount}` : ''}`
       : `service_orders_all${limitCount ? `_limit_${limitCount}` : ''}`;
+
+    if (options?.forceRefresh) {
+      delete memoryCache[cacheKey];
+    }
+
     return getCachedData(cacheKey, async () => {
-      try {
-        let snapshot;
-        const constraints: any[] = [];
-        if (clientId) {
-          constraints.push(where('clientId', '==', clientId));
+      const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
+      const baseQuery = clientId ? query(baseRef, where('clientId', '==', clientId)) : baseRef;
+
+      // Modo offline: lê diretamente do cache persistente IndexedDB
+      if (isClientOffline()) {
+        try {
+          const cacheSnap = await getDocsFromCache(
+            limitCount && limitCount > 0 ? query(baseQuery, limit(limitCount)) : baseQuery
+          );
+          const cachedOrders = cacheSnap.docs.map(d =>
+            normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+          );
+          return sortOrdersByCreationDateDesc(cachedOrders);
+        } catch (e) {
+          handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
+          return [];
         }
-        if (limitCount && limitCount > 0) {
-          constraints.push(limit(limitCount));
+      }
+
+      // Se um limite pequeno foi solicitado explicitamente, busca em chamada única
+      if (limitCount && limitCount > 0 && limitCount <= 50) {
+        try {
+          const q = query(baseQuery, limit(limitCount));
+          const snapshot = await getDocs(q, 30000);
+          const orders = snapshot.docs.map((d: any) =>
+            normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+          );
+          return sortOrdersByCreationDateDesc(orders);
+        } catch (e) {
+          handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
+          return [];
+        }
+      }
+
+      // Carregamento resiliente em lotes de 40 O.S. (evita estourar timeout quando há muitas fotos/anexos Base64)
+      const BATCH_SIZE = 40;
+      const MAX_BATCHES = 50; // Até 2.000 O.S. por consulta
+      const collected: ServiceOrder[] = [];
+      let lastDoc: any = null;
+
+      try {
+        for (let batchIdx = 0; batchIdx < MAX_BATCHES; batchIdx++) {
+          const remaining = limitCount && limitCount > 0 ? limitCount - collected.length : BATCH_SIZE;
+          if (remaining <= 0) break;
+          const currentBatchSize = Math.min(BATCH_SIZE, remaining);
+
+          const constraints: any[] = [];
+          if (clientId) {
+            constraints.push(where('clientId', '==', clientId));
+          }
+          if (lastDoc) {
+            constraints.push(startAfter(lastDoc));
+          }
+          constraints.push(limit(currentBatchSize));
+
+          const chunkQuery = query(baseRef, ...constraints);
+          const snap = await getDocs(chunkQuery, 25000);
+
+          if (!snap.docs || snap.docs.length === 0) {
+            break;
+          }
+
+          for (const d of snap.docs) {
+            collected.push(
+              normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+            );
+          }
+
+          lastDoc = snap.docs[snap.docs.length - 1];
+
+          if (options?.onProgress) {
+            try {
+              options.onProgress(sortOrdersByCreationDateDesc(collected), collected.length);
+            } catch {}
+          }
+
+          if (snap.docs.length < currentBatchSize) {
+            break;
+          }
         }
 
-        if (constraints.length > 0) {
-          const q = query(collection(db, COLLECTIONS.SERVICE_ORDERS), ...constraints);
-          snapshot = await getDocs(q);
-        } else {
-          snapshot = await getDocs(collection(db, COLLECTIONS.SERVICE_ORDERS));
+        return sortOrdersByCreationDateDesc(collected);
+      } catch (chunkErr: any) {
+        // Se falhar por pré-condição de cursor com filtro, tenta consulta única com timeout estendido (45s)
+        const errMsg = String(chunkErr?.message || chunkErr || '').toLowerCase();
+        if (collected.length === 0 && (errMsg.includes('failed-precondition') || errMsg.includes('index'))) {
+          try {
+            const fallbackQ = limitCount && limitCount > 0 ? query(baseQuery, limit(limitCount)) : baseQuery;
+            const snap = await getDocs(fallbackQ, 45000);
+            const orders = snap.docs.map((d: any) =>
+              normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+            );
+            return sortOrdersByCreationDateDesc(orders);
+          } catch (fallbackErr) {
+            handleFirestoreError(fallbackErr, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
+            return [];
+          }
         }
-        const orders = snapshot.docs.map(doc => normalizeServiceOrderStatus({ id: doc.id, ...(doc.data() as any) } as ServiceOrder));
-        
-        // Ordenar rigorosamente por data de criação: da mais recente para a mais antiga (independente de edições)
-        return sortOrdersByCreationDateDesc(orders);
-      } catch (e) {
-        handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
+
+        // Se já havia carregado parte dos lotes antes de uma falha transitória, ou se há cache local preenchido, aproveita o melhor dado disponível
+        if (collected.length > 0) {
+          console.warn(`[getServiceOrders] Falha após carregar ${collected.length} O.S.; retornando lote parcial:`, chunkErr);
+          return sortOrdersByCreationDateDesc(collected);
+        }
+
+        try {
+          const cacheSnap = await getDocsFromCache(baseQuery);
+          if (!cacheSnap.empty) {
+            console.warn('[getServiceOrders] Usando cache persistente local após falha de rede.');
+            const cachedOrders = cacheSnap.docs.map(d =>
+              normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+            );
+            return sortOrdersByCreationDateDesc(cachedOrders);
+          }
+        } catch {}
+
+        handleFirestoreError(chunkErr, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
         return [];
       }
     });
@@ -3934,48 +4156,361 @@ export const dataService = {
     }
   },
 
-  // Consulta paginada direta no Firestore com cursor (para volumes massivos)
+  // Contagem agregada leve no servidor (sem transferir documentos inteiros)
+  async getServiceOrdersCounts(clientId?: string, forceRefresh = false): Promise<{ total: number | null; workshop: number | null }> {
+    const cacheKey = `service_orders_counts_${clientId || 'all'}`;
+    if (forceRefresh) {
+      clearCache(cacheKey);
+    }
+    return getCachedData(cacheKey, async () => {
+      try {
+        const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
+        const totalQuery = clientId ? query(baseRef, where('clientId', '==', clientId)) : baseRef;
+        const workshopQuery = clientId
+          ? query(baseRef, where('clientId', '==', clientId), where('isWorkshop', '==', true))
+          : query(baseRef, where('isWorkshop', '==', true));
+
+        const [totalRes, workshopRes] = await Promise.allSettled([
+          fetchWithTimeout(getCountFromServer(totalQuery), 15000, 'Timeout contagem total O.S.'),
+          fetchWithTimeout(getCountFromServer(workshopQuery), 15000, 'Timeout contagem oficina O.S.')
+        ]);
+
+        const total = totalRes.status === 'fulfilled' ? totalRes.value.data().count : null;
+        const workshop = workshopRes.status === 'fulfilled' ? workshopRes.value.data().count : null;
+        return { total, workshop };
+      } catch (e) {
+        console.warn('[getServiceOrdersCounts] Não foi possível obter contagem agregada:', e);
+        return { total: null, workshop: null };
+      }
+    }, 60 * 1000);
+  },
+
+  // Consulta paginada sob demanda no Firestore (carrega apenas N últimas O.S. criadas por página)
   async getServiceOrdersPaginated(options: {
     clientId?: string;
     pageSize?: number;
     lastDoc?: any;
     status?: string;
-  }): Promise<{ orders: ServiceOrder[]; lastDoc: any; hasMore: boolean }> {
+    workshopOnly?: boolean;
+    hasDateFilter?: boolean;
+  }): Promise<{ orders: ServiceOrder[]; lastDoc: any; hasMore: boolean; mode: 'cursor' | 'filtered_all' }> {
+    const pageSize = options.pageSize || 25;
+    const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
+    const hasStatusFilter = Boolean(options.status && options.status !== 'all' && options.status !== 'tech_finalized');
+    const hasTechFinalizedFilter = options.status === 'tech_finalized';
+    const hasExtraFilters = Boolean(options.clientId || hasStatusFilter || hasTechFinalizedFilter || options.workshopOnly || options.hasDateFilter);
+
+    // Caminho principal ultraleve (sem filtros): baixa exatamente pageSize (+1) documentos ordenados por criação DESC
+    if (!hasExtraFilters) {
+      try {
+        const constraints: any[] = [orderBy('createdAt', 'desc')];
+        if (options.lastDoc) {
+          constraints.push(startAfter(options.lastDoc));
+        }
+        constraints.push(limit(pageSize + 1));
+
+        const q = query(baseRef, ...constraints);
+        const snapshot = await getDocs(q, 25000);
+
+        const hasMore = snapshot.docs.length > pageSize;
+        const resultDocs = hasMore ? snapshot.docs.slice(0, pageSize) : snapshot.docs;
+        const lastDoc = resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null;
+        const orders = resultDocs.map(d =>
+          normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+        );
+        return { orders, lastDoc, hasMore, mode: 'cursor' };
+      } catch (e: any) {
+        // Fallback para cache persistente local em caso de offline/rede instável
+        try {
+          const fallbackConstraints: any[] = [orderBy('createdAt', 'desc')];
+          if (options.lastDoc) fallbackConstraints.push(startAfter(options.lastDoc));
+          fallbackConstraints.push(limit(pageSize + 1));
+          const cacheSnap = await getDocsFromCache(query(baseRef, ...fallbackConstraints));
+          if (!cacheSnap.empty) {
+            const hasMore = cacheSnap.docs.length > pageSize;
+            const resultDocs = hasMore ? cacheSnap.docs.slice(0, pageSize) : cacheSnap.docs;
+            const lastDoc = resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null;
+            const orders = resultDocs.map(d =>
+              normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+            );
+            return { orders, lastDoc, hasMore, mode: 'cursor' };
+          }
+        } catch {}
+        throw e;
+      }
+    }
+
+    // Com filtros ativos (Status, Oficina, Período ou Cliente): usa o filtro mais seletivo no servidor sem exigir índice composto
     try {
-      const pageSize = options.pageSize || 25;
-      const constraints: any[] = [];
-      
+      const serverConstraints: any[] = [];
       if (options.clientId) {
-        constraints.push(where('clientId', '==', options.clientId));
+        serverConstraints.push(where('clientId', '==', options.clientId));
+      } else if (options.workshopOnly) {
+        serverConstraints.push(where('isWorkshop', '==', true));
+      } else if (hasStatusFilter && options.status) {
+        serverConstraints.push(where('status', '==', options.status));
+      } else if (hasTechFinalizedFilter) {
+        serverConstraints.push(where('techFinalized', '==', true));
       }
-      if (options.status && options.status !== 'all') {
-        constraints.push(where('status', '==', options.status));
-      }
-      if (options.lastDoc) {
-        constraints.push(startAfter(options.lastDoc));
-      }
-      constraints.push(limit(pageSize + 1));
 
-      const q = query(collection(db, COLLECTIONS.SERVICE_ORDERS), ...constraints);
-      const snapshot = await getDocs(q);
-      
-      const hasMore = snapshot.docs.length > pageSize;
-      const resultDocs = hasMore ? snapshot.docs.slice(0, pageSize) : snapshot.docs;
-      const lastDoc = resultDocs.length > 0 ? resultDocs[resultDocs.length - 1] : null;
+      if (serverConstraints.length > 0) {
+        const q = query(baseRef, ...serverConstraints);
+        const snapshot = await getDocs(q, 30000);
+        const orders = snapshot.docs.map(d =>
+          normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+        );
+        return { orders: sortOrdersByCreationDateDesc(orders), lastDoc: null, hasMore: false, mode: 'filtered_all' };
+      }
 
-      const orders = resultDocs.map(doc => normalizeServiceOrderStatus({ id: doc.id, ...(doc.data() as any) } as ServiceOrder));
-      return { orders: sortOrdersByCreationDateDesc(orders), lastDoc, hasMore };
+      // Caso tenha apenas filtro de data na lista principal, busca com getServiceOrders (em lotes/cache) para aplicar regra exata de data de finalização
+      const allOrders = await this.getServiceOrders(options.clientId);
+      return { orders: allOrders, lastDoc: null, hasMore: false, mode: 'filtered_all' };
     } catch (e) {
       handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
-      return { orders: [], lastDoc: null, hasMore: false };
+      throw e;
     }
+  },
+
+  // Busca direta e exata pelo número da O.S. (executada somente ao pressionar Enter / clicar em Buscar)
+  async findServiceOrderByExactNumber(rawOsNumber: string, clientId?: string): Promise<ServiceOrder[]> {
+    const trimmed = String(rawOsNumber || '').trim();
+    if (!trimmed) return [];
+
+    const withoutHash = trimmed.replace(/^#+/, '').trim();
+    if (!withoutHash) return [];
+
+    const upper = withoutHash.toUpperCase();
+    const candidates = Array.from(
+      new Set([upper, withoutHash, `#${upper}`, `#${withoutHash}`].filter(Boolean))
+    ).slice(0, 10);
+
+    const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
+    const idCandidates = Array.from(new Set([upper, withoutHash]));
+
+    try {
+      const queries: Promise<any>[] = [
+        getDocs(query(baseRef, where('osNumber', 'in', candidates)), 20000)
+      ];
+
+      // Também checa por ID direto do documento (para O.S. legadas cujo número é o próprio ID)
+      for (const idCand of idCandidates) {
+        if (!idCand.includes('/')) {
+          queries.push(getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, idCand), 15000));
+        }
+      }
+
+      const settled = await Promise.allSettled(queries);
+      const foundMap = new Map<string, ServiceOrder>();
+
+      // 1. Resultados da query where('osNumber', 'in', ...)
+      const queryRes = settled[0];
+      if (queryRes.status === 'fulfilled' && queryRes.value?.docs) {
+        for (const d of queryRes.value.docs) {
+          const parsed = normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder);
+          if (!clientId || parsed.clientId === clientId) {
+            foundMap.set(parsed.id, parsed);
+          }
+        }
+      }
+
+      // 2. Resultados da busca por ID exato
+      for (let i = 1; i < settled.length; i++) {
+        const docRes = settled[i];
+        if (docRes.status === 'fulfilled' && docRes.value?.exists?.()) {
+          const parsed = normalizeServiceOrderStatus({
+            id: docRes.value.id,
+            ...(docRes.value.data() as any)
+          } as ServiceOrder);
+          if (!clientId || parsed.clientId === clientId) {
+            foundMap.set(parsed.id, parsed);
+          }
+        }
+      }
+
+      return sortOrdersByCreationDateDesc(Array.from(foundMap.values()));
+    } catch (e) {
+      handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
+      throw e;
+    }
+  },
+
+  // Consulta sob demanda para o Relatório Avançado de O.S. (busca apenas o recorte definido pelos filtros)
+  async queryServiceOrdersForReport(filters: {
+    clientId?: string;
+    status?: string;
+    serviceCompany?: string;
+    type?: string;
+    workshopFilter?: 'all' | 'workshop_only' | 'standard_only';
+    startDate?: string;
+    endDate?: string;
+    technicianId?: string;
+  }): Promise<ServiceOrder[]> {
+    const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
+    try {
+      // Seleciona o filtro mais restritivo para executar no servidor sem depender de índices compostos
+      let serverQuery: any = null;
+      if (filters.clientId && filters.clientId !== 'all') {
+        serverQuery = query(baseRef, where('clientId', '==', filters.clientId));
+      } else if (filters.workshopFilter === 'workshop_only') {
+        serverQuery = query(baseRef, where('isWorkshop', '==', true));
+      } else if (filters.status && filters.status !== 'all') {
+        serverQuery = query(baseRef, where('status', '==', filters.status));
+      } else if (filters.serviceCompany && filters.serviceCompany !== 'all') {
+        serverQuery = query(baseRef, where('serviceCompany', '==', filters.serviceCompany));
+      } else if (filters.type && filters.type !== 'all') {
+        serverQuery = query(baseRef, where('type', '==', filters.type));
+      }
+
+      if (serverQuery) {
+        const snapshot = await getDocs(serverQuery, 35000);
+        const orders = snapshot.docs.map((d: any) =>
+          normalizeServiceOrderStatus({ id: d.id, ...(d.data() as any) } as ServiceOrder)
+        );
+        return sortOrdersByCreationDateDesc(orders);
+      }
+
+      // Quando o usuário filtra exclusivamente por Período, Técnico ou "Sem Oficina", busca em lotes via getServiceOrders
+      const allOrders = await this.getServiceOrders(
+        filters.clientId && filters.clientId !== 'all' ? filters.clientId : undefined
+      );
+      return allOrders;
+    } catch (e) {
+      handleFirestoreError(e, OperationType.LIST, COLLECTIONS.SERVICE_ORDERS);
+      throw e;
+    }
+  },
+
+  // Busca mídias pesadas (fotos e assinaturas Base64) da O.S. sob demanda na subcoleção dedicada
+  async getServiceOrderMedia(orderId: string): Promise<{
+    photos?: string[];
+    clientSignature?: string;
+    techSignature?: string;
+  } | null> {
+    if (!orderId) return null;
+    const cacheKey = `service_order_media_${orderId}`;
+    return getCachedData(cacheKey, async () => {
+      try {
+        const mediaRef = doc(db, COLLECTIONS.SERVICE_ORDERS, orderId, 'media', 'attachments');
+        const snap = await getDoc(mediaRef, 20000);
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          return {
+            photos: Array.isArray(data.photos) ? data.photos : [],
+            clientSignature: data.clientSignature || undefined,
+            techSignature: data.techSignature || undefined
+          };
+        }
+        return null;
+      } catch (e) {
+        console.warn(`[getServiceOrderMedia] Não foi possível carregar mídia sob demanda da O.S. ${orderId}:`, e);
+        return null;
+      }
+    }, 5 * 60 * 1000);
+  },
+
+  // Hidrata uma O.S. com fotos e assinaturas sob demanda (retrocompatível com O.S. antigas que ainda têm mídia inline)
+  async hydrateServiceOrderMedia(order: ServiceOrder): Promise<ServiceOrder> {
+    if (!order || !order.id) return order;
+    const needsMedia =
+      Boolean(order.mediaExternalized) ||
+      (Boolean(order.hasClientSignature) && !order.clientSignature) ||
+      (Boolean(order.hasTechSignature) && !order.techSignature) ||
+      ((order.photoCount || 0) > 0 && (!order.photos || order.photos.length === 0));
+
+    if (!needsMedia) return order;
+
+    const media = await this.getServiceOrderMedia(order.id);
+    if (!media) return order;
+
+    return {
+      ...order,
+      photos: (order.photos && order.photos.length > 0) ? order.photos : (media.photos || []),
+      clientSignature: order.clientSignature || media.clientSignature,
+      techSignature: order.techSignature || media.techSignature
+    };
+  },
+
+  // Migração segura em lotes para mover fotos/assinaturas Base64 de O.S. antigas para a subcoleção sob demanda
+  async optimizeServiceOrdersMedia(
+    orders: ServiceOrder[],
+    onProgress?: (stats: { processed: number; total: number; migrated: number; failed: number }) => void
+  ): Promise<{ total: number; migrated: number; failed: number }> {
+    const legacyHeavy = orders.filter(o =>
+      Boolean(o && o.id) &&
+      (
+        Boolean(o.clientSignature && String(o.clientSignature).trim().length > 0) ||
+        Boolean(o.techSignature && String(o.techSignature).trim().length > 0) ||
+        (Array.isArray(o.photos) && o.photos.length > 0)
+      )
+    );
+
+    const total = legacyHeavy.length;
+    let processed = 0;
+    let migrated = 0;
+    let failed = 0;
+
+    if (total === 0) {
+      return { total: 0, migrated: 0, failed: 0 };
+    }
+
+    const CONCURRENCY = 4;
+    for (let i = 0; i < legacyHeavy.length; i += CONCURRENCY) {
+      const batch = legacyHeavy.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (order) => {
+          try {
+            const mediaPayload: any = { updatedAt: serverTimestamp() };
+            const hasPhotos = Array.isArray(order.photos) && order.photos.length > 0;
+            const hasClientSig = Boolean(order.clientSignature && String(order.clientSignature).trim().length > 0);
+            const hasTechSig = Boolean(order.techSignature && String(order.techSignature).trim().length > 0);
+
+            if (hasPhotos) mediaPayload.photos = order.photos;
+            if (hasClientSig) mediaPayload.clientSignature = order.clientSignature;
+            if (hasTechSig) mediaPayload.techSignature = order.techSignature;
+
+            // 1. Grava primeiro na subcoleção segura (nunca apaga do pai antes de confirmar gravação!)
+            const mediaRef = doc(db, COLLECTIONS.SERVICE_ORDERS, order.id, 'media', 'attachments');
+            await setDoc(mediaRef, mediaPayload, { merge: true });
+
+            // 2. Remove os campos Base64 pesados do documento principal e grava indicadores leves
+            const parentUpdate: any = {
+              hasClientSignature: hasClientSig,
+              hasTechSignature: hasTechSig,
+              photoCount: hasPhotos ? order.photos!.length : 0,
+              mediaExternalized: true
+            };
+            if (hasPhotos) parentUpdate.photos = deleteField();
+            if (hasClientSig) parentUpdate.clientSignature = deleteField();
+            if (hasTechSig) parentUpdate.techSignature = deleteField();
+
+            await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), parentUpdate);
+            clearCache(`service_order_media_${order.id}`);
+            migrated++;
+          } catch (err) {
+            console.warn(`[optimizeServiceOrdersMedia] Falha ao otimizar O.S. ${order.id}:`, err);
+            failed++;
+          } finally {
+            processed++;
+            if (onProgress) {
+              try {
+                onProgress({ processed, total, migrated, failed });
+              } catch {}
+            }
+          }
+        })
+      );
+    }
+
+    clearCache('service_orders_');
+    return { total, migrated, failed };
   },
 
   async getServiceOrder(id: string): Promise<ServiceOrder | null> {
     try {
       const docSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id));
       if (docSnap.exists()) {
-        return normalizeServiceOrderStatus({ id: docSnap.id, ...docSnap.data() } as ServiceOrder);
+        const order = normalizeServiceOrderStatus({ id: docSnap.id, ...docSnap.data() } as ServiceOrder);
+        return await this.hydrateServiceOrderMedia(order);
       }
       return null;
     } catch (e) {
@@ -3994,7 +4529,7 @@ export const dataService = {
         if (apiRes.ok) {
           const osData = await apiRes.json();
           if (osData && osData.id) {
-            return normalizeServiceOrderStatus(osData as ServiceOrder);
+            return await this.hydrateServiceOrderMedia(normalizeServiceOrderStatus(osData as ServiceOrder));
           }
         }
       } catch (apiErr) {
@@ -4008,7 +4543,9 @@ export const dataService = {
         try {
           const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, extractedId));
           if (directSnap.exists()) {
-            return normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder);
+            return await this.hydrateServiceOrderMedia(
+              normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder)
+            );
           }
         } catch {}
       }
@@ -4022,7 +4559,9 @@ export const dataService = {
         const snap = await getDocs(q);
         if (!snap.empty) {
           const d = snap.docs[0];
-          return normalizeServiceOrderStatus({ id: d.id, ...d.data() } as ServiceOrder);
+          return await this.hydrateServiceOrderMedia(
+            normalizeServiceOrderStatus({ id: d.id, ...d.data() } as ServiceOrder)
+          );
         }
       } catch {}
 
@@ -4030,7 +4569,9 @@ export const dataService = {
       try {
         const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, token));
         if (directSnap.exists()) {
-          return normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder);
+          return await this.hydrateServiceOrderMedia(
+            normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder)
+          );
         }
       } catch {}
 
@@ -4064,9 +4605,9 @@ export const dataService = {
         }
       }
 
-      // Se ainda não existir (ordem verdadeiramente nova), usa openedAt ou serverTimestamp()
+      // Se ainda não existir (ordem verdadeiramente nova), usa openedAt ou string ISO consistente para ordenação uniforme no Firestore
       if (!finalCreatedAt) {
-        finalCreatedAt = order.openedAt || serverTimestamp();
+        finalCreatedAt = order.openedAt || new Date().toISOString();
       }
 
       // Garante recuperação do técnico executor titular (technicianId) caso venha em branco
@@ -4091,11 +4632,52 @@ export const dataService = {
         technicianId: finalTechId || undefined
       });
 
-      const cleanOrder = clean({
-        ...normalizedInput,
+      // Externaliza fotos e assinaturas Base64 para subcoleção dedicada (mantém documento principal super leve para listagens!)
+      const hasPhotos = Array.isArray(normalizedInput.photos) && normalizedInput.photos.length > 0;
+      const hasClientSig = Boolean(normalizedInput.clientSignature && String(normalizedInput.clientSignature).trim().length > 0);
+      const hasTechSig = Boolean(normalizedInput.techSignature && String(normalizedInput.techSignature).trim().length > 0);
+
+      let mediaStoredExternally = false;
+      if (hasPhotos || hasClientSig || hasTechSig || existingDocData?.mediaExternalized) {
+        try {
+          const mediaPayload: any = {
+            photos: Array.isArray(normalizedInput.photos) ? normalizedInput.photos : [],
+            updatedAt: serverTimestamp()
+          };
+          if (hasClientSig) mediaPayload.clientSignature = normalizedInput.clientSignature;
+          else if (normalizedInput.clientSignature === '') mediaPayload.clientSignature = '';
+          if (hasTechSig) mediaPayload.techSignature = normalizedInput.techSignature;
+          else if (normalizedInput.techSignature === '') mediaPayload.techSignature = '';
+
+          await setDoc(
+            doc(db, COLLECTIONS.SERVICE_ORDERS, order.id, 'media', 'attachments'),
+            mediaPayload,
+            { merge: true }
+          );
+          mediaStoredExternally = true;
+          clearCache(`service_order_media_${order.id}`);
+        } catch (mediaErr) {
+          console.warn('[addServiceOrder] Fallback para gravação inline da mídia:', mediaErr);
+        }
+      }
+
+      const { photos: _p, clientSignature: _cs, techSignature: _ts, ...lightOrderFields } = normalizedInput;
+      const cleanOrder: any = clean({
+        ...(mediaStoredExternally ? lightOrderFields : normalizedInput),
+        hasClientSignature: hasClientSig,
+        hasTechSignature: hasTechSig,
+        photoCount: hasPhotos ? normalizedInput.photos!.length : 0,
+        mediaExternalized: mediaStoredExternally,
         createdAt: finalCreatedAt,
         updatedAt: serverTimestamp()
       });
+
+      if (mediaStoredExternally && existingDocData) {
+        if (existingDocData.photos !== undefined) cleanOrder.photos = deleteField();
+        if (existingDocData.clientSignature !== undefined) cleanOrder.clientSignature = deleteField();
+        if (existingDocData.techSignature !== undefined) cleanOrder.techSignature = deleteField();
+      }
+
       await setDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), cleanOrder, { merge: true });
 
       // Registro detalhado e legível no histórico de auditoria
@@ -4143,11 +4725,47 @@ export const dataService = {
   async updateServiceOrder(id: string, data: Partial<ServiceOrder>) {
     try {
       // NUNCA sobrescreve createdAt ao atualizar/editar a O.S.
-      const { createdAt: _ignoredCreatedAt, ...restData } = data;
-      const cleanData = clean({
+      const { createdAt: _ignoredCreatedAt, photos, clientSignature, techSignature, ...restData } = data;
+      const hasMediaUpdate = photos !== undefined || clientSignature !== undefined || techSignature !== undefined;
+
+      let mediaStoredExternally = false;
+      if (hasMediaUpdate) {
+        try {
+          const mediaPayload: any = { updatedAt: serverTimestamp() };
+          if (photos !== undefined) mediaPayload.photos = Array.isArray(photos) ? photos : [];
+          if (clientSignature !== undefined) mediaPayload.clientSignature = clientSignature || '';
+          if (techSignature !== undefined) mediaPayload.techSignature = techSignature || '';
+
+          await setDoc(
+            doc(db, COLLECTIONS.SERVICE_ORDERS, id, 'media', 'attachments'),
+            mediaPayload,
+            { merge: true }
+          );
+          mediaStoredExternally = true;
+          clearCache(`service_order_media_${id}`);
+        } catch (mediaErr) {
+          console.warn('[updateServiceOrder] Fallback para gravação inline da mídia:', mediaErr);
+        }
+      }
+
+      const cleanData: any = clean({
         ...restData,
+        ...(!mediaStoredExternally && photos !== undefined ? { photos } : {}),
+        ...(!mediaStoredExternally && clientSignature !== undefined ? { clientSignature } : {}),
+        ...(!mediaStoredExternally && techSignature !== undefined ? { techSignature } : {}),
+        ...(photos !== undefined ? { photoCount: Array.isArray(photos) ? photos.length : 0 } : {}),
+        ...(clientSignature !== undefined ? { hasClientSignature: Boolean(clientSignature && String(clientSignature).trim().length > 0) } : {}),
+        ...(techSignature !== undefined ? { hasTechSignature: Boolean(techSignature && String(techSignature).trim().length > 0) } : {}),
+        ...(mediaStoredExternally ? { mediaExternalized: true } : {}),
         updatedAt: serverTimestamp()
       });
+
+      if (mediaStoredExternally) {
+        if (photos !== undefined) cleanData.photos = deleteField();
+        if (clientSignature !== undefined) cleanData.clientSignature = deleteField();
+        if (techSignature !== undefined) cleanData.techSignature = deleteField();
+      }
+
       await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id), cleanData);
 
       const isFinalize = data.status === 'finalizada' || data.adminFinalized || data.status === 'pre_finalizada';

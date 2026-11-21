@@ -754,6 +754,8 @@ class FirebaseSyncManager(private val context: Context) {
                 setOf("admin", "support", "assistant")
             }
 
+            val sanitizedRecordId = recordId.replace("/", "_").ifBlank { System.currentTimeMillis().toString() }
+
             for (userDoc in usersSnap.documents) {
                 val role = (userDoc.getString("role") ?: "").trim().lowercase()
                 if (role !in allowedRoles) continue
@@ -764,14 +766,24 @@ class FirebaseSyncManager(private val context: Context) {
                     "content" to content,
                     "type" to type,
                     "recordId" to recordId,
-                    "callId" to recordId,
                     "read" to false,
                     "createdAt" to FieldValue.serverTimestamp()
                 )
+                // Mantém compatibilidade com PWA: apenas O.S./chamados usam callId; tech_finish usa somente recordId
+                if (type != "tech_finish" && type != "tech_start") {
+                    notifData["callId"] = recordId
+                }
+
+                // ID determinístico garante envio único mesmo em caso de retentativa offline:
+                // na 1ª vez cria o documento; em eventual reenvio, a regra de update impede sobrescrever read=true
+                val deterministicDocId = "${type}_${sanitizedRecordId}_${userDoc.id}"
                 try {
-                    firestore.collection("notifications").add(notifData).await()
+                    firestore.collection("notifications")
+                        .document(deterministicDocId)
+                        .set(notifData)
+                        .await()
                 } catch (e: Exception) {
-                    Log.w(TAG, "Aviso ao enviar notificação para ${userDoc.id}: ${e.message}")
+                    Log.w(TAG, "Notificação $deterministicDocId já enviada ou indisponível para ${userDoc.id}: ${e.message}")
                 }
             }
         } catch (e: Exception) {

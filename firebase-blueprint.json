@@ -281,6 +281,17 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["routeName", "month", "technicianName", "description", "actualValue", "expenseDate", "status"]
+    },
+    "ServiceOrderMedia": {
+      "title": "Service Order Media",
+      "description": "Externalized heavy media (photos and digital signatures) for a ServiceOrder, loaded on demand.",
+      "type": "object",
+      "properties": {
+        "photos": { "type": "array", "description": "Attached photos in base64 or URL format (max 12)." },
+        "clientSignature": { "type": "string", "description": "Client digital signature image." },
+        "techSignature": { "type": "string", "description": "Technician digital signature image." },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
     }
   },
   "firestore": {
@@ -347,6 +358,10 @@
     "serviceOrders": {
         "schema": "ServiceOrder",
         "description": "Collection of service orders."
+    },
+    "/serviceOrders/{orderId}/media/{mediaId}": {
+        "schema": "ServiceOrderMedia",
+        "description": "On-demand subcollection storing photos and signatures for a ServiceOrder."
     },
     "serviceCatalog": {
         "schema": "ServiceCatalogItem",

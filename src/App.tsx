@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, 
@@ -38,7 +38,6 @@ import {
   Receipt,
   FileSpreadsheet
 } from 'lucide-react';
-import ExcelJS from 'exceljs';
 import { cn } from './lib/utils';
 import { auth, signIn, signInWithGoogle } from './lib/firebase';
 import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
@@ -48,22 +47,29 @@ import { UserProfile, UserRole, NotificationItem } from './types';
 import { dataService } from './services/dataService';
 import { soundService } from './services/soundService';
 
-// Views
-import ScheduleView from './components/ScheduleView';
-import RegistrationView from './components/RegistrationView';
-import ReportsView from './components/ReportsView';
-import FinancialView from './components/FinancialView';
-import TechDemandView from './components/TechDemandView';
-import RoutePlanningView from './components/RoutePlanningView';
-import ServiceCallsView from './components/ServiceCallsView';
-import ServiceOrdersView from './components/ServiceOrdersView';
-import ProfileView from './components/ProfileView';
-import ContractsView from './components/ContractsView';
-import SettingsView from './components/SettingsView';
-import TechProductionView from './components/TechProductionView';
-import TechMobileExpenseView from './components/TechMobileExpenseView';
-import PendingApprovalScreen from './components/PendingApprovalScreen';
-import PublicOSSignatureView from './components/PublicOSSignatureView';
+// Code-split Views (carregadas sob demanda ao navegar para cada módulo, reduzindo drasticamente o bundle inicial)
+const ScheduleView = lazy(() => import('./components/ScheduleView'));
+const RegistrationView = lazy(() => import('./components/RegistrationView'));
+const ReportsView = lazy(() => import('./components/ReportsView'));
+const FinancialView = lazy(() => import('./components/FinancialView'));
+const TechDemandView = lazy(() => import('./components/TechDemandView'));
+const RoutePlanningView = lazy(() => import('./components/RoutePlanningView'));
+const ServiceCallsView = lazy(() => import('./components/ServiceCallsView'));
+const ServiceOrdersView = lazy(() => import('./components/ServiceOrdersView'));
+const ProfileView = lazy(() => import('./components/ProfileView'));
+const ContractsView = lazy(() => import('./components/ContractsView'));
+const SettingsView = lazy(() => import('./components/SettingsView'));
+const TechProductionView = lazy(() => import('./components/TechProductionView'));
+const TechMobileExpenseView = lazy(() => import('./components/TechMobileExpenseView'));
+const PendingApprovalScreen = lazy(() => import('./components/PendingApprovalScreen'));
+const PublicOSSignatureView = lazy(() => import('./components/PublicOSSignatureView'));
+
+const ViewLoadingFallback = () => (
+  <div className="h-full min-h-[280px] flex flex-col items-center justify-center gap-3 text-slate-400">
+    <div className="w-8 h-8 border-4 border-blue-600/20 border-t-blue-600 rounded-full animate-spin" />
+    <span className="text-xs font-bold uppercase tracking-wider">Carregando módulo...</span>
+  </div>
+);
 
 const menuItems = [
   { id: 'demand', label: 'Demanda Técnica', icon: Users, roles: [UserRole.ADMIN, UserRole.ASSISTANT, UserRole.TECHNICIAN] },
@@ -87,7 +93,11 @@ export default function App() {
   const publicSignToken = urlParams.get('signToken') || urlParams.get('token') || urlParams.get('sign_token') || urlParams.get('sign_os');
 
   if (publicSignToken) {
-    return <PublicOSSignatureView token={publicSignToken} />;
+    return (
+      <Suspense fallback={<ViewLoadingFallback />}>
+        <PublicOSSignatureView token={publicSignToken} />
+      </Suspense>
+    );
   }
 
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -124,15 +134,118 @@ export default function App() {
     }
   }, [activePopup]);
 
-  const hasInitializedNotifsRef = React.useRef(false);
-  const knownPreCompletedIdsRef = React.useRef<Set<string> | null>(null);
+  const profileRef = React.useRef<UserProfile | null>(profile);
+  profileRef.current = profile;
 
-  // Carrega e atualiza notificações do usuário em tempo real por assinatura (otimizado!)
+  const knownNotifIdsRef = React.useRef<Set<string>>(new Set());
+  const hasNotificationsServerBaselineRef = React.useRef(false);
+  const knownPreCompletedIdsRef = React.useRef<Set<string>>(new Set());
+  const hasPreCompletedServerBaselineRef = React.useRef(false);
+  const shownPopupKeysRef = React.useRef<Set<string>>(new Set());
+
+  const getShownPopupStorageKey = (uid: string) => `lefrio_shown_popup_notifs_${uid}`;
+
+  const loadShownPopupKeys = (uid: string): Set<string> => {
+    const set = new Set<string>();
+    if (typeof window === 'undefined') return set;
+    try {
+      const raw = localStorage.getItem(getShownPopupStorageKey(uid));
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((k) => {
+            if (typeof k === 'string' && k) set.add(k);
+          });
+        }
+      }
+    } catch {}
+    return set;
+  };
+
+  const persistShownPopupKeys = (uid: string, keysToAdd: string[]) => {
+    let changed = false;
+    keysToAdd.forEach((k) => {
+      if (k && !shownPopupKeysRef.current.has(k)) {
+        shownPopupKeysRef.current.add(k);
+        changed = true;
+      }
+    });
+    if (!changed || typeof window === 'undefined') return;
+    try {
+      // Mantém apenas as 250 chaves mais recentes para não crescer indefinidamente no localStorage
+      const capped = Array.from(shownPopupKeysRef.current).slice(-250);
+      shownPopupKeysRef.current = new Set(capped);
+      localStorage.setItem(getShownPopupStorageKey(uid), JSON.stringify(capped));
+    } catch {}
+  };
+
+  const getNotifDedupKeys = (notif: Pick<NotificationItem, 'id' | 'type' | 'recordId'>): string[] => {
+    const keys: string[] = [];
+    if (notif.id) keys.push(notif.id);
+    if (notif.type === 'tech_finish' && notif.recordId) {
+      keys.push(`tech_finish_${notif.recordId}`);
+    }
+    return keys;
+  };
+
+  const getNotificationTimestampMs = (createdAt: any): number | null => {
+    if (!createdAt) return null;
+    if (typeof createdAt?.toMillis === 'function') return createdAt.toMillis();
+    if (typeof createdAt?.seconds === 'number') return createdAt.seconds * 1000;
+    if (createdAt instanceof Date) return createdAt.getTime();
+    if (typeof createdAt === 'number') return createdAt;
+    if (typeof createdAt === 'string') {
+      const parsed = Date.parse(createdAt);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    return null;
+  };
+
+  const isRecentForLivePopup = (createdAt: any, maxAgeMs: number = 5 * 60 * 1000): boolean => {
+    const ts = getNotificationTimestampMs(createdAt);
+    // Quando serverTimestamp() ainda está pendente no snapshot local imediato, trata como recém-criado
+    if (ts === null) return true;
+    return Date.now() - ts <= maxAgeMs;
+  };
+
+  const triggerLiveNotificationPopup = (uid: string, notif: NotificationItem) => {
+    const dedupKeys = getNotifDedupKeys(notif);
+    if (dedupKeys.some((k) => shownPopupKeysRef.current.has(k))) {
+      return;
+    }
+
+    // Registra imediatamente como já exibida (memória + localStorage) para nunca repetir ao recarregar
+    persistShownPopupKeys(uid, dedupKeys);
+
+    const activeProfile = profileRef.current;
+    const soundPref = activeProfile?.notificationPreferences?.notifySoundEnabled;
+    const isSoundActive = soundPref !== undefined ? soundPref : soundService.isSoundEnabled();
+    if (isSoundActive) {
+      const volumePref = activeProfile?.notificationPreferences?.notificationSoundVolume;
+      soundService.testNotificationSound(volumePref);
+    }
+
+    const wantsPopups = activeProfile?.notificationPreferences?.notifyShowPopups ?? true;
+    if (wantsPopups) {
+      setActivePopup(notif);
+    }
+  };
+
+  // Carrega e atualiza notificações do usuário em tempo real por assinatura (otimizado e à prova de recarregamento)
   useEffect(() => {
-    if (!profile) return;
-    hasInitializedNotifsRef.current = false;
-    
-    const unsubscribe = dataService.subscribeNotifications(profile.uid, (rawList) => {
+    if (!profile?.uid) return;
+    const uid = profile.uid;
+
+    shownPopupKeysRef.current = loadShownPopupKeys(uid);
+    knownNotifIdsRef.current = new Set();
+    hasNotificationsServerBaselineRef.current = false;
+
+    // Fallback caso o dispositivo esteja offline e nunca chegue um snapshot com fromCache === false
+    const baselineFallbackTimer = setTimeout(() => {
+      hasNotificationsServerBaselineRef.current = true;
+    }, 3500);
+
+    const unsubscribe = dataService.subscribeNotifications(uid, (rawList, meta) => {
       // REGRA: Avisos de atualização do APK Android pertencem EXCLUSIVAMENTE ao aplicativo Android.
       // Filtra permanentemente do sistema administrativo web e do sistema PWA.
       const list = rawList.filter(n => {
@@ -141,70 +254,111 @@ export default function App() {
         return !isAndroidUpdate;
       });
 
-      setNotifications(prev => {
-        const isFirstLoad = !hasInitializedNotifsRef.current;
-        hasInitializedNotifsRef.current = true;
+      const fromCache = Boolean(meta?.fromCache);
 
-        // Após a carga inicial, verifica se chegaram novas notificações não lidas
-        if (!isFirstLoad) {
-          const prevIds = new Set(prev.map(n => n.id));
-          const newUnreads = list.filter(n => !n.read && !prevIds.has(n.id));
-          
-          if (newUnreads.length > 0) {
-            // Toca o som de alerta da notificação se habilitado
-            const soundPref = profile.notificationPreferences?.notifySoundEnabled;
-            const isSoundActive = soundPref !== undefined ? soundPref : soundService.isSoundEnabled();
-            
-            if (isSoundActive) {
-              const volumePref = profile.notificationPreferences?.notificationSoundVolume;
-              soundService.testNotificationSound(volumePref);
+      // Na carga inicial (cache local e primeiro snapshot vindo do servidor), apenas registra os IDs existentes
+      // sem disparar popup/som para notificações antigas já presentes no banco.
+      if (!hasNotificationsServerBaselineRef.current) {
+        const initialKeys: string[] = [];
+        list.forEach((n) => {
+          knownNotifIdsRef.current.add(n.id);
+          initialKeys.push(...getNotifDedupKeys(n));
+        });
+        // Notificações antigas (mais de 5 min) já existentes ao abrir o sistema nunca devem virar popup ao recarregar
+        if (initialKeys.length > 0) {
+          const oldKeys: string[] = [];
+          list.forEach((n) => {
+            if (!isRecentForLivePopup(n.createdAt)) {
+              oldKeys.push(...getNotifDedupKeys(n));
             }
-
-            const wantsPopups = profile.notificationPreferences?.notifyShowPopups ?? true;
-            if (wantsPopups) {
-              setActivePopup(newUnreads[0]);
-            }
+          });
+          if (oldKeys.length > 0) {
+            persistShownPopupKeys(uid, oldKeys);
           }
         }
-        return list;
+        if (!fromCache) {
+          hasNotificationsServerBaselineRef.current = true;
+          clearTimeout(baselineFallbackTimer);
+        }
+        setNotifications(list);
+        return;
+      }
+
+      // Após a carga inicial confirmada pelo servidor, dispara popup SOMENTE para notificações realmente novas e recentes
+      const newUnreads = list.filter((n) => {
+        if (n.read) return false;
+        if (knownNotifIdsRef.current.has(n.id)) return false;
+        const dedupKeys = getNotifDedupKeys(n);
+        if (dedupKeys.some((k) => shownPopupKeysRef.current.has(k))) return false;
+        return isRecentForLivePopup(n.createdAt);
       });
+
+      list.forEach((n) => knownNotifIdsRef.current.add(n.id));
+      setNotifications(list);
+
+      if (newUnreads.length > 0) {
+        triggerLiveNotificationPopup(uid, newUnreads[0]);
+      }
     });
 
-    return () => unsubscribe();
-  }, [profile]);
+    return () => {
+      clearTimeout(baselineFallbackTimer);
+      unsubscribe();
+    };
+  }, [profile?.uid]);
 
   // Monitor em tempo real de atendimentos recém-finalizados (pre_completed) para equipe administrativa:
-  // Garante notificação sonora, popup e item no sino imediatamente quando o técnico finaliza no App Android
+  // Garante notificação sonora, popup e item no sino UMA ÚNICA VEZ quando o técnico finaliza no App Android
   useEffect(() => {
-    if (!profile) return;
+    if (!profile?.uid) return;
     const isAdminStaff =
       profile.role === UserRole.ADMIN ||
       profile.role === UserRole.ASSISTANT ||
       profile.role === UserRole.SUPPORT;
     if (!isAdminStaff) return;
 
-    knownPreCompletedIdsRef.current = null;
+    const uid = profile.uid;
+    knownPreCompletedIdsRef.current = new Set();
+    hasPreCompletedServerBaselineRef.current = false;
 
-    const unsubscribe = dataService.subscribePreCompletedRecords((livePreCompleted) => {
-      const currentIds = new Set(livePreCompleted.map(r => r.id));
+    const baselineFallbackTimer = setTimeout(() => {
+      hasPreCompletedServerBaselineRef.current = true;
+    }, 3500);
 
-      if (knownPreCompletedIdsRef.current === null) {
-        knownPreCompletedIdsRef.current = currentIds;
+    const unsubscribe = dataService.subscribePreCompletedRecords((livePreCompleted, meta) => {
+      const fromCache = Boolean(meta?.fromCache);
+
+      if (!hasPreCompletedServerBaselineRef.current) {
+        livePreCompleted.forEach((r) => knownPreCompletedIdsRef.current.add(r.id));
+        if (!fromCache) {
+          hasPreCompletedServerBaselineRef.current = true;
+          clearTimeout(baselineFallbackTimer);
+        }
         return;
       }
 
-      const newlyFinished = livePreCompleted.filter(r => !knownPreCompletedIdsRef.current!.has(r.id));
-      knownPreCompletedIdsRef.current = currentIds;
+      const newlyFinished = livePreCompleted.filter((r) => !knownPreCompletedIdsRef.current.has(r.id));
+      knownPreCompletedIdsRef.current = new Set(livePreCompleted.map((r) => r.id));
 
       if (newlyFinished.length === 0) return;
 
       newlyFinished.forEach((rec: any) => {
+        const dedupKey = `tech_finish_${rec.id}`;
+        if (shownPopupKeysRef.current.has(dedupKey)) return;
+
+        // Só dispara alerta em tempo real se a finalização for recente (evita disparar popup para registros antigos)
+        const finishTime = rec.techFinalizedAt || rec.completionDate || rec.clientSignatureDate;
+        if (finishTime && !isRecentForLivePopup(finishTime, 10 * 60 * 1000)) {
+          persistShownPopupKeys(uid, [dedupKey]);
+          return;
+        }
+
         const techName = (rec.technician1 || 'Técnico').toString().trim().toUpperCase();
         const clientName = (rec.clientName || rec.client?.name || 'Cliente').toString().trim();
         const addressStr = (rec.addressStreet || rec.address?.street || 'Endereço').toString().trim();
         const synthNotif: NotificationItem = {
           id: `live_finish_${rec.id}`,
-          userId: profile.uid,
+          userId: uid,
           title: `Atendimento Concluído: ${techName}`,
           content: `O técnico ${techName} finalizou o atendimento no cliente ${clientName} (${addressStr}). Aguardando aprovação.`,
           type: 'tech_finish',
@@ -217,26 +371,18 @@ export default function App() {
         setNotifications(prev => {
           const alreadyExists = prev.some(n => n.type === 'tech_finish' && n.recordId === rec.id);
           if (alreadyExists) return prev;
-
-          const soundPref = profile.notificationPreferences?.notifySoundEnabled;
-          const isSoundActive = soundPref !== undefined ? soundPref : soundService.isSoundEnabled();
-          if (isSoundActive) {
-            const volumePref = profile.notificationPreferences?.notificationSoundVolume;
-            soundService.testNotificationSound(volumePref);
-          }
-
-          const wantsPopups = profile.notificationPreferences?.notifyShowPopups ?? true;
-          if (wantsPopups) {
-            setActivePopup(synthNotif);
-          }
-
           return [synthNotif, ...prev];
         });
+
+        triggerLiveNotificationPopup(uid, synthNotif);
       });
     });
 
-    return () => unsubscribe();
-  }, [profile]);
+    return () => {
+      clearTimeout(baselineFallbackTimer);
+      unsubscribe();
+    };
+  }, [profile?.uid, profile?.role]);
 
   // Telemetria Passiva e Não-Intrusiva de Qualidade da Rede para Técnicos (Heartbeat PWA)
   useEffect(() => {
@@ -425,7 +571,8 @@ export default function App() {
         return;
       }
 
-      // 4. Criar workbook do Excel
+      // 4. Criar workbook do Excel (carregado sob demanda)
+      const ExcelJS = (await import('exceljs')).default;
       const workbook = new ExcelJS.Workbook();
       workbook.creator = 'Sistema Lefrio';
       workbook.created = now;
@@ -990,19 +1137,21 @@ export default function App() {
 
   if (user && profile && profile.role !== UserRole.ADMIN && profile.isApproved !== true) {
     return (
-      <PendingApprovalScreen
-        profile={profile}
-        onApproved={(updatedProfile) => {
-          setProfile(updatedProfile);
-        }}
-        onLogout={async () => {
-          try {
-            await auth.signOut();
-          } catch (e) {}
-          setUser(null);
-          setProfile(null);
-        }}
-      />
+      <Suspense fallback={<ViewLoadingFallback />}>
+        <PendingApprovalScreen
+          profile={profile}
+          onApproved={(updatedProfile) => {
+            setProfile(updatedProfile);
+          }}
+          onLogout={async () => {
+            try {
+              await auth.signOut();
+            } catch (e) {}
+            setUser(null);
+            setProfile(null);
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -1223,11 +1372,11 @@ export default function App() {
                               setShowNotifications(false);
                               if (notif.type === 'os_attended' || notif.type === 'tech_os_attended') {
                                 setActiveView('orders');
+                              } else if (notif.type === 'tech_start' || notif.type === 'tech_finish') {
+                                setActiveView('demand');
                               } else if (notif.callId) {
                                 setSelectedCallId(notif.callId);
                                 setActiveView('calls');
-                              } else if (notif.type === 'tech_start' || notif.type === 'tech_finish') {
-                                setActiveView('demand');
                               }
                             }}
                             className={cn(
@@ -1324,61 +1473,63 @@ export default function App() {
               transition={{ duration: 0.2 }}
               className="h-full print:h-auto print:overflow-visible"
             >
-              {activeView === 'schedule' && hasAccess('schedule') && <ScheduleView managerClientId={profile?.clientId} userRole={profile?.role} />}
-              {activeView === 'registration' && hasAccess('registration') && (
-                <RegistrationView 
-                  userRole={profile?.role} 
-                  userProfile={profile || undefined} 
-                />
-              )}
-              {activeView === 'reports' && hasAccess('reports') && <ReportsView managerClientId={profile?.clientId} />}
-              {activeView === 'finance' && hasAccess('finance') && <FinancialView managerClientId={profile?.clientId} />}
-              {activeView === 'contracts' && hasAccess('contracts') && <ContractsView managerClientId={profile?.clientId} userRole={profile?.role} />}
-              {activeView === 'demand' && hasAccess('demand') && (
-                <TechDemandView 
-                  userRole={profile?.role} 
-                  userProfile={profile || undefined} 
-                  managerClientId={profile?.clientId} 
-                />
-              )}
-              {activeView === 'production' && hasAccess('production') && (
-                <TechProductionView 
-                  userRole={profile?.role} 
-                  managerClientId={profile?.clientId} 
-                  userProfile={profile || undefined} 
-                />
-              )}
-              {activeView === 'settings' && hasAccess('settings') && (
-                <SettingsView 
-                  userRole={profile?.role} 
-                  userProfile={profile || undefined} 
-                  onProfileUpdate={(updated) => setProfile(updated)} 
-                />
-              )}
-              {activeView === 'routes' && hasAccess('routes') && <RoutePlanningView userRole={profile?.role} userProfile={profile || undefined} />}
-              {activeView === 'expenses' && hasAccess('expenses') && (
-                <TechMobileExpenseView 
-                  userRole={profile?.role} 
-                  userProfile={profile || undefined} 
-                />
-              )}
-              {activeView === 'profile' && profile && <ProfileView userProfile={profile} onProfileUpdate={(updated) => setProfile(updated)} />}
-              {activeView === 'orders' && hasAccess('orders') && (
-                <ServiceOrdersView
-                  managerClientId={profile?.clientId}
-                  userRole={profile?.role}
-                  userProfile={profile || undefined}
-                />
-              )}
-              {activeView === 'calls' && hasAccess('calls') && (
-                <ServiceCallsView 
-                  managerClientId={profile?.role === UserRole.MANAGER ? profile?.clientId : undefined} 
-                  userRole={profile?.role} 
-                  userProfile={profile || undefined} 
-                  initialSelectedCallId={selectedCallId}
-                  onClearInitialCallId={() => setSelectedCallId(undefined)}
-                />
-              )}
+              <Suspense fallback={<ViewLoadingFallback />}>
+                {activeView === 'schedule' && hasAccess('schedule') && <ScheduleView managerClientId={profile?.clientId} userRole={profile?.role} />}
+                {activeView === 'registration' && hasAccess('registration') && (
+                  <RegistrationView 
+                    userRole={profile?.role} 
+                    userProfile={profile || undefined} 
+                  />
+                )}
+                {activeView === 'reports' && hasAccess('reports') && <ReportsView managerClientId={profile?.clientId} />}
+                {activeView === 'finance' && hasAccess('finance') && <FinancialView managerClientId={profile?.clientId} />}
+                {activeView === 'contracts' && hasAccess('contracts') && <ContractsView managerClientId={profile?.clientId} userRole={profile?.role} />}
+                {activeView === 'demand' && hasAccess('demand') && (
+                  <TechDemandView 
+                    userRole={profile?.role} 
+                    userProfile={profile || undefined} 
+                    managerClientId={profile?.clientId} 
+                  />
+                )}
+                {activeView === 'production' && hasAccess('production') && (
+                  <TechProductionView 
+                    userRole={profile?.role} 
+                    managerClientId={profile?.clientId} 
+                    userProfile={profile || undefined} 
+                  />
+                )}
+                {activeView === 'settings' && hasAccess('settings') && (
+                  <SettingsView 
+                    userRole={profile?.role} 
+                    userProfile={profile || undefined} 
+                    onProfileUpdate={(updated) => setProfile(updated)} 
+                  />
+                )}
+                {activeView === 'routes' && hasAccess('routes') && <RoutePlanningView userRole={profile?.role} userProfile={profile || undefined} />}
+                {activeView === 'expenses' && hasAccess('expenses') && (
+                  <TechMobileExpenseView 
+                    userRole={profile?.role} 
+                    userProfile={profile || undefined} 
+                  />
+                )}
+                {activeView === 'profile' && profile && <ProfileView userProfile={profile} onProfileUpdate={(updated) => setProfile(updated)} />}
+                {activeView === 'orders' && hasAccess('orders') && (
+                  <ServiceOrdersView
+                    managerClientId={profile?.role === UserRole.MANAGER ? profile?.clientId : undefined}
+                    userRole={profile?.role}
+                    userProfile={profile || undefined}
+                  />
+                )}
+                {activeView === 'calls' && hasAccess('calls') && (
+                  <ServiceCallsView 
+                    managerClientId={profile?.role === UserRole.MANAGER ? profile?.clientId : undefined} 
+                    userRole={profile?.role} 
+                    userProfile={profile || undefined} 
+                    initialSelectedCallId={selectedCallId}
+                    onClearInitialCallId={() => setSelectedCallId(undefined)}
+                  />
+                )}
+              </Suspense>
             </motion.div>
           </AnimatePresence>
         </div>
@@ -1420,7 +1571,12 @@ export default function App() {
                   </div>
                 </div>
                 <button
-                  onClick={() => setActivePopup(null)}
+                  onClick={async () => {
+                    const id = activePopup.id;
+                    if (profile?.uid) persistShownPopupKeys(profile.uid, getNotifDedupKeys(activePopup));
+                    setActivePopup(null);
+                    await handleMarkAsRead(id);
+                  }}
                   className="p-1 text-gray-400 hover:text-gray-950 hover:bg-gray-100 rounded-lg transition-all"
                   style={{ minWidth: 32, minHeight: 32, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
@@ -1441,7 +1597,12 @@ export default function App() {
               {/* Ações Compactas */}
               <div className="flex gap-2 justify-end mt-1 pt-2 border-t border-slate-100">
                 <button
-                  onClick={() => setActivePopup(null)}
+                  onClick={async () => {
+                    const id = activePopup.id;
+                    if (profile?.uid) persistShownPopupKeys(profile.uid, getNotifDedupKeys(activePopup));
+                    setActivePopup(null);
+                    await handleMarkAsRead(id);
+                  }}
                   className="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-gray-500 hover:text-gray-950 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-200/60 transition-all text-center"
                   style={{ minHeight: 32 }}
                 >
@@ -1462,7 +1623,7 @@ export default function App() {
                     <ExternalLink className="w-3 h-3" />
                   </button>
                 )}
-                {activePopup.callId && activePopup.type !== 'os_attended' && activePopup.type !== 'tech_os_attended' && (
+                {activePopup.callId && activePopup.type !== 'os_attended' && activePopup.type !== 'tech_os_attended' && activePopup.type !== 'tech_start' && activePopup.type !== 'tech_finish' && (
                   <button
                     onClick={async () => {
                       const id = activePopup.id;

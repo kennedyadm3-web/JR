@@ -8,14 +8,15 @@ import {
   Wrench, RotateCcw, XCircle, Ban, Folder, Lock, Unlock, ClipboardCheck, Inbox, Clock, Send, ArrowRight, Zap,
   Maximize2, Minimize2, Smartphone, Layers, Droplets, Loader2
 } from 'lucide-react';
-import ExcelJS from 'exceljs';
 import { cn, generateInitialOsNumber, sortOrdersByCreationDateDesc } from '../lib/utils';
 import { buildTechnicianIndex, normalizeTechString, isStaffName } from '../lib/technicianIndex';
 import { dataService } from '../services/dataService';
 import { CompanyLogo, getCompanyConfigFromCache } from './CompanyLogo';
 import { Client, Address, Equipment, Technician, ServiceOrder, ServiceOrderItem, UserRole, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, MaintenanceRecord, JettingControl, MaintenanceStatus, TechOSDraft, ServiceCall, ServiceCallStatus } from '../types';
 import { ImageUploader } from './ImageUploader';
-import { JettingControlCenter } from './JettingControlCenter';
+const JettingControlCenter = React.lazy(() =>
+  import('./JettingControlCenter').then((m) => ({ default: m.JettingControlCenter }))
+);
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, PieChart, Pie, Cell } from 'recharts';
 
 const isOSRecord = (r: any): boolean => {
@@ -567,11 +568,27 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [technicians, setTechnicians] = useState<Technician[]>([]);
   
   const [loading, setLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loadedOrdersProgress, setLoadedOrdersProgress] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [activeExactSearch, setActiveExactSearch] = useState('');
+  const [isSearchingExact, setIsSearchingExact] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [startDateFilter, setStartDateFilter] = useState('');
   const [endDateFilter, setEndDateFilter] = useState('');
   const [activeTab, setActiveTab] = useState<'list' | 'reports' | 'jetting'>('list');
+
+  // Paginação sob demanda no Firestore (carrega 25 últimas O.S. na página 1 e carrega próximas páginas conforme o usuário avança)
+  const [paginationMode, setPaginationMode] = useState<'cursor' | 'filtered_all' | 'exact_search'>('cursor');
+  const [serverTotalOrders, setServerTotalOrders] = useState<number | null>(null);
+  const [serverWorkshopOrders, setServerWorkshopOrders] = useState<number | null>(null);
+  const [isLoadingPage, setIsLoadingPage] = useState(false);
+  const [hasMorePages, setHasMorePages] = useState(false);
+  const [loadedPagesCount, setLoadedPagesCount] = useState(0);
+  const pagesCacheRef = useRef<Record<number, { orders: ServiceOrder[]; lastDoc: any; hasMore: boolean }>>({});
+  const auxiliaryLoadedRef = useRef(false);
+  const pageRequestCounterRef = useRef(0);
 
   // Chamados Técnicos e Modal de Alerta Prévio de Chamado em Aberto
   const [serviceCalls, setServiceCalls] = useState<ServiceCall[]>([]);
@@ -582,15 +599,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   } | null>(null);
   const [isCallDetailsExpandedInForm, setIsCallDetailsExpandedInForm] = useState(false);
 
-  // Inscrição em tempo real para sincronizar chamados técnicos
-  useEffect(() => {
-    const unsubscribeCalls = dataService.subscribeServiceCalls((calls) => {
-      setServiceCalls(calls);
-    }, managerClientId);
-    return () => {
-      unsubscribeCalls();
-    };
-  }, [managerClientId]);
+  const serviceCallsLoadedRef = useRef(false);
 
   const [workshopOnlyFilter, setWorkshopOnlyFilter] = useState<boolean>(false);
 
@@ -599,12 +608,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [itemsPerPage, setItemsPerPage] = useState(25);
   const [jumpPageInput, setJumpPageInput] = useState('');
 
-  // Resetar página atual da tabela principal ao alterar termos de busca, filtros ou tamanho de página
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchTerm, statusFilter, workshopOnlyFilter, startDateFilter, endDateFilter, itemsPerPage, managerClientId]);
+  // Estados de Paginação para a Tabela do Relatório Avançado (evita renderizar 200-2000 linhas de uma vez no DOM)
+  const [reportCurrentPage, setReportCurrentPage] = useState(1);
+  const [reportItemsPerPage, setReportItemsPerPage] = useState(25);
 
-  // Estados de Filtro para Relatório Avançado
+  // Estados de Filtro para Relatório Avançado (sob demanda: nada é carregado/exibido até definir filtro e pressionar Enter/Buscar)
   const [reportStartDate, setReportStartDate] = useState('');
   const [reportEndDate, setReportEndDate] = useState('');
   const [reportClientId, setReportClientId] = useState('all');
@@ -614,11 +622,85 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [reportType, setReportType] = useState('all');
   const [reportWorkshopFilter, setReportWorkshopFilter] = useState<'all' | 'workshop_only' | 'standard_only'>('all');
   const [reportGeneralNotes, setReportGeneralNotes] = useState('');
+
+  const [reportRawOrders, setReportRawOrders] = useState<ServiceOrder[]>([]);
+  const [reportHasSearched, setReportHasSearched] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [reportFiltersDirty, setReportFiltersDirty] = useState(false);
+  const [reportAppliedFilters, setReportAppliedFilters] = useState<{
+    startDate: string;
+    endDate: string;
+    clientId: string;
+    technicianId: string;
+    status: string;
+    company: string;
+    type: string;
+    workshopFilter: 'all' | 'workshop_only' | 'standard_only';
+  }>({
+    startDate: '',
+    endDate: '',
+    clientId: 'all',
+    technicianId: 'all',
+    status: 'all',
+    company: 'all',
+    type: 'all',
+    workshopFilter: 'all'
+  });
+
+  // Resetar página do Relatório Avançado ao alterar quantidade por página
+  useEffect(() => {
+    setReportCurrentPage(1);
+  }, [reportItemsPerPage]);
   
   // Controle de Modais / Form
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isPrintPreviewOpen, setIsPrintPreviewOpen] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState<ServiceOrder | null>(null);
+  const [isHydratingMedia, setIsHydratingMedia] = useState(false);
+  const activeOrderRequestRef = useRef<string>('');
+  const [isOptimizingMedia, setIsOptimizingMedia] = useState(false);
+  const [optimizeProgress, setOptimizeProgress] = useState<{ processed: number; total: number; migrated: number; failed: number } | null>(null);
+
+  const legacyHeavyOrdersCount = useMemo(() => {
+    return orders.filter(
+      (o) =>
+        Boolean(o && o.id) &&
+        (Boolean(o.clientSignature && String(o.clientSignature).trim().length > 0) ||
+          Boolean(o.techSignature && String(o.techSignature).trim().length > 0) ||
+          (Array.isArray(o.photos) && o.photos.length > 0))
+    ).length;
+  }, [orders]);
+
+  const handleOptimizeLegacyMedia = async () => {
+    if (isOptimizingMedia || legacyHeavyOrdersCount === 0) return;
+    const confirmed = window.confirm(
+      `Identificamos O.S. com fotos/assinaturas gravadas diretamente no documento principal.\n\nDeseja otimizar todas as O.S. legadas do banco movendo essas mídias com segurança para a subcoleção sob demanda?\n\n• Nenhuma foto ou assinatura será perdida (só removemos do documento principal após confirmar a gravação).\n• O carregamento das O.S. ficará drasticamente mais rápido.`
+    );
+    if (!confirmed) return;
+    setIsOptimizingMedia(true);
+    setOptimizeProgress({ processed: 0, total: legacyHeavyOrdersCount, migrated: 0, failed: 0 });
+    try {
+      const allOrdersToScan = await dataService.getServiceOrders(managerClientId, undefined, { forceRefresh: true });
+      const result = await dataService.optimizeServiceOrdersMedia(allOrdersToScan, (progress) => {
+        setOptimizeProgress(progress);
+      });
+      await loadData(true);
+      alert(
+        `Otimização concluída!\n\n• ${result.migrated} O.S. otimizadas com sucesso.\n${
+          result.failed > 0
+            ? `• ${result.failed} O.S. não puderam ser migradas agora (mantidas intactas).`
+            : '• Todas as fotos e assinaturas foram preservadas e carregadas sob demanda.'
+        }`
+      );
+    } catch (err: any) {
+      console.error('Erro ao otimizar mídias das O.S.:', err);
+      alert('Erro durante a otimização: ' + (err?.message || 'Tente novamente.'));
+    } finally {
+      setIsOptimizingMedia(false);
+      setOptimizeProgress(null);
+    }
+  };
 
   // Modal de Compartilhamento de Link de Assinatura Externa (48h)
   const [shareModalOpen, setShareModalOpen] = useState(false);
@@ -638,19 +720,19 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         token = `sign_os_${os.id}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         expiresAt = new Date(now + 48 * 60 * 60 * 1000).toISOString();
 
+        const shareCreatedAt = new Date().toISOString();
         await dataService.updateServiceOrder(os.id, {
           shareSignatureToken: token,
-          shareSignatureCreatedAt: new Date().toISOString(),
+          shareSignatureCreatedAt: shareCreatedAt,
           shareSignatureExpiresAt: expiresAt
         });
 
-        // Atualiza a lista local de O.S.
-        setOrders(prev => prev.map(o => o.id === os.id ? {
-          ...o,
+        // Atualiza a O.S. em toda a memória local (lista, cache de páginas e relatório)
+        patchOrderInLocalState(os.id, {
           shareSignatureToken: token,
-          shareSignatureCreatedAt: new Date().toISOString(),
+          shareSignatureCreatedAt: shareCreatedAt,
           shareSignatureExpiresAt: expiresAt
-        } : o));
+        });
       }
 
       const generatedUrl = `${window.location.origin}${window.location.pathname}?signToken=${token}`;
@@ -768,25 +850,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       setFormOsNumberChangedAt(null);
       setFormOsNumberResetUsed(true);
 
-      // Atualiza o selectedOrder em memória
-      setSelectedOrder(prev => prev ? {
-        ...prev,
+      // Atualiza em toda a memória local (selectedOrder, lista, cache de páginas e relatório)
+      patchOrderInLocalState(selectedOrder.id, {
         osNumber: originNumber,
         osNumberChanged: false,
         initialOsNumber: originNumber,
         osNumberResetUsed: true,
         osNumberResetAt: nowISO
-      } : null);
-
-      // Atualiza na lista de ordens do componente
-      setOrders(prev => prev.map(o => o.id === selectedOrder.id ? {
-        ...o,
-        osNumber: originNumber,
-        osNumberChanged: false,
-        initialOsNumber: originNumber,
-        osNumberResetUsed: true,
-        osNumberResetAt: nowISO
-      } : o));
+      });
 
       alert(`Numeração redefinida com sucesso!\n\nA O.S. retornou ao ID originário (${originNumber}) e o campo foi desbloqueado para que você insira o número correto.`);
     } catch (err) {
@@ -858,6 +929,20 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
   // Estados para fluxo personalizado de técnico (visualização de O.S. geradas / recebidas do ADM / rascunhos)
   const [techActiveTab, setTechActiveTab] = useState<'my_orders' | 'adm_orders' | 'drafts' | 'form'>('my_orders');
+
+  // Inscrição sob demanda para chamados técnicos (evita concorrência e re-renders no carregamento inicial da lista/relatório)
+  useEffect(() => {
+    const needsLiveCalls = isFormOpen || (userRole === UserRole.TECHNICIAN && techActiveTab === 'form');
+    if (!needsLiveCalls) return;
+
+    const unsubscribeCalls = dataService.subscribeServiceCalls((calls) => {
+      serviceCallsLoadedRef.current = true;
+      setServiceCalls(calls);
+    }, managerClientId);
+    return () => {
+      unsubscribeCalls();
+    };
+  }, [managerClientId, isFormOpen, userRole, techActiveTab]);
   const [techSearchTerm, setTechSearchTerm] = useState('');
   const [techStatusFilter, setTechStatusFilter] = useState('all');
   const [techSelectedAddressId, setTechSelectedAddressId] = useState<string>('');
@@ -905,6 +990,62 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
   // Sistema canônico de indexação de técnicos em MAIÚSCULAS
   const techIndex = useMemo(() => buildTechnicianIndex(technicians), [technicians]);
+
+  // Resolução rápida O(1) do(s) técnico(s) da O.S. com fallback seguro (evita '---' no Relatório Avançado, CSV e Impressão)
+  const resolveSingleTechName = (raw?: string | null): string => {
+    if (!raw) return '';
+    const trimmed = String(raw).trim();
+    if (!trimmed) return '';
+    const indexed = techIndex.findTech(trimmed);
+    if (indexed?.name) return indexed.name;
+    const looksLikeOpaqueId = /^[a-zA-Z0-9_-]{18,}$/.test(trimmed) && !trimmed.includes(' ');
+    if (!looksLikeOpaqueId && !isStaffName(trimmed)) {
+      return trimmed.toUpperCase();
+    }
+    return '';
+  };
+
+  const resolveOrderTechnicianDisplay = (order?: Partial<ServiceOrder> | null, emptyFallback: string = '---'): string => {
+    if (!order) return emptyFallback;
+    const anyOrder = order as any;
+    const names: string[] = [];
+    const pushUnique = (val?: string | null) => {
+      const resolved = resolveSingleTechName(val);
+      if (resolved && !names.includes(resolved)) {
+        names.push(resolved);
+      }
+    };
+
+    pushUnique(order.technicianId);
+    pushUnique(order.technician2Id);
+
+    if (names.length === 0) {
+      pushUnique(anyOrder.technicianName);
+      pushUnique(anyOrder.technician1);
+      pushUnique(anyOrder.technician2);
+      pushUnique(anyOrder.technician);
+    }
+
+    if (names.length === 0 && order.authenticatedTeam) {
+      const teamStr = String(order.authenticatedTeam);
+      const appMatch = teamStr.match(/\d{2}:\d{2}(?::\d{2})?\s+([^)]+)\)/);
+      if (appMatch && appMatch[1]) {
+        appMatch[1].split(/[/,&]+/).forEach(part => pushUnique(part));
+      } else {
+        for (const it of techIndex.indexedTechs) {
+          if (it.name && teamStr.toUpperCase().includes(it.name)) {
+            pushUnique(it.name);
+          }
+        }
+      }
+    }
+
+    if (names.length === 0 && order.openedBy && !isStaffName(order.openedBy)) {
+      pushUnique(order.openedBy);
+    }
+
+    return names.length > 0 ? names.join(' / ') : emptyFallback;
+  };
 
   // Identificação do técnico logado
   const currentTechName = useMemo(() => {
@@ -1126,76 +1267,542 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     );
   };
 
-  // Carregar dados iniciais
-  useEffect(() => {
-    loadData();
-  }, [managerClientId]);
+  const formatOrdersLoadError = (err: any): string => {
+    const raw = String(err?.message || err || '').toLowerCase();
+    if (raw.includes('quota') || raw.includes('resource-exhausted')) {
+      return 'Limite diário de leituras do banco de dados atingido. Aguarde a renovação da cota ou atualize o plano no Firebase.';
+    }
+    if (raw.includes('permission') || raw.includes('insufficient')) {
+      return 'Sem permissão para acessar as Ordens de Serviço. Verifique se sua sessão está ativa ou faça login novamente.';
+    }
+    if (raw.includes('timeout') || raw.includes('deadline')) {
+      return 'A conexão com o banco de dados demorou mais que o esperado. Clique em "Tentar Novamente" para recarregar as Ordens de Serviço.';
+    }
+    return 'Não foi possível conectar ao servidor para carregar as Ordens de Serviço. Verifique sua conexão e tente novamente.';
+  };
 
-  const loadData = async () => {
-    try {
+  // Normalização estritamente em memória (sem disparar updateServiceOrder nem invalidar o cache durante a leitura)
+  const normalizeOrdersInMemory = (ordersList: ServiceOrder[]): ServiceOrder[] => {
+    return ordersList.map(raw => {
+      let normalized = raw;
+      if (!raw.adminFinalized && raw.status === 'finalizada') {
+        normalized = { ...raw, status: 'aberta', techFinalized: true };
+      }
+
+      if (normalized.products && normalized.products.length > 0) {
+        let orderChanged = false;
+        const fixedProducts = normalized.products.map(p => {
+          if (p.code === '336' && (p.discountPercent === 74.61 || p.totalValue === 21.66 || p.totalValue === 10.83 || (p.discountPercent && p.discountPercent > 0))) {
+            const pQty = typeof p.quantity === 'number' ? p.quantity : (parseFloat(String(p.quantity).replace(',', '.')) || 0);
+            const pUnit = typeof p.unitValue === 'number' ? p.unitValue : (parseFloat(String(p.unitValue).replace(',', '.')) || 42.65);
+            orderChanged = true;
+            return { ...p, discountPercent: 0, totalValue: Number((pQty * pUnit).toFixed(2)) };
+          }
+          return p;
+        });
+        if (orderChanged) {
+          const sTotal = (normalized.services || []).reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
+          const pTotal = fixedProducts.reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
+          normalized = { ...normalized, products: fixedProducts, totalValue: Number((sTotal + pTotal).toFixed(2)) };
+        }
+      }
+      return normalized;
+    });
+  };
+
+  // Sincroniza instantaneamente uma O.S. salva/alterada em toda a memória local
+  // (Relatório Avançado, Lista Principal, Cache de Páginas e O.S. selecionada) com 0 leituras extras no Firestore.
+  const syncOrderInLocalState = (updatedOrder: ServiceOrder, options?: { isNew?: boolean }) => {
+    const [normalized] = normalizeOrdersInMemory([updatedOrder]);
+    if (!normalized) return;
+
+    // 1. Atualiza imediatamente o Relatório Avançado (recalcula tabela, KPIs, gráficos, CSV e impressão em memória)
+    setReportRawOrders(prev => {
+      const existsIndex = prev.findIndex(o => o.id === normalized.id);
+      if (existsIndex >= 0) {
+        const next = [...prev];
+        next[existsIndex] = { ...next[existsIndex], ...normalized };
+        return next;
+      }
+      if (options?.isNew && reportHasSearched) {
+        return sortOrdersByCreationDateDesc([normalized, ...prev]);
+      }
+      return prev;
+    });
+
+    // 2. Atualiza a lista principal em memória (mantém a página atual sem novas leituras)
+    setOrders(prev => {
+      const existsIndex = prev.findIndex(o => o.id === normalized.id);
+      if (existsIndex >= 0) {
+        const next = [...prev];
+        next[existsIndex] = { ...next[existsIndex], ...normalized };
+        return next;
+      }
+      return prev;
+    });
+
+    // 3. Atualiza qualquer página já armazenada no cache de paginação por cursor
+    for (const pageKey of Object.keys(pagesCacheRef.current)) {
+      const pageNum = Number(pageKey);
+      const cachedPage = pagesCacheRef.current[pageNum];
+      if (!cachedPage) continue;
+      const idx = cachedPage.orders.findIndex(o => o.id === normalized.id);
+      if (idx >= 0) {
+        const nextOrders = [...cachedPage.orders];
+        nextOrders[idx] = { ...nextOrders[idx], ...normalized };
+        pagesCacheRef.current[pageNum] = { ...cachedPage, orders: nextOrders };
+      }
+    }
+
+    // 4. Mantém selectedOrder coerente caso ainda esteja aberta/referenciada
+    setSelectedOrder(prev => (prev && prev.id === normalized.id ? { ...prev, ...normalized } : prev));
+  };
+
+  // Aplica atualização parcial em memória (cancelamento, reabertura, redefinição de número ou link de assinatura)
+  const patchOrderInLocalState = (orderId: string, patch: Partial<ServiceOrder>) => {
+    const applyPatch = (list: ServiceOrder[]) => {
+      let changed = false;
+      const next = list.map(o => {
+        if (o.id !== orderId) return o;
+        changed = true;
+        return { ...o, ...patch };
+      });
+      return changed ? next : list;
+    };
+
+    setReportRawOrders(prev => applyPatch(prev));
+    setOrders(prev => applyPatch(prev));
+
+    for (const pageKey of Object.keys(pagesCacheRef.current)) {
+      const pageNum = Number(pageKey);
+      const cachedPage = pagesCacheRef.current[pageNum];
+      if (!cachedPage) continue;
+      const updated = applyPatch(cachedPage.orders);
+      if (updated !== cachedPage.orders) {
+        pagesCacheRef.current[pageNum] = { ...cachedPage, orders: updated };
+      }
+    }
+
+    setSelectedOrder(prev => (prev && prev.id === orderId ? { ...prev, ...patch } : prev));
+  };
+
+  // Carregamento isolado das tabelas auxiliares (clientes, endereços, técnicos, configurações, catálogo)
+  const loadAuxiliaryData = async (forceRefresh: boolean = false) => {
+    if (auxiliaryLoadedRef.current && !forceRefresh) return;
+    const [clientsRes, addressesRes, techsRes, settingsRes, catalogRes] = await Promise.allSettled([
+      dataService.getClients(managerClientId),
+      dataService.getAddresses(managerClientId),
+      dataService.getTechnicians(),
+      dataService.getServiceOrderSettings(),
+      dataService.getServiceCatalogItems()
+    ]);
+
+    if (clientsRes.status === 'fulfilled') setClients(clientsRes.value);
+    else console.warn('Falha ao carregar clientes em O.S.:', clientsRes.reason);
+
+    if (addressesRes.status === 'fulfilled') setAddresses(addressesRes.value);
+    else console.warn('Falha ao carregar endereços em O.S.:', addressesRes.reason);
+
+    if (techsRes.status === 'fulfilled') setTechnicians(techsRes.value);
+    else console.warn('Falha ao carregar técnicos em O.S.:', techsRes.reason);
+
+    if (settingsRes.status === 'fulfilled' && settingsRes.value) {
+      const settings = settingsRes.value;
+      setOsSettings(settings);
+      if (settings.maintenanceTypes && settings.maintenanceTypes.length > 0) {
+        setFormType(settings.maintenanceTypes[0]);
+      }
+      if (settings.companies && settings.companies.length > 0) {
+        setFormServiceCompany(settings.companies[0].id);
+      }
+    } else if (settingsRes.status === 'rejected') {
+      console.warn('Falha ao carregar configurações de O.S.:', settingsRes.reason);
+    }
+
+    if (catalogRes.status === 'fulfilled') setCatalogItems(catalogRes.value);
+    else console.warn('Falha ao carregar catálogo em O.S.:', catalogRes.reason);
+
+    auxiliaryLoadedRef.current = true;
+  };
+
+  // Carrega uma página específica sob demanda (Admin/Assistente/Gerente): 25 últimas O.S. na página 1 e avanço por cursor
+  const loadOrdersPage = async (
+    targetPage: number,
+    options?: {
+      resetCache?: boolean;
+      forceRefresh?: boolean;
+      statusOverride?: string;
+      workshopOverride?: boolean;
+      startDateOverride?: string;
+      endDateOverride?: string;
+      pageSizeOverride?: number;
+    }
+  ) => {
+    const reqId = ++pageRequestCounterRef.current;
+    const effStatus = options?.statusOverride !== undefined ? options.statusOverride : statusFilter;
+    const effWorkshop = options?.workshopOverride !== undefined ? options.workshopOverride : workshopOnlyFilter;
+    const effStart = options?.startDateOverride !== undefined ? options.startDateOverride : startDateFilter;
+    const effEnd = options?.endDateOverride !== undefined ? options.endDateOverride : endDateFilter;
+    const effPageSize = options?.pageSizeOverride !== undefined ? options.pageSizeOverride : itemsPerPage;
+
+    const resetCache = Boolean(options?.resetCache);
+    const forceRefresh = Boolean(options?.forceRefresh);
+
+    if (resetCache) {
+      pagesCacheRef.current = {};
+      setLoadedPagesCount(0);
+    }
+
+    // Se a página já está em cache no modo cursor e não é refresh forçado, troca instantaneamente (0 leituras no banco!)
+    if (!resetCache && !forceRefresh && paginationMode === 'cursor' && pagesCacheRef.current[targetPage]) {
+      const cached = pagesCacheRef.current[targetPage];
+      setOrders(cached.orders);
+      setCurrentPage(targetPage);
+      setHasMorePages(cached.hasMore);
+      setLoadError(null);
+      return;
+    }
+
+    setLoadError(null);
+    if (orders.length === 0 && targetPage === 1) {
       setLoading(true);
-      const [ordersList, clientsList, addressesList, techsList, settings, catalog] = await Promise.all([
-        dataService.getServiceOrders(managerClientId),
-        dataService.getClients(managerClientId),
-        dataService.getAddresses(managerClientId),
-        dataService.getTechnicians(),
-        dataService.getServiceOrderSettings(),
-        dataService.getServiceCatalogItems()
-      ]);
-      
-      // REGRA: Somente o sistema administrativo tem autonomia para finalizar uma O.S.
-      // Toda ordem de serviço atendida pelo técnico em campo deve aparecer com status 'aberta' (Em aberto).
-      // Caso alguma O.S. tenha sido gravada com status 'finalizada' sem a homologação administrativa (adminFinalized === true),
-      // ela é normalizada para 'aberta' e tem o flag techFinalized: true atualizado no banco.
-      ordersList.forEach(o => {
-        if (!o.adminFinalized && o.status === 'finalizada') {
-          o.status = 'aberta';
-          o.techFinalized = true;
-          dataService.updateServiceOrder(o.id, { status: 'aberta', techFinalized: true, adminFinalized: false }).catch(console.error);
+    } else if (targetPage > 1) {
+      setIsLoadingPage(true);
+    } else {
+      setIsRefreshing(true);
+    }
+
+    const auxiliaryPromise = loadAuxiliaryData(forceRefresh);
+
+    // Atualiza contagem agregada leve no servidor (sem baixar documentos) na página 1 ou em refresh
+    const countsPromise = (targetPage === 1 || forceRefresh || serverTotalOrders === null)
+      ? dataService.getServiceOrdersCounts(managerClientId, forceRefresh).then((counts) => {
+          if (reqId !== pageRequestCounterRef.current) return;
+          if (counts.total !== null) setServerTotalOrders(counts.total);
+          if (counts.workshop !== null) setServerWorkshopOrders(counts.workshop);
+        }).catch(() => {})
+      : Promise.resolve();
+
+    try {
+      // Avança passo a passo a partir da última página carregada caso o usuário pule mais de 1 página no modo cursor
+      const hasAnyListFilter = Boolean(
+        managerClientId ||
+        (effStatus && effStatus !== 'all') ||
+        effWorkshop ||
+        effStart ||
+        effEnd
+      );
+
+      if (!hasAnyListFilter && targetPage > 1) {
+        let highestLoaded = 0;
+        for (let p = 1; p < targetPage; p++) {
+          if (pagesCacheRef.current[p]) highestLoaded = p;
+          else break;
         }
 
-        // Corrige bug legado onde o item 336 (Gás R410) estava gravado com desconto indevido de 74.61% gerando valor unitário de ~10
-        let orderChanged = false;
-        if (o.products && o.products.length > 0) {
-          o.products.forEach(p => {
-            if (p.code === '336' && (p.discountPercent === 74.61 || p.totalValue === 21.66 || p.totalValue === 10.83 || (p.discountPercent && p.discountPercent > 0))) {
-              p.discountPercent = 0;
-              const pQty = typeof p.quantity === 'number' ? p.quantity : (parseFloat(String(p.quantity).replace(',', '.')) || 0);
-              const pUnit = typeof p.unitValue === 'number' ? p.unitValue : (parseFloat(String(p.unitValue).replace(',', '.')) || 42.65);
-              p.totalValue = Number((pQty * pUnit).toFixed(2));
-              orderChanged = true;
-            }
+        let currentCursor = highestLoaded > 0 ? pagesCacheRef.current[highestLoaded].lastDoc : null;
+        let lastPageLoaded = highestLoaded;
+
+        for (let p = highestLoaded + 1; p <= targetPage; p++) {
+          if (p > 1 && !currentCursor) break;
+          const res = await dataService.getServiceOrdersPaginated({
+            pageSize: effPageSize,
+            lastDoc: currentCursor
           });
-          if (orderChanged) {
-            const sTotal = (o.services || []).reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
-            const pTotal = o.products.reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
-            o.totalValue = Number((sTotal + pTotal).toFixed(2));
-            dataService.updateServiceOrder(o.id, { products: o.products, totalValue: o.totalValue }).catch(console.error);
+          if (reqId !== pageRequestCounterRef.current) return;
+          const normalized = normalizeOrdersInMemory(res.orders);
+          pagesCacheRef.current[p] = {
+            orders: normalized,
+            lastDoc: res.lastDoc,
+            hasMore: res.hasMore
+          };
+          currentCursor = res.lastDoc;
+          lastPageLoaded = p;
+          if (!res.hasMore) break;
+        }
+
+        const resolvedPage = Math.min(targetPage, Math.max(1, lastPageLoaded));
+        const finalCached = pagesCacheRef.current[resolvedPage];
+        if (finalCached) {
+          setPaginationMode('cursor');
+          setOrders(finalCached.orders);
+          setCurrentPage(resolvedPage);
+          setHasMorePages(finalCached.hasMore);
+          setLoadedPagesCount(Object.keys(pagesCacheRef.current).length);
+          setLoadError(null);
+        }
+      } else {
+        const res = await dataService.getServiceOrdersPaginated({
+          clientId: managerClientId,
+          pageSize: effPageSize,
+          lastDoc: null,
+          status: effStatus,
+          workshopOnly: effWorkshop,
+          hasDateFilter: Boolean(effStart || effEnd)
+        });
+        if (reqId !== pageRequestCounterRef.current) return;
+
+        const normalized = normalizeOrdersInMemory(res.orders);
+        if (res.mode === 'cursor') {
+          pagesCacheRef.current = {
+            1: {
+              orders: normalized,
+              lastDoc: res.lastDoc,
+              hasMore: res.hasMore
+            }
+          };
+          setPaginationMode('cursor');
+          setOrders(normalized);
+          setCurrentPage(1);
+          setHasMorePages(res.hasMore);
+          setLoadedPagesCount(1);
+        } else {
+          pagesCacheRef.current = {};
+          setPaginationMode('filtered_all');
+          setOrders(sortOrdersByCreationDateDesc(normalized));
+          setCurrentPage(1);
+          setHasMorePages(false);
+          setLoadedPagesCount(0);
+        }
+        setLoadError(null);
+      }
+    } catch (err) {
+      if (reqId !== pageRequestCounterRef.current) return;
+      console.error('Erro ao carregar página de Ordens de Serviço:', err);
+      setLoadError(formatOrdersLoadError(err));
+    } finally {
+      if (reqId === pageRequestCounterRef.current) {
+        setLoading(false);
+        setIsRefreshing(false);
+        setIsLoadingPage(false);
+      }
+    }
+
+    await Promise.allSettled([auxiliaryPromise, countsPromise]);
+  };
+
+  // Busca exata pelo número da O.S. (disparada SOMENTE ao pressionar Enter ou clicar em Buscar)
+  const handleExactSearchSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = searchTerm.trim();
+
+    // Se o usuário apagou o texto e apertou Enter, volta para a listagem paginada das 25 últimas O.S.
+    if (!trimmed) {
+      setActiveExactSearch('');
+      await loadOrdersPage(1, { resetCache: true });
+      return;
+    }
+
+    const reqId = ++pageRequestCounterRef.current;
+    setIsSearchingExact(true);
+    setLoadError(null);
+    setActiveExactSearch(trimmed);
+
+    try {
+      const found = await dataService.findServiceOrderByExactNumber(trimmed, managerClientId);
+      if (reqId !== pageRequestCounterRef.current) return;
+      const normalized = normalizeOrdersInMemory(found);
+      setPaginationMode('exact_search');
+      setOrders(sortOrdersByCreationDateDesc(normalized));
+      setCurrentPage(1);
+      setHasMorePages(false);
+      setLoadError(null);
+    } catch (err) {
+      if (reqId !== pageRequestCounterRef.current) return;
+      console.error('Erro na busca exata de O.S.:', err);
+      setLoadError(formatOrdersLoadError(err));
+    } finally {
+      if (reqId === pageRequestCounterRef.current) {
+        setIsSearchingExact(false);
+        setLoading(false);
+      }
+    }
+  };
+
+  const handleClearExactSearch = async () => {
+    setSearchTerm('');
+    setActiveExactSearch('');
+    await loadOrdersPage(1, { resetCache: true });
+  };
+
+  const goToListPage = async (targetPage: number) => {
+    if (targetPage < 1 || isLoadingPage) return;
+    if (paginationMode === 'cursor') {
+      await loadOrdersPage(targetPage);
+    } else {
+      setCurrentPage(Math.min(Math.max(1, targetPage), totalPages));
+    }
+  };
+
+  // Verifica se há pelo menos 1 filtro selecionado no Relatório Avançado
+  const hasAnyReportFilterSelected = Boolean(
+    reportStartDate ||
+    reportEndDate ||
+    reportClientId !== 'all' ||
+    reportTechnicianId !== 'all' ||
+    reportStatus !== 'all' ||
+    reportCompany !== 'all' ||
+    reportType !== 'all' ||
+    reportWorkshopFilter !== 'all' ||
+    managerClientId
+  );
+
+  // Busca sob demanda do Relatório Avançado (somente quando há filtros selecionados e o usuário aperta Enter ou clica em Buscar)
+  const handleExecuteReportSearch = async (
+    e?: React.FormEvent,
+    overrideFilters?: Partial<{
+      startDate: string;
+      endDate: string;
+      clientId: string;
+      technicianId: string;
+      status: string;
+      company: string;
+      type: string;
+      workshopFilter: 'all' | 'workshop_only' | 'standard_only';
+    }>
+  ) => {
+    if (e) e.preventDefault();
+
+    const nextFilters = {
+      startDate: overrideFilters?.startDate !== undefined ? overrideFilters.startDate : reportStartDate,
+      endDate: overrideFilters?.endDate !== undefined ? overrideFilters.endDate : reportEndDate,
+      clientId: overrideFilters?.clientId !== undefined ? overrideFilters.clientId : reportClientId,
+      technicianId: overrideFilters?.technicianId !== undefined ? overrideFilters.technicianId : reportTechnicianId,
+      status: overrideFilters?.status !== undefined ? overrideFilters.status : reportStatus,
+      company: overrideFilters?.company !== undefined ? overrideFilters.company : reportCompany,
+      type: overrideFilters?.type !== undefined ? overrideFilters.type : reportType,
+      workshopFilter: overrideFilters?.workshopFilter !== undefined ? overrideFilters.workshopFilter : reportWorkshopFilter
+    };
+
+    const hasAny = Boolean(
+      nextFilters.startDate ||
+      nextFilters.endDate ||
+      nextFilters.clientId !== 'all' ||
+      nextFilters.technicianId !== 'all' ||
+      nextFilters.status !== 'all' ||
+      nextFilters.company !== 'all' ||
+      nextFilters.type !== 'all' ||
+      nextFilters.workshopFilter !== 'all' ||
+      managerClientId
+    );
+
+    if (!hasAny) {
+      setReportError('Selecione pelo menos um filtro acima (Período, Cliente, Técnico, Status, Prestadora, Tipo ou Oficina) e pressione Enter para buscar.');
+      return;
+    }
+
+    setReportLoading(true);
+    setReportError(null);
+    try {
+      const effectiveClientId = managerClientId || (nextFilters.clientId !== 'all' ? nextFilters.clientId : undefined);
+      const rawResults = await dataService.queryServiceOrdersForReport({
+        clientId: effectiveClientId,
+        status: nextFilters.status,
+        serviceCompany: nextFilters.company,
+        type: nextFilters.type,
+        workshopFilter: nextFilters.workshopFilter,
+        startDate: nextFilters.startDate,
+        endDate: nextFilters.endDate,
+        technicianId: nextFilters.technicianId
+      });
+      const normalized = normalizeOrdersInMemory(rawResults);
+      setReportRawOrders(sortOrdersByCreationDateDesc(normalized));
+      setReportAppliedFilters(nextFilters);
+      setReportHasSearched(true);
+      setReportFiltersDirty(false);
+      setReportCurrentPage(1);
+    } catch (err) {
+      console.error('Erro ao buscar O.S. para o Relatório Avançado:', err);
+      setReportError(formatOrdersLoadError(err));
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  const handleClearReportFilters = () => {
+    setReportStartDate('');
+    setReportEndDate('');
+    setReportClientId('all');
+    setReportTechnicianId('all');
+    setReportStatus('all');
+    setReportCompany('all');
+    setReportType('all');
+    setReportWorkshopFilter('all');
+    setReportRawOrders([]);
+    setReportHasSearched(false);
+    setReportFiltersDirty(false);
+    setReportError(null);
+    setReportCurrentPage(1);
+  };
+
+  const loadData = async (forceRefresh: boolean = false) => {
+    // Perfil Administrativo / Assistente / Gerente: paginação sob demanda (25 últimas O.S. por página)
+    if (userRole !== UserRole.TECHNICIAN) {
+      if (activeExactSearch) {
+        await loadAuxiliaryData(forceRefresh);
+        await handleExactSearchSubmit();
+      } else {
+        await loadOrdersPage(1, { resetCache: true, forceRefresh });
+      }
+      if (reportHasSearched && forceRefresh) {
+        await handleExecuteReportSearch(undefined, reportAppliedFilters);
+      }
+      return;
+    }
+
+    // Perfil Técnico: carrega O.S. para as abas "Minhas O.S." e "O.S. do Administrativo"
+    setLoadError(null);
+    setLoadedOrdersProgress(0);
+    if (orders.length === 0) {
+      setLoading(true);
+    } else {
+      setIsRefreshing(true);
+    }
+
+    const auxiliaryPromise = loadAuxiliaryData(forceRefresh);
+
+    try {
+      let pushedInitialBatch = false;
+      const hadExistingOrders = orders.length > 0;
+
+      const ordersList = await dataService.getServiceOrders(managerClientId, undefined, {
+        forceRefresh,
+        onProgress: (partialOrders, count) => {
+          setLoadedOrdersProgress(count);
+          if (!hadExistingOrders && !pushedInitialBatch && partialOrders.length > 0) {
+            pushedInitialBatch = true;
+            setOrders(partialOrders);
           }
         }
       });
 
-      setOrders(sortOrdersByCreationDateDesc(ordersList));
-      setClients(clientsList);
-      setAddresses(addressesList);
-      setTechnicians(techsList);
-      setOsSettings(settings);
-      setCatalogItems(catalog);
-
-      if (settings) {
-        if (settings.maintenanceTypes && settings.maintenanceTypes.length > 0) {
-          setFormType(settings.maintenanceTypes[0]);
-        }
-        if (settings.companies && settings.companies.length > 0) {
-          setFormServiceCompany(settings.companies[0].id);
-        }
-      }
+      const normalizedOrders = normalizeOrdersInMemory(ordersList);
+      setOrders(sortOrdersByCreationDateDesc(normalizedOrders));
+      setLoadError(null);
     } catch (err) {
-      console.error('Erro ao carregar dados de OS:', err);
+      console.error('Erro ao carregar Ordens de Serviço:', err);
+      setLoadError(formatOrdersLoadError(err));
     } finally {
       setLoading(false);
+      setIsRefreshing(false);
     }
+
+    await auxiliaryPromise;
   };
+
+  // Carregar dados iniciais e reagir a mudanças de filtros / tamanho de página na lista principal
+  useEffect(() => {
+    if (userRole === UserRole.TECHNICIAN) {
+      loadData(false);
+      return;
+    }
+    if (activeExactSearch) {
+      // Se o usuário mudou filtro de status/oficina/período/tamanho enquanto estava em busca exata, limpa a busca e aplica o filtro
+      setActiveExactSearch('');
+      setSearchTerm('');
+    }
+    loadOrdersPage(1, { resetCache: true, forceRefresh: false });
+  }, [managerClientId, statusFilter, workshopOnlyFilter, startDateFilter, endDateFilter, itemsPerPage, userRole]);
 
   // Carrega os equipamentos quando o endereço do formulário muda
   useEffect(() => {
@@ -1793,11 +2400,35 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     });
   };
 
-  // Função de Pré-Carregamento / Verificação de Chamados antes de abrir a tela de edição
-  const handleEditPreCheck = (order: ServiceOrder) => {
+  // Função de Pré-Carregamento / Verificação de Chamados antes de abrir a tela de edição (carregamento sob demanda com cache)
+  const handleEditPreCheck = async (order: ServiceOrder) => {
     if (!order) return;
     try {
-      const openCalls = getOpenCallsForAddress(order.addressId, order.clientId);
+      let currentCalls = serviceCalls;
+      if (!serviceCallsLoadedRef.current) {
+        try {
+          currentCalls = await dataService.getServiceCalls(managerClientId);
+          serviceCallsLoadedRef.current = true;
+          setServiceCalls(currentCalls);
+        } catch (fetchErr) {
+          console.warn('Falha ao buscar chamados sob demanda:', fetchErr);
+        }
+      }
+
+      const normAddrId = order.addressId ? String(order.addressId).trim() : '';
+      const normClientId = order.clientId ? String(order.clientId).trim() : '';
+      const openCalls = Array.isArray(currentCalls)
+        ? currentCalls.filter(call => {
+            if (!call) return false;
+            const statusStr = String(call.status || '').toLowerCase();
+            const isResolved = statusStr === 'resolved' || statusStr === 'cancelled' || statusStr === 'resolvido' || statusStr === 'cancelado' || statusStr === ServiceCallStatus.RESOLVED || statusStr === ServiceCallStatus.CANCELLED;
+            if (isResolved) return false;
+            if (normAddrId) return Boolean(call.addressId && String(call.addressId).trim() === normAddrId);
+            if (normClientId) return Boolean(call.clientId && String(call.clientId).trim() === normClientId);
+            return false;
+          })
+        : [];
+
       if (openCalls && openCalls.length > 0) {
         setPendingOpenCallsData({ order, openCalls });
         setIsOpenCallsWarningModalOpen(true);
@@ -1942,11 +2573,49 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormClientSignatureDate(order.clientSignatureDate || (order.clientSignature ? (order.finishedAt || order.updatedAt || '') : ''));
     setSelectedServiceCategoryFilter('ALL');
     setSelectedProductCategoryFilter('ALL');
-    
+
     if (userRole === UserRole.TECHNICIAN) {
       setTechActiveTab('form');
     } else {
       setIsFormOpen(true);
+    }
+
+    // Hidratação sob demanda: busca fotos e assinaturas da subcoleção /media/attachments sem travar a abertura do modal
+    const requestKey = `edit_${order.id}_${Date.now()}`;
+    activeOrderRequestRef.current = requestKey;
+    const needsMediaHydration = Boolean(
+      order.id &&
+      (order.mediaExternalized ||
+        (order.hasClientSignature && !order.clientSignature) ||
+        (order.hasTechSignature && !order.techSignature) ||
+        ((order.photoCount || 0) > 0 && (!order.photos || order.photos.length === 0)))
+    );
+
+    if (needsMediaHydration) {
+      setIsHydratingMedia(true);
+      dataService
+        .hydrateServiceOrderMedia(order)
+        .then((hydrated) => {
+          if (activeOrderRequestRef.current !== requestKey) return;
+          setSelectedOrder((prev) => (prev && prev.id === hydrated.id ? { ...prev, ...hydrated } : prev));
+          setFormPhotos(hydrated.photos || []);
+          setFormTechSignature(hydrated.techSignature || '');
+          setFormClientSignature(hydrated.clientSignature || '');
+          setFormClientSignatureDate(
+            hydrated.clientSignatureDate ||
+              (hydrated.clientSignature ? (hydrated.finishedAt || hydrated.updatedAt || '') : '')
+          );
+        })
+        .catch((err) => {
+          console.warn('Aviso ao hidratar mídias da O.S. para edição:', err);
+        })
+        .finally(() => {
+          if (activeOrderRequestRef.current === requestKey) {
+            setIsHydratingMedia(false);
+          }
+        });
+    } else {
+      setIsHydratingMedia(false);
     }
   };
 
@@ -1955,7 +2624,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (!window.confirm('Tem certeza de que deseja cancelar esta Ordem de Serviço? A O.S. permanecerá segura no sistema para consultas e histórico com status "Cancelada", e só poderá ser reaberta por um Administrador.')) return;
     try {
       await dataService.cancelServiceOrder(id);
-      await loadData();
+      patchOrderInLocalState(id, { status: 'cancelada' });
     } catch (err) {
       console.error(err);
       alert('Erro ao cancelar O.S.');
@@ -1971,7 +2640,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (!window.confirm('Deseja reabrir esta Ordem de Serviço? A situação dela voltará para "Em Aberto".')) return;
     try {
       await dataService.reopenServiceOrder(id);
-      await loadData();
+      patchOrderInLocalState(id, { status: 'aberta', adminFinalized: false });
     } catch (err) {
       console.error(err);
       alert('Erro ao reabrir O.S.');
@@ -1990,6 +2659,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (e) e.preventDefault();
 
     if (isSaving) return;
+    if (isHydratingMedia) {
+      alert('Aguarde um instante: estamos carregando as fotos e assinaturas desta O.S. antes de salvar.');
+      return;
+    }
 
     // Preservar valor da Data Agendada para repassar à próxima O.S. no lote
     const currentPlannedDateToPreserve = formPlannedDate;
@@ -2000,6 +2673,18 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         alert('Esta Ordem de Serviço já foi finalizada pelo técnico e não pode mais ser alterada pelo aplicativo.');
         return;
       }
+    }
+
+    // Regra de segurança: em O.S. já finalizada (Finalizada ou Pré-Finalizada), somente Administradores podem editar/adicionar itens e salvar
+    const isSelectedAlreadyFinalized = Boolean(
+      selectedOrder &&
+      (selectedOrder.status === 'finalizada' ||
+        selectedOrder.status === 'pre_finalizada' ||
+        selectedOrder.adminFinalized)
+    );
+    if (isSelectedAlreadyFinalized && userRole !== UserRole.ADMIN) {
+      alert('Esta Ordem de Serviço já está finalizada. Somente usuários Administradores podem adicionar/alterar produtos ou serviços e salvar alterações.');
+      return;
     }
 
     if (!formClientId || !formAddressId) {
@@ -2067,8 +2752,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     }
 
     // Calcular o total geral
-    const servicesTotal = formServices.reduce((sum, item) => sum + item.totalValue, 0);
-    const productsTotal = formProducts.reduce((sum, item) => sum + item.totalValue, 0);
+    const servicesTotal = formServices.reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
+    const productsTotal = formProducts.reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
     const totalValue = Number((servicesTotal + productsTotal).toFixed(2));
 
     // Formatar texto de autenticação
@@ -2138,10 +2823,13 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       status: finalStatus,
       techFinalized: isTechFinalize ? true : (selectedOrder?.techFinalized || false),
       techFinalizedAt: isTechFinalize ? (finalFinishedAt || new Date().toISOString()) : (selectedOrder?.techFinalizedAt || undefined),
-      adminFinalized: userRole !== UserRole.TECHNICIAN && !isTechFinalize && (finalStatus === 'finalizada' || finalStatus === 'pre_finalizada'),
-      adminFinalizedAt: (userRole !== UserRole.TECHNICIAN && !isTechFinalize && (finalStatus === 'finalizada' || finalStatus === 'pre_finalizada')) 
-        ? (finalFinishedAt || new Date().toISOString()) 
-        : (selectedOrder?.adminFinalizedAt || undefined),
+      adminFinalized: Boolean(
+        selectedOrder?.adminFinalized ||
+        (userRole !== UserRole.TECHNICIAN && !isTechFinalize && (finalStatus === 'finalizada' || finalStatus === 'pre_finalizada'))
+      ),
+      adminFinalizedAt: (selectedOrder?.adminFinalized || (userRole !== UserRole.TECHNICIAN && !isTechFinalize && (finalStatus === 'finalizada' || finalStatus === 'pre_finalizada')))
+        ? (selectedOrder?.adminFinalizedAt || finalFinishedAt || new Date().toISOString())
+        : undefined,
       type: formType ? formType.toUpperCase() : '',
       isWorkshop: formIsWorkshop,
       openedAt: formOpenedAt ? new Date(formOpenedAt).toISOString() : new Date().toISOString(),
@@ -2209,6 +2897,22 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
     try {
       await dataService.addServiceOrder(newOrder);
+
+      // Sincroniza imediatamente em memória (Relatório Avançado, Lista Principal e Cache de Páginas) com 0 leituras extras
+      const orderForLocalSync: ServiceOrder = {
+        ...(selectedOrder || {}),
+        ...newOrder,
+        hasTechSignature: Boolean(formTechSignature),
+        hasClientSignature: Boolean(formClientSignature),
+        photoCount: Array.isArray(formPhotos) ? formPhotos.length : 0
+      };
+      syncOrderInLocalState(orderForLocalSync, { isNew: !selectedOrder });
+
+      if (selectedOrder && Boolean(selectedOrder.isWorkshop) !== Boolean(newOrder.isWorkshop)) {
+        setServerWorkshopOrders(prev =>
+          prev === null ? null : Math.max(0, prev + (newOrder.isWorkshop ? 1 : -1))
+        );
+      }
 
       // Se a ordem foi finalizada pelo técnico ou pelo administrativo, sincronizar checklist na central de jateamento
       if (isTechFinalize || newOrder.techFinalized || finalStatus === 'finalizada' || finalStatus === 'pre_finalizada') {
@@ -2285,7 +2989,12 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           alert('Ordem de Serviço atualizada com sucesso!');
         }
       }
-      loadData();
+      // Para edição de O.S. existente no Administrativo/Relatório, a sincronização em memória acima já atualizou
+      // instantaneamente Relatório, Lista e Cache de Páginas (0 leituras extras no banco).
+      // Recarrega a lista apenas para Técnico ou na criação de uma nova O.S.
+      if (userRole === UserRole.TECHNICIAN || !selectedOrder) {
+        loadData();
+      }
     } catch (err: any) {
       console.error(err);
       alert('Erro ao salvar Ordem de Serviço: ' + (err?.message || JSON.stringify(err)));
@@ -2498,6 +3207,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   // Finalizar OS
   const handleFinalizeOrder = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (
+      formStatus === 'finalizada' ||
+      formStatus === 'pre_finalizada' ||
+      selectedOrder?.status === 'finalizada' ||
+      selectedOrder?.status === 'pre_finalizada' ||
+      selectedOrder?.adminFinalized
+    ) {
+      return;
+    }
     if (!formClientId || !formAddressId) {
       alert('Selecione o cliente e o endereço!');
       return;
@@ -2701,15 +3419,620 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormProducts(formProducts.filter((_, i) => i !== index));
   };
 
+  // CSS 100% autossuficiente (sem depender de Tailwind/variáveis CSS) para renderização fiel da O.S. na tela e na impressão nativa do navegador
+  const OS_PRINT_SHEET_CSS = `
+    .os-print-sheet {
+      width: 210mm;
+      color: #000000;
+      font-family: Arial, Helvetica, sans-serif;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      color-adjust: exact;
+    }
+    .os-print-sheet *, .os-print-sheet *::before, .os-print-sheet *::after {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+      color-adjust: exact;
+    }
+    .os-print-page {
+      width: 210mm;
+      min-height: 276mm;
+      padding: 12mm;
+      background-color: #ffffff;
+      border: 1px solid #cbd5e1;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      color: #000000;
+    }
+    .os-print-body {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .os-print-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      border-bottom: 1px solid #000000;
+      padding-bottom: 8px;
+      margin-bottom: 2px;
+      gap: 12px;
+    }
+    .os-print-header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+    .os-print-logo {
+      width: 82px;
+      height: 54px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .os-print-logo img {
+      max-width: 82px;
+      max-height: 54px;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      display: block;
+    }
+    .os-print-logo svg {
+      width: 82px;
+      height: 54px;
+      display: block;
+    }
+    .os-print-company {
+      font-size: 8.5px;
+      color: #000000;
+      line-height: 1.3;
+    }
+    .os-print-company-name {
+      display: block;
+      font-weight: 700;
+      font-size: 9.5px;
+      line-height: 1.15;
+      margin-bottom: 2px;
+      text-transform: uppercase;
+      color: #000000;
+    }
+    .os-print-meta {
+      text-align: right;
+      font-size: 8px;
+      color: #475569;
+      font-weight: 600;
+      line-height: 1.3;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .os-print-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid #000000;
+      padding-bottom: 4px;
+    }
+    .os-print-title-main {
+      font-size: 13px;
+      font-weight: 900;
+      color: #000000;
+      text-transform: uppercase;
+    }
+    .os-print-title-sub {
+      font-size: 10px;
+      font-weight: 700;
+      color: #000000;
+    }
+    .os-print-box {
+      border: 1px solid #000000;
+      background-color: #ffffff;
+      overflow: hidden;
+    }
+    .os-print-box-header {
+      padding: 4px 8px;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      border-bottom: 1px solid #000000;
+      color: #000000;
+    }
+    .os-print-box-header-solo {
+      border-bottom: none;
+    }
+    .os-print-bg-lefrio {
+      background-color: #c3d8eb !important;
+    }
+    .os-print-bg-alclima {
+      background-color: #bcf5bc !important;
+    }
+    .os-print-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      font-size: 8.5px;
+      line-height: 1.3;
+      color: #000000;
+      text-transform: uppercase;
+    }
+    .os-print-c12 { grid-column: span 12 / span 12; }
+    .os-print-c8 { grid-column: span 8 / span 8; }
+    .os-print-c6 { grid-column: span 6 / span 6; }
+    .os-print-c4 { grid-column: span 4 / span 4; }
+    .os-print-c3 { grid-column: span 3 / span 3; }
+    .os-print-cell {
+      padding: 5px 6px;
+      word-break: break-word;
+    }
+    .os-print-br { border-right: 1px solid #000000; }
+    .os-print-bb { border-bottom: 1px solid #000000; }
+    .os-print-bt { border-top: 1px solid #000000; }
+    .os-print-lbl { font-weight: 700; }
+    .os-print-val { font-weight: 400; }
+    .os-print-subhead {
+      padding: 4px 8px;
+      font-weight: 700;
+      background-color: #f1f5f9 !important;
+      border-bottom: 1px solid #000000;
+      font-size: 8px;
+      text-transform: uppercase;
+      color: #000000;
+    }
+    .os-print-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 8.5px;
+      line-height: 1.3;
+      color: #000000;
+    }
+    .os-print-table thead {
+      display: table-header-group;
+    }
+    .os-print-table tr {
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .os-print-table th {
+      border-bottom: 1px solid #000000;
+      border-right: 1px solid #000000;
+      padding: 4px 6px;
+      font-weight: 700;
+      color: #000000;
+    }
+    .os-print-table td {
+      border-bottom: 1px solid #000000;
+      border-right: 1px solid #000000;
+      padding: 4px 6px;
+      color: #000000;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .os-print-table th:last-child,
+    .os-print-table td:last-child {
+      border-right: none;
+    }
+    .os-print-table tbody tr:last-child td {
+      border-bottom: none;
+    }
+    .os-print-tc { text-align: center; }
+    .os-print-tl { text-align: left; }
+    .os-print-tr { text-align: right; }
+    .os-print-bold { font-weight: 700; }
+    .os-print-total-row {
+      border-top: 1px solid #000000;
+      padding: 6px 8px;
+      display: flex;
+      justify-content: flex-end;
+      font-weight: 700;
+      font-size: 10px;
+      color: #000000;
+    }
+    .os-print-sigs {
+      padding-top: 20px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 28px;
+      font-size: 8px;
+      align-items: end;
+      line-height: 1.35;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .os-print-sig-col {
+      text-align: center;
+    }
+    .os-print-sig-note {
+      font-size: 7.5px;
+      color: #334155;
+      font-style: italic;
+      font-weight: 600;
+      margin-bottom: 6px;
+      line-height: 1.25;
+    }
+    .os-print-sig-box {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 4px;
+    }
+    .os-print-sig-img {
+      max-height: 48px;
+      max-width: 100%;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      display: block;
+      margin: 0 auto;
+    }
+    .os-print-sig-line {
+      width: 100%;
+      border-bottom: 1px solid #000000;
+      margin: 0 auto 4px auto;
+    }
+    .os-print-sig-name {
+      display: block;
+      font-weight: 700;
+      color: #000000;
+      text-transform: uppercase;
+      font-size: 8px;
+    }
+    .os-print-sig-sub {
+      display: block;
+      color: #475569;
+      font-size: 7.5px;
+    }
+    .os-print-sig-date {
+      display: block;
+      color: #475569;
+      font-size: 7.5px;
+      font-weight: 700;
+    }
+    .os-print-sig-org {
+      display: block;
+      color: #64748b;
+      font-size: 7.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-weight: 600;
+    }
+    .os-print-footer {
+      border-top: 1px solid #000000;
+      padding-top: 6px;
+      margin-top: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 7.5px;
+      color: #64748b;
+      font-weight: 600;
+      line-height: 1.35;
+      gap: 12px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .os-print-footer-company {
+      font-weight: 700;
+      color: #000000;
+      text-transform: uppercase;
+    }
+    .os-print-footer-meta {
+      text-align: right;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .os-print-photos-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      padding-top: 10px;
+    }
+    .os-print-photo-card {
+      border: 1px solid #000000;
+      padding: 8px;
+      background-color: #f8fafc !important;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+    .os-print-photo-img {
+      height: 176px;
+      max-height: 176px;
+      width: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .os-print-photo-cap {
+      font-size: 8px;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #64748b;
+      margin-top: 6px;
+      display: block;
+    }
+  `;
+
   // Abrir Visualização de Impressão
-  const handlePrint = (order: ServiceOrder) => {
+  const handlePrint = (order: ServiceOrder, autoPrint = false) => {
     setSelectedOrder(order);
     setIsPrintPreviewOpen(true);
+
+    const requestKey = `print_${order.id}_${Date.now()}`;
+    activeOrderRequestRef.current = requestKey;
+    const needsMediaHydration = Boolean(
+      order.id &&
+      (order.mediaExternalized ||
+        (order.hasClientSignature && !order.clientSignature) ||
+        (order.hasTechSignature && !order.techSignature) ||
+        ((order.photoCount || 0) > 0 && (!order.photos || order.photos.length === 0)))
+    );
+
+    if (needsMediaHydration) {
+      setIsHydratingMedia(true);
+      dataService
+        .hydrateServiceOrderMedia(order)
+        .then((hydrated) => {
+          if (activeOrderRequestRef.current !== requestKey) return;
+          setSelectedOrder((prev) => (prev && prev.id === hydrated.id ? { ...prev, ...hydrated } : prev));
+        })
+        .catch((err) => {
+          console.warn('Aviso ao hidratar mídias da O.S. para impressão:', err);
+        })
+        .finally(() => {
+          if (activeOrderRequestRef.current === requestKey) {
+            setIsHydratingMedia(false);
+            if (autoPrint) {
+              setTimeout(() => executePrint('os'), 250);
+            }
+          }
+        });
+    } else {
+      setIsHydratingMedia(false);
+      if (autoPrint) {
+        setTimeout(() => executePrint('os'), 250);
+      }
+    }
   };
 
-  // Executar Impressão Real do Navegador
-  const executePrint = () => {
-    window.print();
+  // Abrir pré-visualização e acionar diretamente a tela de impressão do navegador a partir do modal de edição da O.S.
+  const handlePrintFromEditModal = () => {
+    if (!selectedOrder) return;
+    const isOtherEq = formEquipmentId === 'OUTRO EQUIPAMENTO' || formEquipmentId === 'OUTRO_EQUIPAMENTO';
+    const currentClient = clients.find(c => c.id === formClientId);
+    const currentAddr = addresses.find(a => a.id === formAddressId);
+    const currentEq = isOtherEq ? null : equipments.find(eq => eq.id === formEquipmentId);
+    const servicesSum = formServices.reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
+    const productsSum = formProducts.reduce((sum, item) => sum + (Number(item.totalValue) || 0), 0);
+
+    const liveOrder: ServiceOrder = {
+      ...selectedOrder,
+      osNumber: formOsNumber.trim() || selectedOrder.osNumber,
+      clientId: formClientId || selectedOrder.clientId,
+      clientName: currentClient?.fullName || currentClient?.name || selectedOrder.clientName,
+      clientCnpj: currentClient?.cnpj || selectedOrder.clientCnpj,
+      clientEmail: currentClient?.email || selectedOrder.clientEmail,
+      clientPhone: currentClient?.phone || selectedOrder.clientPhone,
+      addressId: formAddressId || selectedOrder.addressId,
+      addressStreet: currentAddr?.street || selectedOrder.addressStreet,
+      equipmentId: formEquipmentId || selectedOrder.equipmentId,
+      equipmentName: isOtherEq ? 'OUTRO EQUIPAMENTO' : (currentEq?.name || selectedOrder.equipmentName),
+      equipmentBrand: isOtherEq ? undefined : (currentEq?.brand || selectedOrder.equipmentBrand),
+      equipmentSector: isOtherEq ? undefined : (currentEq?.sector || selectedOrder.equipmentSector),
+      equipmentBtus: isOtherEq ? undefined : (currentEq?.btus ? currentEq.btus.toUpperCase() : selectedOrder.equipmentBtus),
+      equipmentPatrimony: isOtherEq ? undefined : (currentEq?.patrimony ? currentEq.patrimony.toUpperCase() : selectedOrder.equipmentPatrimony),
+      status: formStatus || selectedOrder.status,
+      type: formType ? formType.toUpperCase() : selectedOrder.type,
+      isWorkshop: formIsWorkshop,
+      description: formDescription ? formDescription.trim().toUpperCase() : selectedOrder.description,
+      diagnosis: formDiagnosis ? formDiagnosis.trim().toUpperCase() : selectedOrder.diagnosis,
+      solution: formSolution ? formSolution.trim().toUpperCase() : selectedOrder.solution,
+      services: formServices,
+      products: formProducts,
+      totalValue: Number((servicesSum + productsSum).toFixed(2)),
+      technicianId: formTechnicianId || selectedOrder.technicianId,
+      technician2Id: formTechnician2Id || selectedOrder.technician2Id,
+      clientRepresentative: formRepresentative ? formRepresentative.trim().toUpperCase() : selectedOrder.clientRepresentative,
+      clientRepresentativeMatricula: formRepresentativeMatricula ? formRepresentativeMatricula.trim().toUpperCase() : selectedOrder.clientRepresentativeMatricula,
+      serviceCompany: currentClient?.serviceCompany || formServiceCompany || selectedOrder.serviceCompany,
+      photos: formPhotos.length > 0 ? formPhotos : (selectedOrder.photos || []),
+      techSignature: formTechSignature || selectedOrder.techSignature,
+      clientSignature: formClientSignature || selectedOrder.clientSignature,
+      clientSignatureDate: formClientSignatureDate || selectedOrder.clientSignatureDate
+    };
+
+    handlePrint(liveOrder, true);
+  };
+
+  // Executar Impressão Nativa do Navegador em iframe isolado com CSS 100% embutido (sem baixar arquivo e sem bugs de layout)
+  const executePrint = (target: 'os' | 'report' = 'os') => {
+    const isOsTarget = target === 'os' && Boolean(document.getElementById('os-print-area'));
+    const printEl = isOsTarget
+      ? document.getElementById('os-print-area')
+      : document.getElementById('report-print-area') || document.getElementById('os-print-area');
+
+    if (!printEl) {
+      window.focus();
+      window.print();
+      return;
+    }
+
+    try {
+      const existingIframe = document.getElementById('os-isolated-print-iframe');
+      if (existingIframe) {
+        existingIframe.remove();
+      }
+
+      const iframe = document.createElement('iframe');
+      iframe.id = 'os-isolated-print-iframe';
+      iframe.style.position = 'fixed';
+      iframe.style.top = '-10000px';
+      iframe.style.left = '-10000px';
+      iframe.style.width = '210mm';
+      iframe.style.height = '297mm';
+      iframe.style.border = '0';
+      iframe.style.opacity = '0';
+      iframe.style.pointerEvents = 'none';
+      document.body.appendChild(iframe);
+
+      const iframeWin = iframe.contentWindow;
+      const iframeDoc = iframeWin?.document || iframe.contentDocument;
+      if (!iframeWin || !iframeDoc) {
+        iframe.remove();
+        window.focus();
+        window.print();
+        return;
+      }
+
+      const docTitle = isOsTarget
+        ? `Ordem de Serviço ${selectedOrder?.osNumber || ''}`.trim()
+        : 'Relatório Consolidado de Ordens de Serviço';
+
+      let headStyles = '';
+      if (isOsTarget) {
+        headStyles = `
+          <style>
+            @page {
+              size: A4 portrait;
+              margin: 8mm;
+            }
+            html, body {
+              margin: 0;
+              padding: 0;
+              background: #ffffff;
+              color: #000000;
+              font-family: Arial, Helvetica, sans-serif;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+              color-adjust: exact;
+            }
+            ${OS_PRINT_SHEET_CSS}
+            .os-print-sheet {
+              width: 100%;
+              gap: 0;
+            }
+            .os-print-page {
+              width: 100%;
+              min-height: 268mm;
+              padding: 0;
+              border: none;
+              box-shadow: none;
+              margin: 0;
+            }
+            .os-print-page + .os-print-page {
+              page-break-before: always;
+              break-before: page;
+            }
+          </style>
+        `;
+      } else {
+        const inlineStyles = Array.from(document.querySelectorAll('style'))
+          .map((s) => s.outerHTML)
+          .join('\n');
+        const linkStyles = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+          .map((l) => `<link rel="stylesheet" href="${(l as HTMLLinkElement).href}" />`)
+          .join('\n');
+        headStyles = `
+          ${linkStyles}
+          ${inlineStyles}
+          <style>
+            @page {
+              size: A4 portrait;
+              margin: 8mm;
+            }
+            html, body {
+              margin: 0 !important;
+              padding: 0 !important;
+              background: #ffffff !important;
+              color: #000000 !important;
+              font-family: Arial, Helvetica, sans-serif !important;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            #report-print-root {
+              width: 100% !important;
+              max-width: 100% !important;
+              border: none !important;
+              box-shadow: none !important;
+              padding: 0 !important;
+              margin: 0 !important;
+            }
+          </style>
+        `;
+      }
+
+      const bodyHtml = isOsTarget
+        ? `<div class="os-print-sheet">${printEl.innerHTML}</div>`
+        : `<div id="report-print-root">${printEl.innerHTML}</div>`;
+
+      iframeDoc.open();
+      iframeDoc.write(`<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>${docTitle}</title>
+  ${headStyles}
+</head>
+<body>${bodyHtml}</body>
+</html>`);
+      iframeDoc.close();
+
+      let triggered = false;
+      const triggerPrintDialog = () => {
+        if (triggered) return;
+        triggered = true;
+        try {
+          iframeWin.focus();
+          iframeWin.print();
+        } catch (err) {
+          console.error('Erro ao imprimir via iframe isolado, usando fallback:', err);
+          window.focus();
+          window.print();
+        } finally {
+          setTimeout(() => {
+            if (document.body.contains(iframe)) {
+              iframe.remove();
+            }
+          }, 60000);
+        }
+      };
+
+      const imgs = Array.from(iframeDoc.querySelectorAll('img'));
+      const pendingImgs = imgs.filter((img) => !img.complete);
+      if (pendingImgs.length === 0) {
+        setTimeout(triggerPrintDialog, isOsTarget ? 60 : 250);
+      } else {
+        let loaded = 0;
+        const onDone = () => {
+          loaded += 1;
+          if (loaded >= pendingImgs.length) {
+            setTimeout(triggerPrintDialog, 60);
+          }
+        };
+        pendingImgs.forEach((img) => {
+          img.addEventListener('load', onDone, { once: true });
+          img.addEventListener('error', onDone, { once: true });
+        });
+        setTimeout(triggerPrintDialog, 600);
+      }
+    } catch (err) {
+      console.error('Falha ao preparar iframe de impressão:', err);
+      window.focus();
+      window.print();
+    }
   };
 
   // Baixar Ordem de Serviço em Formato Excel
@@ -2754,6 +4077,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
       }
 
+      // 2.5. Hidratação sob demanda na subcoleção /media/attachments (Fase 2)
+      if (effectiveOrder.id && (!effectiveOrder.clientSignature || !effectiveOrder.photos || effectiveOrder.photos.length === 0)) {
+        try {
+          effectiveOrder = await dataService.hydrateServiceOrderMedia(effectiveOrder);
+        } catch (hydrateErr) {
+          console.warn('Aviso ao hidratar mídias externas para Excel:', hydrateErr);
+        }
+      }
+
       // 3. Busca direta no Firestore caso assinatura ou fotos ainda não estejam em memória
       if (effectiveOrder.id && (!effectiveOrder.clientSignature || !effectiveOrder.photos || effectiveOrder.photos.length === 0)) {
         try {
@@ -2783,6 +4115,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
       }
 
+      const ExcelJS = (await import('exceljs')).default;
       const workbook = new ExcelJS.Workbook();
       const displayOsNum = effectiveOrder.osNumber || (effectiveOrder.id && !effectiveOrder.id.startsWith('OS_') ? effectiveOrder.id : '00000');
       const worksheet = workbook.addWorksheet(`OS ${displayOsNum}`);
@@ -3565,9 +4898,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       currentRow++;
 
       // --- SIGNATURES SECTION (COM ASSINATURA DIGITAL DO CLIENTE E AUTENTICAÇÃO DA EQUIPE) ---
-      const pTech1 = technicians.find(t => t.id === effectiveOrder.technicianId);
-      const pTech2 = effectiveOrder.technician2Id ? technicians.find(t => t.id === effectiveOrder.technician2Id) : null;
-      const techNames = [pTech1?.name || effectiveOrder.technicianId, pTech2?.name || effectiveOrder.technician2Id].filter(Boolean).join(' / ');
+      const techNames = resolveOrderTechnicianDisplay(effectiveOrder, '');
       const authDate = effectiveOrder.finishedAt ? new Date(effectiveOrder.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
 
       // Linha de autenticação da equipe no topo direito (igual à pré-visualização A4)
@@ -3852,47 +5183,22 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       console.error('Erro ao gerar planilha Excel:', err);
       alert('Erro ao gerar o arquivo Excel da Ordem de Serviço.');
     }
-  };  // Filtros de busca com ordenação estrita por data de criação: mais recente para a mais antiga (independente de edição)
+  };  // Lista exibida na tabela principal:
+  // - Modo cursor (padrão): exibe exatamente a página atual de 25 últimas O.S. carregadas do Firestore
+  // - Modo exact_search: exibe exatamente o resultado da busca pelo nº exato da O.S.
+  // - Modo filtered_all: aplica refino de filtros secundários sobre o subconjunto filtrado no servidor
   const filteredOrders = useMemo(() => {
-    const termClean = (searchTerm || '').trim();
-    const termUpper = normalizeTechString(termClean);
+    if (userRole !== UserRole.TECHNICIAN && (paginationMode === 'cursor' || paginationMode === 'exact_search')) {
+      return orders;
+    }
 
     const list = orders.filter(o => {
-      let matchSearch = true;
-      if (termClean) {
-        const idUpper = (o.id || '').toUpperCase();
-        const osNumUpper = (o.osNumber || '').toUpperCase();
-        const clientUpper = normalizeTechString(o.clientName);
-        const equipUpper = normalizeTechString(o.equipmentName);
-        const addrUpper = normalizeTechString(o.addressStreet);
-
-        // Busca por técnico transformando tudo em MAIÚSCULAS
-        const t1 = techIndex.findTech(o.technicianId);
-        const t2 = techIndex.findTech(o.technician2Id);
-        const tech1Upper = t1 ? t1.normalizedUpper : normalizeTechString(o.technicianId);
-        const tech2Upper = t2 ? t2.normalizedUpper : normalizeTechString(o.technician2Id);
-        const techCode1 = t1 ? t1.indexedCode.toUpperCase() : '';
-        const techCode2 = t2 ? t2.indexedCode.toUpperCase() : '';
-
-        matchSearch = 
-          idUpper.includes(termUpper) || 
-          osNumUpper.includes(termUpper) ||
-          clientUpper.includes(termUpper) || 
-          equipUpper.includes(termUpper) ||
-          addrUpper.includes(termUpper) ||
-          tech1Upper.includes(termUpper) ||
-          tech2Upper.includes(termUpper) ||
-          techCode1.includes(termUpper) ||
-          techCode2.includes(termUpper) ||
-          (termUpper.includes('OFICINA') && Boolean(o.isWorkshop));
-      }
-        
-      const matchStatus = statusFilter === 'all' 
-        ? true 
-        : statusFilter === 'tech_finalized' 
-          ? Boolean(o.techFinalized && o.status === 'aberta') 
+      const matchStatus = statusFilter === 'all'
+        ? true
+        : statusFilter === 'tech_finalized'
+          ? Boolean(o.techFinalized && o.status === 'aberta')
           : o.status === statusFilter;
-      
+
       let matchDate = true;
       if (startDateFilter || endDateFilter) {
         // Regra do sistema: no caso das ordens de serviço a data a ser considerada é a data de finalização
@@ -3916,25 +5222,39 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           matchDate = false;
         }
       }
-      
+
       const matchWorkshop = !workshopOnlyFilter || Boolean(o.isWorkshop);
-      
-      return matchSearch && matchStatus && matchDate && matchWorkshop;
+
+      return matchStatus && matchDate && matchWorkshop;
     });
 
     return sortOrdersByCreationDateDesc(list);
-  }, [orders, searchTerm, statusFilter, workshopOnlyFilter, startDateFilter, endDateFilter, techIndex]);
+  }, [orders, paginationMode, userRole, statusFilter, workshopOnlyFilter, startDateFilter, endDateFilter]);
 
   // --- PAGINAÇÃO DA TABELA DE ORDENS DE SERVIÇO ---
-  const totalFilteredOrders = filteredOrders.length;
-  const totalPages = Math.max(1, Math.ceil(totalFilteredOrders / itemsPerPage));
-  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const isServerCursorMode = userRole !== UserRole.TECHNICIAN && paginationMode === 'cursor';
+  const totalFilteredOrders = isServerCursorMode
+    ? (serverTotalOrders !== null ? serverTotalOrders : ((currentPage - 1) * itemsPerPage + filteredOrders.length))
+    : filteredOrders.length;
+  const totalPages = isServerCursorMode
+    ? (serverTotalOrders !== null
+        ? Math.max(1, Math.ceil(serverTotalOrders / itemsPerPage))
+        : Math.max(loadedPagesCount + (hasMorePages ? 1 : 0), currentPage))
+    : Math.max(1, Math.ceil(totalFilteredOrders / itemsPerPage));
+  const safeCurrentPage = isServerCursorMode
+    ? Math.max(1, currentPage)
+    : Math.min(Math.max(1, currentPage), totalPages);
   const startIndex = (safeCurrentPage - 1) * itemsPerPage;
-  const endIndex = Math.min(startIndex + itemsPerPage, totalFilteredOrders);
+  const endIndex = isServerCursorMode
+    ? startIndex + filteredOrders.length
+    : Math.min(startIndex + itemsPerPage, totalFilteredOrders);
 
   const paginatedOrders = useMemo(() => {
+    if (isServerCursorMode) {
+      return filteredOrders;
+    }
     return filteredOrders.slice(startIndex, endIndex);
-  }, [filteredOrders, startIndex, endIndex]);
+  }, [filteredOrders, isServerCursorMode, startIndex, endIndex]);
 
   // Função auxiliar para gerar range de botões de paginação com reticências (...)
   const getPaginationRange = (currPage: number, totalPgs: number) => {
@@ -3953,27 +5273,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const handleJumpPage = () => {
     const pageNum = parseInt(jumpPageInput.trim(), 10);
     if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= totalPages) {
-      setCurrentPage(pageNum);
+      goToListPage(pageNum);
       setJumpPageInput('');
     }
   };
 
-  // --- CÁLCULO DE DADOS PARA GRÁFICOS E RELATÓRIO AVANÇADO ---
+  // --- CÁLCULO DE DADOS PARA GRÁFICOS E RELATÓRIO AVANÇADO (SOMENTE APÓS DEFINIR FILTROS E APERTAR ENTER/BUSCAR) ---
   const reportFilteredOrders = useMemo(() => {
-    const list = orders.filter(o => {
-      if (reportClientId !== 'all' && o.clientId !== reportClientId) return false;
-      if (reportTechnicianId !== 'all') {
-        const matchesTitular = techIndex.matchesTechTitular(o.technicianId, reportTechnicianId);
+    if (!reportHasSearched) return [];
+
+    const f = reportAppliedFilters;
+    const list = reportRawOrders.filter(o => {
+      if (f.clientId !== 'all' && o.clientId !== f.clientId) return false;
+      if (f.technicianId !== 'all') {
+        const matchesTitular = techIndex.matchesTechTitular(o.technicianId, f.technicianId);
         if (!matchesTitular) return false;
       }
-      if (reportStatus !== 'all' && o.status !== reportStatus) return false;
-      if (reportCompany !== 'all' && o.serviceCompany !== reportCompany) return false;
-      if (reportType !== 'all' && o.type !== reportType) return false;
-      
-      if (reportWorkshopFilter === 'workshop_only' && !o.isWorkshop) return false;
-      if (reportWorkshopFilter === 'standard_only' && o.isWorkshop) return false;
-      
-      if (reportStartDate || reportEndDate) {
+      if (f.status !== 'all' && o.status !== f.status) return false;
+      if (f.company !== 'all' && o.serviceCompany !== f.company) return false;
+      if (f.type !== 'all' && o.type !== f.type) return false;
+
+      if (f.workshopFilter === 'workshop_only' && !o.isWorkshop) return false;
+      if (f.workshopFilter === 'standard_only' && o.isWorkshop) return false;
+
+      if (f.startDate || f.endDate) {
         // Regra do sistema: no caso das ordens de serviço a data a ser considerada é a data de finalização
         const finalizedDate = o.finishedAt || o.adminFinalizedAt || o.techFinalizedAt || o.clientSignatureDate;
         const isFinished = o.status === 'finalizada' || o.status === 'pre_finalizada' || o.techFinalized || o.adminFinalized;
@@ -3982,8 +5305,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           const dateStr = typeof rawDate === 'string' ? rawDate : (rawDate.seconds ? new Date(rawDate.seconds * 1000).toISOString() : '');
           if (dateStr) {
             const dateOnly = dateStr.substring(0, 10);
-            if (reportStartDate && dateOnly < reportStartDate) return false;
-            if (reportEndDate && dateOnly > reportEndDate) return false;
+            if (f.startDate && dateOnly < f.startDate) return false;
+            if (f.endDate && dateOnly > f.endDate) return false;
           } else {
             return false;
           }
@@ -3995,33 +5318,62 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     });
 
     return sortOrdersByCreationDateDesc(list);
-  }, [orders, reportClientId, reportTechnicianId, reportStatus, reportCompany, reportType, reportWorkshopFilter, reportStartDate, reportEndDate]);
+  }, [reportHasSearched, reportRawOrders, reportAppliedFilters, techIndex]);
 
-  // Contagem de O.S. na Oficina no sistema (global e filtradas)
+  // Contagem de O.S. na Oficina no sistema (via agregação leve no servidor) e filtradas
   const totalWorkshopOrders = useMemo(() => {
+    if (serverWorkshopOrders !== null) return serverWorkshopOrders;
     return orders.filter(o => Boolean(o.isWorkshop)).length;
-  }, [orders]);
+  }, [serverWorkshopOrders, orders]);
 
   const reportFilteredWorkshopCount = useMemo(() => {
     return reportFilteredOrders.filter(o => Boolean(o.isWorkshop)).length;
   }, [reportFilteredOrders]);
 
-  const clientBillingMap: { [key: string]: number } = {};
-  reportFilteredOrders.forEach(o => {
-    clientBillingMap[o.clientName] = (clientBillingMap[o.clientName] || 0) + (o.totalValue || 0);
-  });
-  const clientChartData = Object.entries(clientBillingMap)
-    .map(([name, value]) => ({ name, value: Number(value.toFixed(2)) }))
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 5);
+  // --- PAGINAÇÃO DA TABELA DO RELATÓRIO AVANÇADO ---
+  const totalReportOrders = reportFilteredOrders.length;
+  const totalReportPages = Math.max(1, Math.ceil(totalReportOrders / reportItemsPerPage));
+  const safeReportPage = Math.min(Math.max(1, reportCurrentPage), totalReportPages);
+  const reportStartIndex = (safeReportPage - 1) * reportItemsPerPage;
+  const reportEndIndex = Math.min(reportStartIndex + reportItemsPerPage, totalReportOrders);
 
-  const statusChartData = [
-    { name: 'Aberta', value: reportFilteredOrders.filter(o => o.status === 'aberta').length, fill: '#ef4444' },
-    { name: 'Em Andamento', value: reportFilteredOrders.filter(o => o.status === 'em_andamento').length, fill: '#f59e0b' },
-    { name: 'Pré-Finalizada', value: reportFilteredOrders.filter(o => o.status === 'pre_finalizada').length, fill: '#06b6d4' },
-    { name: 'Finalizada', value: reportFilteredOrders.filter(o => o.status === 'finalizada').length, fill: '#10b981' },
-    { name: 'Cancelada', value: reportFilteredOrders.filter(o => o.status === 'cancelada').length, fill: '#94a3b8' },
-  ].filter(d => d.value > 0);
+  const paginatedReportOrders = useMemo(() => {
+    return reportFilteredOrders.slice(reportStartIndex, reportEndIndex);
+  }, [reportFilteredOrders, reportStartIndex, reportEndIndex]);
+
+  // Gráficos memoizados (só recalculam quando reportFilteredOrders muda)
+  const clientChartData = useMemo(() => {
+    const clientBillingMap: { [key: string]: number } = {};
+    reportFilteredOrders.forEach(o => {
+      clientBillingMap[o.clientName] = (clientBillingMap[o.clientName] || 0) + (o.totalValue || 0);
+    });
+    return Object.entries(clientBillingMap)
+      .map(([name, value]) => ({ name, value: Number(value.toFixed(2)) }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 5);
+  }, [reportFilteredOrders]);
+
+  const statusChartData = useMemo(() => {
+    let aberta = 0;
+    let emAndamento = 0;
+    let preFinalizada = 0;
+    let finalizada = 0;
+    let cancelada = 0;
+    for (const o of reportFilteredOrders) {
+      if (o.status === 'aberta') aberta++;
+      else if (o.status === 'em_andamento') emAndamento++;
+      else if (o.status === 'pre_finalizada') preFinalizada++;
+      else if (o.status === 'finalizada') finalizada++;
+      else if (o.status === 'cancelada') cancelada++;
+    }
+    return [
+      { name: 'Aberta', value: aberta, fill: '#ef4444' },
+      { name: 'Em Andamento', value: emAndamento, fill: '#f59e0b' },
+      { name: 'Pré-Finalizada', value: preFinalizada, fill: '#06b6d4' },
+      { name: 'Finalizada', value: finalizada, fill: '#10b981' },
+      { name: 'Cancelada', value: cancelada, fill: '#94a3b8' },
+    ].filter(d => d.value > 0);
+  }, [reportFilteredOrders]);
 
   const handleExportCSV = () => {
     if (reportFilteredOrders.length === 0) return;
@@ -4049,9 +5401,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     ];
     
     const rows = reportFilteredOrders.map(o => {
-      const tech = technicians.find(t => t.id === o.technicianId);
-      const tech2 = o.technician2Id ? technicians.find(t => t.id === o.technician2Id) : null;
-      const techName = tech && tech2 ? `${tech.name} / ${tech2.name}` : (tech ? tech.name : (tech2 ? tech2.name : 'Não Atribuído'));
+      const techName = resolveOrderTechnicianDisplay(o, 'Não Atribuído');
       const dateStr = o.openedAt ? new Date(o.openedAt).toLocaleDateString('pt-BR') : '';
       const osNum = o.osNumber || (o.id && !o.id.startsWith('OS_') ? o.id : '00000');
       const solutionText = (o.solution || '').trim();
@@ -4103,11 +5453,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (!selectedOrder) return null;
     const printCompany = getActiveCompanyForOrder(selectedOrder.serviceCompany);
     return (
-      <div className="flex justify-between items-start border-b border-black pb-2 mb-3">
-        <div className="flex gap-3 items-center">
-          {renderCompanyLogo(selectedOrder.serviceCompany, "w-[82px] h-[54px]")}
-          <div className="text-[8.5px] text-black leading-tight">
-            <span className="font-bold text-[9.5px] block leading-none mb-0.5 uppercase">
+      <div className="os-print-header">
+        <div className="os-print-header-left">
+          {renderCompanyLogo(selectedOrder.serviceCompany, "os-print-logo")}
+          <div className="os-print-company">
+            <span className="os-print-company-name">
               {printCompany?.fullName}
             </span>
             CNPJ: {printCompany?.cnpj} - IE: {printCompany?.ie || '-'} - IM: {printCompany?.im || '-'}<br />
@@ -4115,7 +5465,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             E-mail: {printCompany?.email} - Telefone: {printCompany?.phone}
           </div>
         </div>
-        <div className="text-right text-[8px] text-slate-600 font-semibold leading-tight shrink-0">
+        <div className="os-print-meta">
           Página: {pageNum} de {totalPages}<br />
           Usuário: {userProfile?.name || 'JOSE KENNEDY'}<br />
           Gerado em: {new Date().toLocaleDateString('pt-BR')} às {new Date().toLocaleTimeString('pt-BR')}
@@ -4128,14 +5478,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (!selectedOrder) return null;
     const printCompany = getActiveCompanyForOrder(selectedOrder.serviceCompany);
     return (
-      <div className="border-t border-black pt-2 flex justify-between items-center text-[7.5px] text-slate-500 font-semibold leading-normal mt-3">
+      <div className="os-print-footer">
         <div>
-          <span className="font-bold text-black uppercase">{printCompany?.fullName}</span><br />
+          <span className="os-print-footer-company">{printCompany?.fullName}</span><br />
           CNPJ: {printCompany?.cnpj} - IE: {printCompany?.ie || '-'} - IM: {printCompany?.im || '-'}<br />
           Endereço: {printCompany?.address}<br />
           E-mail: {printCompany?.email} - Telefone: {printCompany?.phone}
         </div>
-        <div className="text-right shrink-0">
+        <div className="os-print-footer-meta">
           Página: {pageNum} de {totalPages}<br />
           Usuário: {userProfile?.name || 'JOSE KENNEDY'}<br />
           Gerado em: {new Date().toLocaleDateString('pt-BR')} às {new Date().toLocaleTimeString('pt-BR')}
@@ -4146,22 +5496,21 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
   return (
     <div className="space-y-6">
-      {/* Estilo Especial de Impressão Embutido */}
+      {/* Estilo Especial de Impressão Embutido (100% autossuficiente para tela e Ctrl+P) */}
       <style>{`
+        @page {
+          size: A4 portrait;
+          margin: 8mm;
+        }
+        ${OS_PRINT_SHEET_CSS}
         @media print {
-          @page {
-            size: A4 portrait;
-            margin: 0mm !important;
-          }
-
-          /* Esconder elementos desnecessários na impressão */
           .no-print,
           .print-hide,
           aside,
           nav,
           header,
           button,
-          .print\:hidden {
+          .print\\:hidden {
             display: none !important;
             visibility: hidden !important;
             height: 0 !important;
@@ -4173,8 +5522,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             overflow: hidden !important;
           }
 
-          /* Forçar que todos os containers pais do print-area não restrinjam tamanho e fiquem no fluxo normal */
-          html, body, #root, #root > div, main, main > div, main > div > div, main > div > div > div, .print-modal-container {
+          html, body, #root, #root > div, main, main > div, main > div > div, .print-modal-container {
             background: #ffffff !important;
             color: #000000 !important;
             height: auto !important;
@@ -4190,25 +5538,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             animation: none !important;
           }
 
-          /* O contêiner do modal deve se comportar de forma estática sem deixar páginas em branco */
           .print-modal-container {
-            position: static !important;
-            display: block !important;
-            background: #ffffff !important;
-            backdrop-filter: none !important;
-            overflow: visible !important;
-            height: auto !important;
-            min-height: auto !important;
-            max-height: none !important;
             width: 100% !important;
             inset: auto !important;
-            padding: 0 !important;
-            margin: 0 !important;
+            backdrop-filter: none !important;
             z-index: auto !important;
           }
 
-          /* O contêiner de cartão do modal */
-          .max-w-5xl, .max-h-\\[95vh\\], .rounded-2xl, .shadow-2xl {
+          .print-modal-card,
+          .print-modal-scroll {
             max-width: none !important;
             max-height: none !important;
             height: auto !important;
@@ -4217,90 +5555,36 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             border: none !important;
             border-radius: 0 !important;
             background: transparent !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            display: block !important;
-          }
-
-          /* O contêiner do conteúdo imprimível */
-          .bg-slate-100, .overflow-y-auto, .flex-1 {
-            background: transparent !important;
             overflow: visible !important;
-            max-height: none !important;
-            height: auto !important;
-            padding: 0 !important;
             margin: 0 !important;
+            padding: 0 !important;
             display: block !important;
           }
 
-          #print-area {
-            position: relative !important;
+          .os-print-sheet {
             width: 100% !important;
-            max-width: 210mm !important;
-            min-height: auto !important;
-            height: auto !important;
-            margin: 0 auto !important;
-            padding: 4mm 6mm !important;
-            background: transparent !important;
-            box-shadow: none !important;
+            gap: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+          }
+
+          .os-print-page {
+            width: 100% !important;
+            min-height: 268mm !important;
+            padding: 0 !important;
             border: none !important;
-            page-break-before: avoid !important;
-            break-before: avoid !important;
+            box-shadow: none !important;
+            margin: 0 !important;
           }
 
-          .page-container {
-            width: 210mm !important;
-            min-height: 275mm !important;
-            padding: 10mm 12mm !important;
-            box-sizing: border-box !important;
-            position: relative !important;
-            background: white !important;
-            page-break-before: auto !important;
-            break-before: auto !important;
-            page-break-after: always !important;
-            break-after: page !important;
-            display: flex !important;
-            flex-direction: column !important;
-            justify-content: space-between !important;
-            margin: 0 auto !important;
+          .os-print-page + .os-print-page {
+            page-break-before: always !important;
+            break-before: page !important;
           }
 
-          .page-container:first-child {
-            page-break-before: avoid !important;
-            break-before: avoid !important;
-            margin-top: 0 !important;
-          }
-
-          .page-container:last-child {
-            page-break-after: avoid !important;
-            break-after: avoid !important;
-          }
-
-          /* Garante cores fortes */
           * {
             -webkit-print-color-adjust: exact !important;
             print-color-adjust: exact !important;
-          }
-
-          /* Permite que a tabela e corpo fluam naturalmente entre as páginas */
-          table, tbody {
-            page-break-inside: auto !important;
-            break-inside: auto !important;
-          }
-
-          thead {
-            display: table-header-group !important;
-          }
-
-          /* Evita quebras no meio de uma linha ou imagem */
-          tr {
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
-          }
-
-          img, .print-avoid-break {
-            page-break-inside: avoid !important;
-            break-inside: avoid !important;
           }
         }
       `}</style>
@@ -4531,7 +5815,31 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 return (
                   <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center space-y-3">
                     <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
-                    <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Carregando Ordens de Serviço...</p>
+                    <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      Carregando Ordens de Serviço{loadedOrdersProgress > 0 ? ` (${loadedOrdersProgress} carregadas...)` : '...'}
+                    </p>
+                  </div>
+                );
+              }
+
+              if (loadError && orders.length === 0) {
+                return (
+                  <div className="bg-rose-50/80 border border-rose-200 rounded-2xl p-8 text-center space-y-4">
+                    <div className="w-12 h-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
+                      <AlertTriangle className="w-6 h-6" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-black text-rose-900 uppercase tracking-wider">Falha de Conexão ao Carregar O.S.</h4>
+                      <p className="text-xs text-rose-700 max-w-md mx-auto">{loadError}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => loadData(true)}
+                      className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-wider rounded-xl shadow-sm transition-all cursor-pointer"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      Tentar Novamente
+                    </button>
                   </div>
                 );
               }
@@ -4614,7 +5922,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {paginatedMyOrders.map((order) => {
-                      const isOrderSigned = Boolean(order.clientSignature && order.clientSignature.trim().length > 0);
+                      const isOrderSigned = Boolean(
+                        order.hasClientSignature ||
+                        (order.clientSignature && order.clientSignature.trim().length > 0) ||
+                        order.clientSignatureDate
+                      );
                       const isOrderFinalized = Boolean(order.techFinalized || order.status === 'finalizada' || order.status === 'cancelada');
                       const orderSector = order.equipmentSector || (order.equipmentId ? equipments.find(e => e.id === order.equipmentId)?.sector : '') || '';
 
@@ -5171,47 +6483,130 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       ) : (
         activeTab === 'jetting' ? (
           <div className="bg-white rounded-2xl shadow-3xs overflow-hidden">
-            <JettingControlCenter onGenerateOS={handleGenerateJettingOS} onGenerateBatchOS={handleGenerateJettingOSBatch} />
+            <React.Suspense
+              fallback={
+                <div className="flex flex-col items-center justify-center py-20 gap-3 text-slate-400">
+                  <Loader2 className="w-7 h-7 animate-spin text-blue-600" />
+                  <span className="text-xs font-bold uppercase tracking-wider">Carregando Controle de Jateamento...</span>
+                </div>
+              }
+            >
+              <JettingControlCenter onGenerateOS={handleGenerateJettingOS} onGenerateBatchOS={handleGenerateJettingOSBatch} />
+            </React.Suspense>
           </div>
         ) : activeTab === 'list' ? (
           <>
-            {/* Filtros e Busca */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-white p-4 border border-slate-200/80 rounded-2xl shadow-3xs no-print items-center">
-            {/* Busca */}
-            <div className="relative">
-              <input 
-                type="text" 
-                placeholder="Buscar por O.S., Cliente, Equipamento..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all"
-              />
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            </div>
-
-            {/* Filtro de Status */}
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-black uppercase tracking-wider text-slate-400">Status:</span>
-              <div className="flex-1 grid grid-cols-3 sm:grid-cols-6 p-1 bg-slate-100 rounded-xl border border-slate-200/40 gap-1">
-                {['all', 'aberta', 'em_andamento', 'pre_finalizada', 'finalizada', 'cancelada'].map((st) => (
-                  <button
-                    key={st}
-                    onClick={() => setStatusFilter(st)}
-                    className={cn(
-                      "py-1.5 text-[8px] font-black rounded-lg transition-all uppercase tracking-widest leading-none cursor-pointer text-center",
-                      statusFilter === st 
-                        ? "bg-white text-slate-800 shadow-3xs" 
-                        : "text-slate-500 hover:text-slate-800"
-                    )}
-                  >
-                    {st === 'all' ? 'Todos' : getStatusLabel(st)}
-                  </button>
-                ))}
+            {/* Banner de Otimização de Mídia sob Demanda (Apenas Admin, quando existirem O.S. legadas com mídia inline) */}
+            {userRole === UserRole.ADMIN && legacyHeavyOrdersCount > 0 && (
+              <div className="bg-indigo-50/90 border border-indigo-200/80 rounded-2xl px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 no-print">
+                <div className="flex items-start sm:items-center gap-3 min-w-0">
+                  <div className="p-2 rounded-xl bg-indigo-100 text-indigo-700 shrink-0">
+                    <Zap className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-black text-indigo-950 uppercase tracking-wide">
+                      Acelerar carregamento das Ordens de Serviço ({legacyHeavyOrdersCount} O.S. pendentes de otimização)
+                    </p>
+                    <p className="text-[11px] font-medium text-indigo-800/90">
+                      {isOptimizingMedia && optimizeProgress
+                        ? `Otimizando com segurança: ${optimizeProgress.processed} de ${optimizeProgress.total} processadas (${optimizeProgress.migrated} migradas)...`
+                        : 'Move fotos e assinaturas antigas para carregamento sob demanda sem perder nenhum dado, deixando a lista muito mais rápida.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleOptimizeLegacyMedia}
+                  disabled={isOptimizingMedia}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all shrink-0 flex items-center justify-center gap-2 shadow-2xs",
+                    isOptimizingMedia
+                      ? "bg-indigo-300 text-white cursor-not-allowed"
+                      : "bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer active:scale-95"
+                  )}
+                >
+                  {isOptimizingMedia ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>
+                        {optimizeProgress
+                          ? `${Math.round((optimizeProgress.processed / Math.max(1, optimizeProgress.total)) * 100)}%`
+                          : 'Otimizando...'}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>Otimizar O.S. Agora</span>
+                    </>
+                  )}
+                </button>
               </div>
-            </div>
+            )}
+
+            {/* Filtros e Busca */}
+            <div className="flex flex-col gap-3 bg-white p-4 border border-slate-200/80 rounded-2xl shadow-3xs no-print">
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+                {/* Busca por Número Exato da O.S. (acionada somente ao apertar Enter ou clicar em Buscar) */}
+                <form onSubmit={handleExactSearchSubmit} className="flex items-center gap-1.5 md:col-span-5">
+                  <div className="relative flex-1 min-w-0">
+                    <input
+                      type="text"
+                      placeholder="Nº exato da O.S. (ex: DC979) + Enter"
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="w-full pl-9 pr-8 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 placeholder:text-slate-400 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all uppercase"
+                    />
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    {(searchTerm || activeExactSearch) && (
+                      <button
+                        type="button"
+                        onClick={handleClearExactSearch}
+                        className="p-1 text-slate-400 hover:text-rose-500 absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer"
+                        title="Limpar busca e voltar para as últimas O.S."
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isSearchingExact}
+                    className="px-3.5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-[11px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 shrink-0 cursor-pointer shadow-3xs"
+                    title="Buscar O.S. pelo número exato (Enter)"
+                  >
+                    {isSearchingExact ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                    <span>Buscar</span>
+                  </button>
+                </form>
+
+                {/* Filtro de Status */}
+                <div className="flex items-center gap-2 md:col-span-7 min-w-0">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 shrink-0">Status:</span>
+                  <div className="flex-1 flex flex-wrap items-center p-1 bg-slate-100 rounded-xl border border-slate-200/40 gap-1">
+                    {['all', 'aberta', 'em_andamento', 'pre_finalizada', 'finalizada', 'cancelada'].map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        onClick={() => setStatusFilter(st)}
+                        className={cn(
+                          "px-2.5 py-1.5 text-[10px] font-black rounded-lg transition-all uppercase tracking-wide leading-none cursor-pointer whitespace-nowrap",
+                          statusFilter === st 
+                            ? "bg-white text-slate-800 shadow-3xs" 
+                            : "text-slate-500 hover:text-slate-800"
+                        )}
+                      >
+                        {st === 'all' ? 'Todos' : getStatusLabel(st)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
 
             {/* Filtro de Período */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 md:col-span-6">
               <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 shrink-0">Período:</span>
               <div className="flex items-center gap-1.5 w-full">
                 <input
@@ -5239,13 +6634,13 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
             </div>
 
-            {/* Botão Filtro de Oficina com Indicador de Quantidade */}
-            <div className="flex items-center justify-end">
+            {/* Botão Filtro de Oficina com Indicador de Quantidade + Atualizar */}
+            <div className="flex items-center justify-end gap-2 md:col-span-6">
               <button
                 type="button"
                 onClick={() => setWorkshopOnlyFilter(prev => !prev)}
                 className={cn(
-                  "w-full py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-between border cursor-pointer shadow-3xs",
+                  "flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-between border cursor-pointer shadow-3xs",
                   workshopOnlyFilter
                     ? "bg-purple-600 text-white border-purple-700 shadow-purple-500/25 ring-2 ring-purple-400/30"
                     : "bg-slate-50 hover:bg-purple-50/60 text-slate-700 border-slate-200 hover:border-purple-200"
@@ -5267,18 +6662,115 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   {totalWorkshopOrders} na oficina
                 </span>
               </button>
+
+              <button
+                type="button"
+                onClick={() => loadData(true)}
+                disabled={loading || isRefreshing}
+                className="py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-200 text-slate-700 hover:text-blue-700 disabled:opacity-50 cursor-pointer shrink-0 shadow-3xs"
+                title="Recarregar Ordens de Serviço diretamente do servidor"
+              >
+                <RotateCcw className={cn("w-3.5 h-3.5", (loading || isRefreshing) && "animate-spin")} />
+                <span className="hidden sm:inline">{isRefreshing ? 'Atualizando...' : 'Atualizar'}</span>
+              </button>
             </div>
+              </div>
           </div>
+
+          {loadError && orders.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 no-print">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>{loadError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => loadData(true)}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-black uppercase tracking-wider rounded-lg cursor-pointer"
+              >
+                Tentar Novamente
+              </button>
+            </div>
+          )}
+
+          {activeExactSearch && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 no-print">
+              <div className="flex items-center gap-2 text-xs font-bold text-blue-900">
+                <Search className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>
+                  Busca exata pelo número <strong className="uppercase">#{activeExactSearch.replace(/^#+/, '')}</strong>
+                  {!isSearchingExact && ` — ${filteredOrders.length} resultado(s)`}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleClearExactSearch}
+                className="px-3 py-1 bg-white hover:bg-blue-100 text-blue-700 border border-blue-200 text-[11px] font-black uppercase tracking-wider rounded-lg cursor-pointer transition-all"
+              >
+                Voltar para as últimas O.S.
+              </button>
+            </div>
+          )}
 
           {/* Lista de OS */}
           <div className="bg-white border border-slate-200/80 rounded-2xl shadow-3xs overflow-hidden no-print">
-            {loading ? (
-              <div className="p-12 text-center text-slate-400 font-bold uppercase tracking-wider text-xs">
-                Carregando Ordens de Serviço...
+            {(loading && orders.length === 0) || isSearchingExact ? (
+              <div className="p-12 text-center space-y-3">
+                <Loader2 className="w-7 h-7 text-blue-600 animate-spin mx-auto" />
+                <p className="text-slate-500 font-bold uppercase tracking-wider text-xs">
+                  {isSearchingExact
+                    ? `Buscando O.S. #${activeExactSearch.replace(/^#+/, '')}...`
+                    : `Carregando as últimas ${itemsPerPage} Ordens de Serviço...`}
+                </p>
+              </div>
+            ) : loadError && orders.length === 0 ? (
+              <div className="p-10 text-center space-y-4">
+                <div className="w-12 h-12 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto border border-rose-100">
+                  <AlertTriangle className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-sm font-black text-slate-800 uppercase tracking-wider">
+                    Não foi possível carregar as Ordens de Serviço
+                  </p>
+                  <p className="text-xs text-slate-500 max-w-lg mx-auto">
+                    {loadError}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadData(true)}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-wider rounded-xl shadow-sm transition-all cursor-pointer"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Tentar Novamente
+                </button>
               </div>
             ) : filteredOrders.length === 0 ? (
-              <div className="p-12 text-center text-slate-400 font-bold uppercase tracking-wider text-xs">
-                Nenhuma Ordem de Serviço encontrada.
+              <div className="p-12 text-center space-y-3">
+                <p className="text-slate-400 font-bold uppercase tracking-wider text-xs">
+                  {activeExactSearch
+                    ? `Nenhuma Ordem de Serviço encontrada com o número exato "${activeExactSearch}".`
+                    : 'Nenhuma Ordem de Serviço encontrada.'}
+                </p>
+                {activeExactSearch ? (
+                  <button
+                    type="button"
+                    onClick={handleClearExactSearch}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    Limpar busca e exibir últimas O.S.
+                  </button>
+                ) : orders.length === 0 && (
+                  <button
+                    type="button"
+                    onClick={() => loadData(true)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-black uppercase tracking-wider rounded-xl transition-all cursor-pointer"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Recarregar do Servidor
+                  </button>
+                )}
               </div>
             ) : (
               <>
@@ -5287,14 +6779,20 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <div className="flex items-center gap-2 text-xs font-semibold text-slate-600">
                     <span>Mostrando</span>
                     <span className="font-black text-slate-800 bg-white px-2 py-0.5 rounded-md border border-slate-200 shadow-3xs">
-                      {totalFilteredOrders === 0 ? '0' : `${startIndex + 1} - ${endIndex}`}
+                      {filteredOrders.length === 0 ? '0' : `${startIndex + 1} - ${endIndex}`}
                     </span>
                     <span>de</span>
                     <span className="font-black text-slate-800">{totalFilteredOrders}</span>
                     <span>ordens de serviço</span>
-                    {filteredOrders.length !== orders.length && (
+                    {isServerCursorMode && (
                       <span className="text-[10px] text-slate-400 font-medium ml-1">
-                        (filtradas do total de {orders.length})
+                        (carregamento sob demanda por página)
+                      </span>
+                    )}
+                    {(loading || isRefreshing || isLoadingPage) && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-600 ml-1">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        {isLoadingPage ? 'Carregando página...' : 'Sincronizando...'}
                       </span>
                     )}
                   </div>
@@ -5308,8 +6806,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                             key={size}
                             type="button"
                             onClick={() => setItemsPerPage(size)}
+                            disabled={isLoadingPage}
                             className={cn(
-                              "px-2 py-1 text-[10px] font-bold rounded-md transition-all cursor-pointer",
+                              "px-2 py-1 text-[10px] font-bold rounded-md transition-all cursor-pointer disabled:opacity-50",
                               itemsPerPage === size
                                 ? "bg-blue-600 text-white shadow-3xs"
                                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -5321,12 +6820,12 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                       </div>
                     </div>
 
-                    {totalPages > 1 && (
+                    {(totalPages > 1 || (isServerCursorMode && (safeCurrentPage > 1 || hasMorePages))) && (
                       <div className="flex items-center gap-1 bg-white border border-slate-200 rounded-lg p-0.5 shadow-3xs">
                         <button
                           type="button"
-                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                          disabled={safeCurrentPage === 1}
+                          onClick={() => goToListPage(Math.max(1, safeCurrentPage - 1))}
+                          disabled={safeCurrentPage === 1 || isLoadingPage}
                           className="p-1 rounded-md text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer"
                           title="Página Anterior"
                         >
@@ -5337,8 +6836,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         </span>
                         <button
                           type="button"
-                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                          disabled={safeCurrentPage === totalPages}
+                          onClick={() => goToListPage(safeCurrentPage + 1)}
+                          disabled={isLoadingPage || (isServerCursorMode ? (!hasMorePages && safeCurrentPage >= loadedPagesCount) : safeCurrentPage === totalPages)}
                           className="p-1 rounded-md text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer"
                           title="Próxima Página"
                         >
@@ -5422,6 +6921,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                             <div className="flex items-center justify-center gap-1.5">
                               {(() => {
                                 const isSigned = Boolean(
+                                  o.hasClientSignature ||
                                   (o.clientSignature && String(o.clientSignature).trim().length > 10) ||
                                   o.clientSignatureDate ||
                                   o.techFinalized ||
@@ -5510,8 +7010,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     {/* Botão Primeira Página */}
                     <button
                       type="button"
-                      onClick={() => setCurrentPage(1)}
-                      disabled={safeCurrentPage === 1}
+                      onClick={() => goToListPage(1)}
+                      disabled={safeCurrentPage === 1 || isLoadingPage}
                       className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shadow-3xs"
                       title="Primeira Página"
                     >
@@ -5521,8 +7021,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     {/* Botão Página Anterior */}
                     <button
                       type="button"
-                      onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                      disabled={safeCurrentPage === 1}
+                      onClick={() => goToListPage(Math.max(1, safeCurrentPage - 1))}
+                      disabled={safeCurrentPage === 1 || isLoadingPage}
                       className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shadow-3xs"
                       title="Página Anterior"
                     >
@@ -5530,58 +7030,88 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     </button>
 
                     {/* Botões de Números de Página */}
-                    {getPaginationRange(safeCurrentPage, totalPages).map((p, idx) => {
-                      if (p === 'DOTS') {
+                    {isServerCursorMode ? (
+                      Array.from(
+                        { length: Math.min(totalPages, Math.max(loadedPagesCount + (hasMorePages ? 1 : 0), safeCurrentPage)) },
+                        (_, idx) => idx + 1
+                      ).map((pageNum) => {
+                        const isActive = pageNum === safeCurrentPage;
+                        const isLoaded = Boolean(pagesCacheRef.current[pageNum]);
                         return (
-                          <span key={`dots-${idx}`} className="px-2 py-1 text-slate-400 font-black text-xs select-none">
-                            ...
-                          </span>
+                          <button
+                            key={`page-${pageNum}`}
+                            type="button"
+                            onClick={() => goToListPage(pageNum)}
+                            disabled={isLoadingPage}
+                            title={isLoaded ? `Página ${pageNum} (em cache)` : `Carregar página ${pageNum} sob demanda`}
+                            className={cn(
+                              "min-w-[32px] h-8 px-2 text-xs font-black rounded-lg transition-all cursor-pointer flex items-center justify-center disabled:opacity-50",
+                              isActive
+                                ? "bg-blue-600 text-white shadow-3xs"
+                                : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 shadow-3xs"
+                            )}
+                          >
+                            {pageNum}
+                          </button>
                         );
-                      }
-                      const pageNum = Number(p);
-                      const isActive = pageNum === safeCurrentPage;
-                      return (
-                        <button
-                          key={`page-${pageNum}`}
-                          type="button"
-                          onClick={() => setCurrentPage(pageNum)}
-                          className={cn(
-                            "min-w-[32px] h-8 px-2 text-xs font-black rounded-lg transition-all cursor-pointer flex items-center justify-center",
-                            isActive
-                              ? "bg-blue-600 text-white shadow-3xs"
-                              : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 shadow-3xs"
-                          )}
-                        >
-                          {pageNum}
-                        </button>
-                      );
-                    })}
+                      })
+                    ) : (
+                      getPaginationRange(safeCurrentPage, totalPages).map((p, idx) => {
+                        if (p === 'DOTS') {
+                          return (
+                            <span key={`dots-${idx}`} className="px-2 py-1 text-slate-400 font-black text-xs select-none">
+                              ...
+                            </span>
+                          );
+                        }
+                        const pageNum = Number(p);
+                        const isActive = pageNum === safeCurrentPage;
+                        return (
+                          <button
+                            key={`page-${pageNum}`}
+                            type="button"
+                            onClick={() => goToListPage(pageNum)}
+                            disabled={isLoadingPage}
+                            className={cn(
+                              "min-w-[32px] h-8 px-2 text-xs font-black rounded-lg transition-all cursor-pointer flex items-center justify-center disabled:opacity-50",
+                              isActive
+                                ? "bg-blue-600 text-white shadow-3xs"
+                                : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 shadow-3xs"
+                            )}
+                          >
+                            {pageNum}
+                          </button>
+                        );
+                      })
+                    )}
 
                     {/* Botão Próxima Página */}
                     <button
                       type="button"
-                      onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                      disabled={safeCurrentPage === totalPages}
-                      className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shadow-3xs"
+                      onClick={() => goToListPage(safeCurrentPage + 1)}
+                      disabled={isLoadingPage || (isServerCursorMode ? (!hasMorePages && safeCurrentPage >= loadedPagesCount) : safeCurrentPage === totalPages)}
+                      className="px-2.5 h-8 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shadow-3xs flex items-center gap-1 text-xs font-bold"
                       title="Próxima Página"
                     >
-                      <ChevronRight className="w-4 h-4" />
+                      {isLoadingPage ? <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" /> : <ChevronRight className="w-4 h-4" />}
                     </button>
 
-                    {/* Botão Última Página */}
-                    <button
-                      type="button"
-                      onClick={() => setCurrentPage(totalPages)}
-                      disabled={safeCurrentPage === totalPages}
-                      className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shadow-3xs"
-                      title="Última Página"
-                    >
-                      <ChevronsRight className="w-4 h-4" />
-                    </button>
+                    {/* Botão Última Página (apenas no modo de lista filtrada em memória, para evitar leitura de todas as páginas de uma vez no modo sob demanda) */}
+                    {!isServerCursorMode && (
+                      <button
+                        type="button"
+                        onClick={() => goToListPage(totalPages)}
+                        disabled={safeCurrentPage === totalPages || isLoadingPage}
+                        className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed transition-all cursor-pointer shadow-3xs"
+                        title="Última Página"
+                      >
+                        <ChevronsRight className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
 
-                  {/* Atalho para ir direto a uma página */}
-                  {totalPages > 3 && (
+                  {/* Atalho para ir direto a uma página (apenas quando a lista filtrada já está em memória) */}
+                  {!isServerCursorMode && totalPages > 3 && (
                     <div className="flex items-center gap-1.5 text-xs text-slate-500">
                       <span className="text-[11px] font-bold text-slate-400">Ir para:</span>
                       <input
@@ -5612,13 +7142,47 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         </>
       ) : (
         <>
-          {/* RELATÓRIO AVANÇADO DE O.S. */}
-          <div className="bg-white p-5 border border-slate-200/80 rounded-2xl shadow-3xs space-y-4 no-print">
-            <div className="flex items-center gap-2 border-b border-slate-100 pb-2">
-              <Filter className="w-4 h-4 text-blue-600" />
-              <h3 className="text-xs font-black uppercase text-slate-700 tracking-wider">Filtros do Relatório de O.S.</h3>
+          {/* RELATÓRIO AVANÇADO DE O.S. (CARREGAMENTO SOB DEMANDA POR FILTROS + ENTER) */}
+          <form
+            onSubmit={handleExecuteReportSearch}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.target as HTMLElement)?.tagName !== 'TEXTAREA') {
+                e.preventDefault();
+                handleExecuteReportSearch();
+              }
+            }}
+            className="bg-white p-5 border border-slate-200/80 rounded-2xl shadow-3xs space-y-4 no-print"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2">
+              <div className="flex items-center gap-2">
+                <Filter className="w-4 h-4 text-blue-600" />
+                <h3 className="text-xs font-black uppercase text-slate-700 tracking-wider">Filtros do Relatório de O.S.</h3>
+                <span className="text-[10px] font-semibold text-slate-400">
+                  (Defina os filtros e pressione Enter para buscar)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                {(hasAnyReportFilterSelected || reportHasSearched) && (
+                  <button
+                    type="button"
+                    onClick={handleClearReportFilters}
+                    disabled={reportLoading}
+                    className="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-slate-600 hover:text-rose-600 bg-slate-100 hover:bg-rose-50 border border-slate-200 rounded-lg transition-all cursor-pointer"
+                  >
+                    Limpar Filtros
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={reportLoading}
+                  className="px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-3xs"
+                >
+                  {reportLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                  <span>{reportLoading ? 'Buscando...' : 'Buscar Relatório (Enter)'}</span>
+                </button>
+              </div>
             </div>
-            
+
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
               {/* Período De */}
               <div>
@@ -5626,7 +7190,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <input
                   type="date"
                   value={reportStartDate}
-                  onChange={(e) => setReportStartDate(e.target.value)}
+                  onChange={(e) => { setReportStartDate(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 />
               </div>
@@ -5637,7 +7201,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <input
                   type="date"
                   value={reportEndDate}
-                  onChange={(e) => setReportEndDate(e.target.value)}
+                  onChange={(e) => { setReportEndDate(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 />
               </div>
@@ -5647,7 +7211,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Cliente</label>
                 <select
                   value={reportClientId}
-                  onChange={(e) => setReportClientId(e.target.value)}
+                  onChange={(e) => { setReportClientId(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 >
                   <option value="all">TODOS OS CLIENTES</option>
@@ -5662,7 +7226,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Técnico</label>
                 <select
                   value={reportTechnicianId}
-                  onChange={(e) => setReportTechnicianId(e.target.value)}
+                  onChange={(e) => { setReportTechnicianId(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all uppercase"
                 >
                   <option value="all">TODOS OS TÉCNICOS</option>
@@ -5677,7 +7241,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Status</label>
                 <select
                   value={reportStatus}
-                  onChange={(e) => setReportStatus(e.target.value)}
+                  onChange={(e) => { setReportStatus(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 >
                   <option value="all">TODOS OS STATUS</option>
@@ -5696,7 +7260,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Empresa Prestadora</label>
                 <select
                   value={reportCompany}
-                  onChange={(e) => setReportCompany(e.target.value)}
+                  onChange={(e) => { setReportCompany(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 >
                   <option value="all">TODAS</option>
@@ -5716,7 +7280,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Tipo de Manutenção</label>
                 <select
                   value={reportType}
-                  onChange={(e) => setReportType(e.target.value)}
+                  onChange={(e) => { setReportType(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 >
                   <option value="all">TODOS OS TIPOS</option>
@@ -5744,7 +7308,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 </div>
                 <select
                   value={reportWorkshopFilter}
-                  onChange={(e) => setReportWorkshopFilter(e.target.value as any)}
+                  onChange={(e) => { setReportWorkshopFilter(e.target.value as any); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
                   className={cn(
                     "w-full border rounded-xl py-2 px-3 text-xs font-bold outline-none focus:ring-2 transition-all",
                     reportWorkshopFilter === 'workshop_only'
@@ -5761,6 +7325,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               {/* Botões de Ação do Relatório */}
               <div className="flex items-end gap-2">
                 <button
+                  type="button"
                   onClick={handleExportCSV}
                   disabled={reportFilteredOrders.length === 0}
                   className="flex-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 text-[10px] font-black uppercase tracking-wider py-2.5 px-4 rounded-xl transition-all border border-slate-200 flex items-center justify-center gap-2 h-[38px] cursor-pointer"
@@ -5768,6 +7333,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <Download className="w-4 h-4 text-slate-500" /> Exportar CSV
                 </button>
                 <button
+                  type="button"
                   onClick={() => setIsReportPrintOpen(true)}
                   disabled={reportFilteredOrders.length === 0}
                   className="flex-1 bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-black uppercase tracking-wider py-2.5 px-4 rounded-xl transition-all border border-blue-200/50 flex items-center justify-center gap-2 h-[38px] cursor-pointer"
@@ -5777,6 +7343,25 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
             </div>
 
+            {reportError && (
+              <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-2.5 flex items-center gap-2 text-xs font-bold text-amber-900">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>{reportError}</span>
+              </div>
+            )}
+
+            {reportHasSearched && reportFiltersDirty && !reportLoading && (
+              <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-2 flex items-center justify-between gap-2 text-xs font-bold text-blue-900">
+                <span>Filtros alterados. Pressione Enter ou clique em "Buscar Relatório" para atualizar os dados.</span>
+                <button
+                  type="submit"
+                  className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-wider rounded-lg cursor-pointer shrink-0"
+                >
+                  Atualizar Agora
+                </button>
+              </div>
+            )}
+
             {/* Campo de Observações Gerais para o Relatório Impresso */}
             <div className="pt-2 border-t border-slate-100">
               <div className="flex items-center justify-between mb-1">
@@ -5785,6 +7370,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 </label>
                 {reportGeneralNotes && (
                   <button
+                    type="button"
                     onClick={() => setReportGeneralNotes('')}
                     className="text-[9px] text-red-500 hover:underline cursor-pointer lowercase"
                   >
@@ -5800,8 +7386,31 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all resize-y placeholder:text-slate-400"
               />
             </div>
-          </div>
+          </form>
 
+          {reportLoading ? (
+            <div className="bg-white border border-slate-200/80 rounded-2xl p-14 text-center space-y-3 shadow-3xs no-print">
+              <Loader2 className="w-8 h-8 text-blue-600 animate-spin mx-auto" />
+              <p className="text-xs font-black uppercase tracking-wider text-slate-600">
+                Buscando Ordens de Serviço conforme os filtros definidos...
+              </p>
+            </div>
+          ) : !reportHasSearched ? (
+            <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-12 text-center space-y-3 shadow-3xs no-print">
+              <div className="w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center mx-auto border border-blue-100">
+                <Filter className="w-6 h-6" />
+              </div>
+              <div className="space-y-1 max-w-md mx-auto">
+                <p className="text-sm font-black uppercase tracking-wider text-slate-700">
+                  Defina os filtros para gerar o relatório
+                </p>
+                <p className="text-xs text-slate-500 font-medium">
+                  Para manter o sistema rápido e leve, nenhuma O.S. é carregada automaticamente. Selecione um ou mais filtros acima (Período, Cliente, Técnico, Status, Prestadora, Tipo ou Oficina) e pressione <strong>Enter</strong> ou clique em <strong>Buscar Relatório</strong>.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <>
           {/* Indicadores do Relatório */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 no-print">
             {/* Total de OS */}
@@ -5816,26 +7425,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             </div>
 
             {/* O.S. na Oficina (Indicador Imediato) */}
-            <div 
-              onClick={() => setReportWorkshopFilter(prev => prev === 'workshop_only' ? 'all' : 'workshop_only')}
+            <div
+              onClick={() => {
+                const nextWorkshop = reportWorkshopFilter === 'workshop_only' ? 'all' : 'workshop_only';
+                setReportWorkshopFilter(nextWorkshop);
+                handleExecuteReportSearch(undefined, { workshopFilter: nextWorkshop });
+              }}
               className={cn(
                 "border p-5 rounded-2xl shadow-3xs flex items-center gap-4 transition-all cursor-pointer group",
-                reportWorkshopFilter === 'workshop_only'
+                reportAppliedFilters.workshopFilter === 'workshop_only'
                   ? "bg-purple-50/80 border-purple-400 ring-2 ring-purple-400/20"
                   : "bg-white border-slate-200/80 hover:border-purple-200 hover:bg-purple-50/30"
               )}
-              title={reportWorkshopFilter === 'workshop_only' ? "Filtro ativo: exibindo apenas O.S. em Oficina. Clique para ver todas." : "Clique para filtrar apenas O.S. em Oficina"}
+              title={reportAppliedFilters.workshopFilter === 'workshop_only' ? "Filtro ativo: exibindo apenas O.S. em Oficina. Clique para ver todas." : "Clique para filtrar apenas O.S. em Oficina"}
             >
               <div className={cn(
                 "p-3 rounded-xl shrink-0 transition-colors",
-                reportWorkshopFilter === 'workshop_only' ? "bg-purple-600 text-white" : "bg-purple-100 text-purple-700 group-hover:bg-purple-600 group-hover:text-white"
+                reportAppliedFilters.workshopFilter === 'workshop_only' ? "bg-purple-600 text-white" : "bg-purple-100 text-purple-700 group-hover:bg-purple-600 group-hover:text-white"
               )}>
                 <Wrench className="w-6 h-6" />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-1">
                   <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 block truncate">Em Oficina</span>
-                  {reportWorkshopFilter === 'workshop_only' && (
+                  {reportAppliedFilters.workshopFilter === 'workshop_only' && (
                     <span className="text-[8px] font-black uppercase bg-purple-200 text-purple-900 px-1.5 py-0.2 rounded-full">Ativo</span>
                   )}
                 </div>
@@ -5968,92 +7581,183 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             </div>
           )}
 
-          {/* Tabela de Resultados no Relatório */}
+          {/* Tabela de Resultados no Relatório (Paginada e com lookup O(1) de Técnico) */}
           <div className="bg-white border border-slate-200/80 rounded-2xl shadow-3xs overflow-hidden no-print">
-            <div className="p-4 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
-              <h3 className="text-xs font-black uppercase text-slate-700 tracking-wider">Ordens de Serviço Filtradas</h3>
-              <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-2.5 py-1 rounded-full uppercase tracking-wider">
-                {reportFilteredOrders.length} Resultados
-              </span>
+            <div className="p-4 bg-slate-50 border-b border-slate-100 flex flex-wrap justify-between items-center gap-3">
+              <div className="flex items-center gap-2.5">
+                <h3 className="text-xs font-black uppercase text-slate-700 tracking-wider">Ordens de Serviço Filtradas</h3>
+                <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-2.5 py-1 rounded-full uppercase tracking-wider">
+                  {totalReportOrders} Resultados
+                </span>
+              </div>
+              {totalReportOrders > 0 && (
+                <div className="flex items-center gap-3 text-xs text-slate-500">
+                  <span className="font-semibold">
+                    Mostrando <strong className="text-slate-800">{reportStartIndex + 1} - {reportEndIndex}</strong> de <strong className="text-slate-800">{totalReportOrders}</strong>
+                  </span>
+                  <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 shadow-3xs">
+                    {[25, 50, 100].map((size) => (
+                      <button
+                        key={size}
+                        type="button"
+                        onClick={() => setReportItemsPerPage(size)}
+                        className={cn(
+                          "px-2 py-1 text-[10px] font-bold rounded-md transition-all cursor-pointer",
+                          reportItemsPerPage === size
+                            ? "bg-blue-600 text-white shadow-3xs"
+                            : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                        )}
+                      >
+                        {size}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             {reportFilteredOrders.length === 0 ? (
               <div className="p-12 text-center text-slate-400 font-bold uppercase tracking-wider text-xs">
                 Nenhuma O.S. atende aos filtros definidos.
               </div>
             ) : (
-              <div className="overflow-x-auto text-xs">
-                <table className="w-full">
-                  <thead>
-                    <tr className="bg-slate-50 border-b border-slate-150 text-[10px] font-black text-slate-400 uppercase tracking-wider">
-                      <th className="px-5 py-3">O.S.</th>
-                      <th className="px-5 py-3">Cliente</th>
-                      <th className="px-5 py-3">Data</th>
-                      <th className="px-5 py-3">Técnico</th>
-                      <th className="px-5 py-3">Prestadora</th>
-                      <th className="px-5 py-3 text-center">Status</th>
-                      <th className="px-5 py-3 text-right">Total</th>
-                      <th className="px-5 py-3 text-center">Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {reportFilteredOrders.map((o) => {
-                      const tech = technicians.find(t => t.id === o.technicianId);
-                      const tech2 = o.technician2Id ? technicians.find(t => t.id === o.technician2Id) : null;
-                      const techDisplay = tech && tech2 ? `${tech.name} / ${tech2.name}` : (tech ? tech.name : (tech2 ? tech2.name : '---'));
-                      return (
-                        <tr key={o.id} className="hover:bg-slate-50/50 transition-colors">
-                          <td className="px-5 py-3.5 font-black text-slate-700">
-                            #{o.osNumber || (o.id && !o.id.startsWith('OS_') ? o.id : '00000')}
-                          </td>
-                          <td className="px-5 py-3.5 font-extrabold text-slate-800">{o.clientName}</td>
-                          <td className="px-5 py-3.5 text-slate-500 font-semibold">
-                            {o.openedAt ? new Date(o.openedAt).toLocaleDateString('pt-BR') : '---'}
-                          </td>
-                          <td className="px-5 py-3.5 text-slate-600 font-bold">{techDisplay}</td>
-                          <td className="px-5 py-3.5 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
-                            {getActiveCompanyForOrder(o.serviceCompany).shortName}
-                          </td>
-                          <td className="px-5 py-3.5 text-center">
-                            <span className={cn(
-                              "px-2 py-0.5 text-[8px] font-black uppercase tracking-wider rounded-full",
-                              o.status === 'aberta' ? "bg-blue-50 text-blue-600 border border-blue-100" :
-                              o.status === 'em_andamento' ? "bg-amber-50 text-amber-600 border border-amber-100" :
-                              o.status === 'pre_finalizada' ? "bg-teal-50 text-teal-600 border border-teal-100" :
-                              o.status === 'finalizada' ? "bg-emerald-50 text-emerald-600 border border-emerald-100" :
-                              "bg-rose-50 text-rose-600 border border-rose-100"
-                            )}>
-                              {getStatusLabel(o.status)}
-                            </span>
-                          </td>
-                          <td className="px-5 py-3.5 text-right font-black text-slate-800">
-                            R$ {o.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                          </td>
-                          <td className="px-5 py-3.5 text-center">
-                            <div className="flex items-center justify-center gap-1.5">
-                              <button
-                                onClick={() => handleEditPreCheck(o)}
-                                className="p-1.5 text-amber-600 hover:bg-amber-50 border border-transparent hover:border-amber-100 rounded-lg transition-all cursor-pointer"
-                                title={o.status === 'cancelada' ? "Visualizar O.S. Cancelada" : "Editar O.S."}
-                              >
-                                <Edit className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={() => handlePrint(o)}
-                                className="p-1.5 text-blue-600 hover:bg-blue-50 border border-transparent hover:border-blue-100 rounded-lg transition-all cursor-pointer"
-                                title="Imprimir O.S."
-                              >
-                                <Printer className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <>
+                <div className="overflow-x-auto text-xs">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-150 text-[10px] font-black text-slate-400 uppercase tracking-wider">
+                        <th className="px-5 py-3">O.S.</th>
+                        <th className="px-5 py-3">Cliente</th>
+                        <th className="px-5 py-3">Data</th>
+                        <th className="px-5 py-3">Técnico</th>
+                        <th className="px-5 py-3">Prestadora</th>
+                        <th className="px-5 py-3 text-center">Status</th>
+                        <th className="px-5 py-3 text-right">Total</th>
+                        <th className="px-5 py-3 text-center">Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {paginatedReportOrders.map((o) => {
+                        const techDisplay = resolveOrderTechnicianDisplay(o, '---');
+                        return (
+                          <tr key={o.id} className="hover:bg-slate-50/50 transition-colors">
+                            <td className="px-5 py-3.5 font-black text-slate-700">
+                              #{o.osNumber || (o.id && !o.id.startsWith('OS_') ? o.id : '00000')}
+                            </td>
+                            <td className="px-5 py-3.5 font-extrabold text-slate-800">{o.clientName}</td>
+                            <td className="px-5 py-3.5 text-slate-500 font-semibold">
+                              {o.openedAt ? new Date(o.openedAt).toLocaleDateString('pt-BR') : '---'}
+                            </td>
+                            <td className="px-5 py-3.5 text-slate-600 font-bold">{techDisplay}</td>
+                            <td className="px-5 py-3.5 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+                              {getActiveCompanyForOrder(o.serviceCompany).shortName}
+                            </td>
+                            <td className="px-5 py-3.5 text-center">
+                              <span className={cn(
+                                "px-2 py-0.5 text-[8px] font-black uppercase tracking-wider rounded-full",
+                                o.status === 'aberta' ? "bg-blue-50 text-blue-600 border border-blue-100" :
+                                o.status === 'em_andamento' ? "bg-amber-50 text-amber-600 border border-amber-100" :
+                                o.status === 'pre_finalizada' ? "bg-teal-50 text-teal-600 border border-teal-100" :
+                                o.status === 'finalizada' ? "bg-emerald-50 text-emerald-600 border border-emerald-100" :
+                                "bg-rose-50 text-rose-600 border border-rose-100"
+                              )}>
+                                {getStatusLabel(o.status)}
+                              </span>
+                            </td>
+                            <td className="px-5 py-3.5 text-right font-black text-slate-800">
+                              R$ {o.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                            </td>
+                            <td className="px-5 py-3.5 text-center">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  onClick={() => handleEditPreCheck(o)}
+                                  className="p-1.5 text-amber-600 hover:bg-amber-50 border border-transparent hover:border-amber-100 rounded-lg transition-all cursor-pointer"
+                                  title={o.status === 'cancelada' ? "Visualizar O.S. Cancelada" : "Editar O.S."}
+                                >
+                                  <Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handlePrint(o)}
+                                  className="p-1.5 text-blue-600 hover:bg-blue-50 border border-transparent hover:border-blue-100 rounded-lg transition-all cursor-pointer"
+                                  title="Imprimir O.S."
+                                >
+                                  <Printer className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {totalReportPages > 1 && (
+                  <div className="px-5 py-3 bg-slate-50/80 border-t border-slate-100 flex flex-wrap items-center justify-between gap-3 text-xs">
+                    <span className="font-bold text-slate-500">
+                      Página <strong className="text-slate-800">{safeReportPage}</strong> de <strong className="text-slate-800">{totalReportPages}</strong>
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setReportCurrentPage(1)}
+                        disabled={safeReportPage === 1}
+                        className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                        title="Primeira página"
+                      >
+                        <ChevronsLeft className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportCurrentPage(prev => Math.max(1, prev - 1))}
+                        disabled={safeReportPage === 1}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 font-bold hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Anterior
+                      </button>
+                      {getPaginationRange(safeReportPage, totalReportPages).map((pg, idx) =>
+                        pg === 'DOTS' ? (
+                          <span key={`dots-${idx}`} className="px-1 text-slate-400 font-bold">…</span>
+                        ) : (
+                          <button
+                            key={pg}
+                            type="button"
+                            onClick={() => setReportCurrentPage(Number(pg))}
+                            className={cn(
+                              "min-w-[28px] h-7 px-1.5 rounded-lg text-xs font-black transition-all cursor-pointer",
+                              safeReportPage === pg
+                                ? "bg-blue-600 text-white shadow-3xs"
+                                : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-100"
+                            )}
+                          >
+                            {pg}
+                          </button>
+                        )
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setReportCurrentPage(prev => Math.min(totalReportPages, prev + 1))}
+                        disabled={safeReportPage === totalReportPages}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 font-bold hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        Próxima
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReportCurrentPage(totalReportPages)}
+                        disabled={safeReportPage === totalReportPages}
+                        className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer"
+                        title="Última página"
+                      >
+                        <ChevronsRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
+            </>
+          )}
         </>
       ))}
     </div>
@@ -6061,8 +7765,19 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       {/* MODAL: FORMULÁRIO DE O.S. (CRIAR E EDITAR) */}
       {(isFormOpen || (userRole === UserRole.TECHNICIAN && techActiveTab === 'form')) && (() => {
         const isTechnician = userRole === UserRole.TECHNICIAN;
-        const isOrderFinalized = Boolean(selectedOrder && (selectedOrder.status === 'finalizada' || selectedOrder.status === 'cancelada'));
+        const isAdminUser = userRole === UserRole.ADMIN;
+        const isAlreadyFinalized = Boolean(
+          formStatus === 'finalizada' ||
+          formStatus === 'pre_finalizada' ||
+          selectedOrder?.status === 'finalizada' ||
+          selectedOrder?.status === 'pre_finalizada' ||
+          selectedOrder?.adminFinalized
+        );
+        const isOrderCancelled = Boolean(formStatus === 'cancelada' || selectedOrder?.status === 'cancelada');
+        const isOrderFinalized = Boolean(selectedOrder && (selectedOrder.status === 'finalizada' || selectedOrder.status === 'pre_finalizada' || selectedOrder.status === 'cancelada'));
         const isLockedForTech = isTechnician && isOrderFinalized;
+        const canEditFinalizedItems = !isOrderCancelled && (!isAlreadyFinalized || isAdminUser);
+        const canSaveOrder = !isOrderCancelled && (!isAlreadyFinalized || isAdminUser);
 
         const isClientSignatureFilled = Boolean(formClientSignature && formClientSignature.trim().length > 0);
         const isClientRepFilled = Boolean(formRepresentative && formRepresentative.trim().length > 0);
@@ -6071,7 +7786,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         const isSolutionDisabled = Boolean(isLockedForTech || isSaving);
         const isOtherEquipmentSelected = formEquipmentId === 'OUTRO EQUIPAMENTO' || formEquipmentId === 'OUTRO_EQUIPAMENTO' || (!formEquipmentId && (selectedOrder?.equipmentId === 'OUTRO EQUIPAMENTO' || selectedOrder?.equipmentName === 'OUTRO EQUIPAMENTO'));
         const isTechFinalizeReady = isClientSignatureFilled && isClientRepFilled && isClientMatriculaFilled && isSolutionFilled && !isLockedForTech && !isSaving;
-        const isFinalizeReady = isSolutionFilled && !isSolutionDisabled && !isOtherEquipmentSelected;
+        const isFinalizeReady = !isAlreadyFinalized && !isOrderCancelled && isSolutionFilled && !isSolutionDisabled && !isOtherEquipmentSelected;
 
         const activeOrderOpenCalls = getOpenCallsForAddress(formAddressId || selectedOrder?.addressId || '', formClientId || selectedOrder?.clientId || '');
         const hasOpenCallsForAddress = activeOrderOpenCalls.length > 0;
@@ -6110,8 +7825,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         return (
         <div className={cn(
           userRole === UserRole.TECHNICIAN
-            ? "w-full no-print mt-6"
-            : "fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-40 overflow-y-auto no-print"
+            ? "w-full no-print print:hidden mt-6"
+            : "fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-40 overflow-y-auto no-print print:hidden"
         )}>
           <div className={cn(
             "bg-white border border-slate-200 rounded-2xl flex flex-col w-full",
@@ -7146,12 +8861,17 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     {/* Serviços Realizados */}
                     <div className="border border-slate-200 rounded-2xl p-4 space-y-3 bg-white">
                       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-2 border-b border-slate-100">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <Wind className="w-4 h-4 text-blue-600" />
                           <span className="text-xs font-black uppercase tracking-widest text-slate-700">Tabela de Serviços</span>
                           {selectedClientObj && (
                             <span className="text-[9px] font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-150">
                               Tabela: {selectedClientObj.name}
+                            </span>
+                          )}
+                          {isAlreadyFinalized && !isAdminUser && (
+                            <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                              <Lock className="w-2.5 h-2.5" /> Somente Administrador
                             </span>
                           )}
                         </div>
@@ -7164,11 +8884,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                               <select
                                 value={selectedServiceCategoryFilter}
                                 onChange={(e) => setSelectedServiceCategoryFilter(e.target.value)}
+                                disabled={!canEditFinalizedItems}
                                 className={cn(
-                                  "text-xs font-bold border rounded-lg px-2.5 py-1.5 outline-none cursor-pointer max-w-[190px] truncate transition-all",
-                                  selectedServiceCategoryFilter !== 'ALL'
-                                    ? "bg-blue-100/80 border-blue-300 text-blue-900 font-black shadow-xs"
-                                    : "bg-slate-50 border-slate-200 text-slate-700 hover:border-blue-300"
+                                  "text-xs font-bold border rounded-lg px-2.5 py-1.5 outline-none max-w-[190px] truncate transition-all",
+                                  !canEditFinalizedItems
+                                    ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-60"
+                                    : selectedServiceCategoryFilter !== 'ALL'
+                                      ? "bg-blue-100/80 border-blue-300 text-blue-900 font-black shadow-xs cursor-pointer"
+                                      : "bg-slate-50 border-slate-200 text-slate-700 hover:border-blue-300 cursor-pointer"
                                 )}
                               >
                                 <option value="ALL">📁 Todas as Categorias ({catalogServices.length})</option>
@@ -7190,7 +8913,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           {/* 2. SELEÇÃO DO SERVIÇO */}
                           {catalogServices.length > 0 ? (
                             <select
+                              disabled={!canEditFinalizedItems}
                               onChange={(e) => {
+                                if (!canEditFinalizedItems) return;
                                 const itemId = e.target.value;
                                 if (!itemId) return;
                                 const found = catalogServices.find(s => s.id === itemId);
@@ -7200,7 +8925,12 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 e.target.value = '';
                               }}
                               defaultValue=""
-                              className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 hover:border-blue-300 rounded-lg px-2.5 py-1.5 outline-none cursor-pointer max-w-[240px] truncate"
+                              className={cn(
+                                "text-xs font-bold border rounded-lg px-2.5 py-1.5 outline-none max-w-[240px] truncate",
+                                !canEditFinalizedItems
+                                  ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-60"
+                                  : "text-slate-700 bg-slate-50 border-slate-200 hover:border-blue-300 cursor-pointer"
+                              )}
                             >
                               <option value="">
                                 {selectedServiceCategoryFilter === 'ALL'
@@ -7221,8 +8951,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                               <button
                                 key={p.code}
                                 type="button"
+                                disabled={!canEditFinalizedItems}
                                 onClick={() => addServiceRow(p)}
-                                className="text-[9px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded-md transition-all border border-blue-100"
+                                className="text-[9px] font-bold text-blue-600 bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-1 rounded-md transition-all border border-blue-100"
                               >
                                 #{p.code}
                               </button>
@@ -7231,8 +8962,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
                           <button
                             type="button"
+                            disabled={!canEditFinalizedItems}
                             onClick={() => addServiceRow()}
-                            className="text-[9px] font-black bg-blue-600 text-white hover:bg-blue-700 px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-1 shrink-0"
+                            className="text-[9px] font-black bg-blue-600 text-white hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-1 shrink-0 cursor-pointer"
                           >
                             <Plus className="w-3 h-3" /> + Custom
                           </button>
@@ -7262,27 +8994,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 <input
                                   type="text"
                                   placeholder="CÓD"
+                                  disabled={!canEditFinalizedItems}
                                   value={srv.code}
                                   onChange={(e) => updateServiceRow(idx, 'code', e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
                                 />
                               </div>
                               <div className="col-span-5">
                                 <input
                                   type="text"
                                   placeholder="DESCRIÇÃO DOS SERVIÇOS"
+                                  disabled={!canEditFinalizedItems}
                                   value={srv.description}
                                   onChange={(e) => updateServiceRow(idx, 'description', e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs font-semibold text-slate-700 outline-none uppercase"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs font-semibold text-slate-700 outline-none uppercase"
                                 />
                               </div>
                               <div className="col-span-1">
                                 <input
                                   type="text"
                                   placeholder="UN"
+                                  disabled={!canEditFinalizedItems}
                                   value={srv.unit}
                                   onChange={(e) => updateServiceRow(idx, 'unit', e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
                                 />
                               </div>
                               <div className="col-span-1">
@@ -7291,9 +9026,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                   placeholder="QTD"
                                   min="0"
                                   step="1"
+                                  disabled={!canEditFinalizedItems}
                                   value={srv.quantity}
                                   onChange={(e) => updateServiceRow(idx, 'quantity', Number(e.target.value))}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-semibold text-slate-700 outline-none"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-semibold text-slate-700 outline-none"
                                 />
                               </div>
                               <div className="col-span-2">
@@ -7301,9 +9037,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                   type="number"
                                   step="0.01"
                                   placeholder="UNITÁRIO"
+                                  disabled={!canEditFinalizedItems}
                                   value={srv.unitValue}
                                   onChange={(e) => updateServiceRow(idx, 'unitValue', Number(e.target.value))}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-right font-bold text-slate-700 outline-none"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-right font-bold text-slate-700 outline-none"
                                 />
                               </div>
                               <div className="col-span-1">
@@ -7311,9 +9048,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                   type="number"
                                   step="0.01"
                                   placeholder="DESC %"
+                                  disabled={!canEditFinalizedItems}
                                   value={srv.discountPercent}
                                   onChange={(e) => updateServiceRow(idx, 'discountPercent', Number(e.target.value))}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-semibold text-slate-700 outline-none"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-semibold text-slate-700 outline-none"
                                 />
                               </div>
                               <div className="col-span-1 flex items-center justify-end gap-1">
@@ -7322,9 +9060,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 </span>
                                 <button
                                   type="button"
+                                  disabled={!canEditFinalizedItems}
                                   onClick={() => removeServiceRow(idx)}
-                                  className="text-rose-500 hover:text-rose-700 p-1 rounded-md transition"
-                                  title="Remover linha"
+                                  className="text-rose-500 hover:text-rose-700 disabled:text-slate-300 disabled:cursor-not-allowed p-1 rounded-md transition cursor-pointer"
+                                  title={canEditFinalizedItems ? "Remover linha" : "Somente Administrador pode alterar O.S. finalizada"}
                                 >
                                   <Trash className="w-3.5 h-3.5" />
                                 </button>
@@ -7338,12 +9077,17 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     {/* Produtos Utilizados */}
                     <div className="border border-slate-200 rounded-2xl p-4 space-y-3 bg-white">
                       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 pb-2 border-b border-slate-100">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <Receipt className="w-4 h-4 text-indigo-650" />
                           <span className="text-xs font-black uppercase tracking-widest text-slate-700">Tabela de Produtos</span>
                           {selectedClientObj && (
                             <span className="text-[9px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-150">
                               Tabela: {selectedClientObj.name}
+                            </span>
+                          )}
+                          {isAlreadyFinalized && !isAdminUser && (
+                            <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase text-amber-800 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
+                              <Lock className="w-2.5 h-2.5" /> Somente Administrador
                             </span>
                           )}
                         </div>
@@ -7356,11 +9100,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                               <select
                                 value={selectedProductCategoryFilter}
                                 onChange={(e) => setSelectedProductCategoryFilter(e.target.value)}
+                                disabled={!canEditFinalizedItems}
                                 className={cn(
-                                  "text-xs font-bold border rounded-lg px-2.5 py-1.5 outline-none cursor-pointer max-w-[190px] truncate transition-all",
-                                  selectedProductCategoryFilter !== 'ALL'
-                                    ? "bg-indigo-100/80 border-indigo-300 text-indigo-900 font-black shadow-xs"
-                                    : "bg-slate-50 border-slate-200 text-slate-700 hover:border-indigo-300"
+                                  "text-xs font-bold border rounded-lg px-2.5 py-1.5 outline-none max-w-[190px] truncate transition-all",
+                                  !canEditFinalizedItems
+                                    ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-60"
+                                    : selectedProductCategoryFilter !== 'ALL'
+                                      ? "bg-indigo-100/80 border-indigo-300 text-indigo-900 font-black shadow-xs cursor-pointer"
+                                      : "bg-slate-50 border-slate-200 text-slate-700 hover:border-indigo-300 cursor-pointer"
                                 )}
                               >
                                 <option value="ALL">📁 Todas as Categorias ({catalogProducts.length})</option>
@@ -7382,7 +9129,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           {/* 2. SELEÇÃO DO PRODUTO */}
                           {catalogProducts.length > 0 ? (
                             <select
+                              disabled={!canEditFinalizedItems}
                               onChange={(e) => {
+                                if (!canEditFinalizedItems) return;
                                 const itemId = e.target.value;
                                 if (!itemId) return;
                                 const found = catalogProducts.find(p => p.id === itemId);
@@ -7392,7 +9141,12 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 e.target.value = '';
                               }}
                               defaultValue=""
-                              className="text-xs font-bold text-slate-700 bg-slate-50 border border-slate-200 hover:border-indigo-300 rounded-lg px-2.5 py-1.5 outline-none cursor-pointer max-w-[240px] truncate"
+                              className={cn(
+                                "text-xs font-bold border rounded-lg px-2.5 py-1.5 outline-none max-w-[240px] truncate",
+                                !canEditFinalizedItems
+                                  ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed opacity-60"
+                                  : "text-slate-700 bg-slate-50 border-slate-200 hover:border-indigo-300 cursor-pointer"
+                              )}
                             >
                               <option value="">
                                 {selectedProductCategoryFilter === 'ALL' 
@@ -7413,8 +9167,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                               <button
                                 key={p.code}
                                 type="button"
+                                disabled={!canEditFinalizedItems}
                                 onClick={() => addProductRow(p)}
-                                className="text-[9px] font-bold text-indigo-650 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded-md transition-all border border-indigo-100"
+                                className="text-[9px] font-bold text-indigo-650 bg-indigo-50 hover:bg-indigo-100 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-1 rounded-md transition-all border border-indigo-100"
                               >
                                 #{p.code}
                               </button>
@@ -7423,8 +9178,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
                           <button
                             type="button"
+                            disabled={!canEditFinalizedItems}
                             onClick={() => addProductRow()}
-                            className="text-[9px] font-black bg-indigo-650 text-white hover:bg-indigo-700 px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-1 shrink-0 cursor-pointer"
+                            className="text-[9px] font-black bg-indigo-650 text-white hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed px-2.5 py-1.5 rounded-lg transition-all flex items-center gap-1 shrink-0 cursor-pointer"
                           >
                             <Plus className="w-3 h-3" /> + Custom
                           </button>
@@ -7453,27 +9209,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 <input
                                   type="text"
                                   placeholder="CÓD"
+                                  disabled={!canEditFinalizedItems}
                                   value={prod.code}
                                   onChange={(e) => updateProductRow(idx, 'code', e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
                                 />
                               </div>
                               <div className="col-span-6">
                                 <input
                                   type="text"
                                   placeholder="DESCRIÇÃO DO PRODUTO"
+                                  disabled={!canEditFinalizedItems}
                                   value={prod.description}
                                   onChange={(e) => updateProductRow(idx, 'description', e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs font-semibold text-slate-700 outline-none uppercase"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs font-semibold text-slate-700 outline-none uppercase"
                                 />
                               </div>
                               <div className="col-span-1">
                                 <input
                                   type="text"
                                   placeholder="UN"
+                                  disabled={!canEditFinalizedItems}
                                   value={prod.unit}
                                   onChange={(e) => updateProductRow(idx, 'unit', e.target.value)}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-bold text-slate-700 outline-none uppercase"
                                 />
                               </div>
                               <div className="col-span-1">
@@ -7482,9 +9241,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                   placeholder="QTD"
                                   min="0"
                                   step="1"
+                                  disabled={!canEditFinalizedItems}
                                   value={prod.quantity}
                                   onChange={(e) => updateProductRow(idx, 'quantity', Number(e.target.value))}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-center font-semibold text-slate-700 outline-none"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-center font-semibold text-slate-700 outline-none"
                                 />
                               </div>
                               <div className="col-span-1">
@@ -7492,9 +9252,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                   type="number"
                                   step="0.01"
                                   placeholder="UNIT."
+                                  disabled={!canEditFinalizedItems}
                                   value={prod.unitValue}
                                   onChange={(e) => updateProductRow(idx, 'unitValue', Number(e.target.value))}
-                                  className="w-full bg-white border border-slate-200 rounded-lg p-1.5 text-xs text-right font-bold text-slate-700 outline-none"
+                                  className="w-full bg-white disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed border border-slate-200 rounded-lg p-1.5 text-xs text-right font-bold text-slate-700 outline-none"
                                 />
                               </div>
                               <div className="col-span-2 flex items-center justify-end gap-1.5 pr-1">
@@ -7503,9 +9264,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                                 </span>
                                 <button
                                   type="button"
+                                  disabled={!canEditFinalizedItems}
                                   onClick={() => removeProductRow(idx)}
-                                  className="text-rose-500 hover:text-rose-700 p-1 hover:bg-rose-50 rounded-md transition cursor-pointer shrink-0"
-                                  title="Remover linha"
+                                  className="text-rose-500 hover:text-rose-700 disabled:text-slate-300 disabled:cursor-not-allowed p-1 hover:bg-rose-50 rounded-md transition cursor-pointer shrink-0"
+                                  title={canEditFinalizedItems ? "Remover linha" : "Somente Administrador pode alterar O.S. finalizada"}
                                 >
                                   <Trash className="w-3.5 h-3.5" />
                                 </button>
@@ -7867,16 +9629,28 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
               <div className="flex items-center gap-3">
                 {selectedOrder && (
-                  <button
-                    type="button"
-                    id={`btn-download-excel-modal-${selectedOrder.id}`}
-                    onClick={() => downloadOsExcel(selectedOrder)}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-xl transition-all cursor-pointer shadow-2xs active:scale-95"
-                    title="Baixar Ordem de Serviço em planilha Excel (.xlsx)"
-                  >
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                    <span>Baixar Excel</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      id={`btn-print-os-modal-${selectedOrder.id}`}
+                      onClick={handlePrintFromEditModal}
+                      disabled={isSaving || isHydratingMedia}
+                      className="inline-flex items-center justify-center p-2.5 text-slate-500 hover:text-blue-600 bg-white hover:bg-blue-50 border border-slate-200 hover:border-blue-300 rounded-xl transition-all cursor-pointer shadow-2xs active:scale-95 disabled:opacity-50"
+                      title="Imprimir Ordem de Serviço"
+                    >
+                      <Printer className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      id={`btn-download-excel-modal-${selectedOrder.id}`}
+                      onClick={() => downloadOsExcel(selectedOrder)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 rounded-xl transition-all cursor-pointer shadow-2xs active:scale-95"
+                      title="Baixar Ordem de Serviço em planilha Excel (.xlsx)"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                      <span>Baixar Excel</span>
+                    </button>
+                  </>
                 )}
                 {(() => {
                   if (userRole === UserRole.TECHNICIAN) {
@@ -7949,12 +9723,23 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                       <button
                         type="button"
                         onClick={(e) => handleSave(e, undefined, undefined, false)}
-                        disabled={isSaving}
+                        disabled={isSaving || !canSaveOrder}
+                        title={
+                          !canSaveOrder
+                            ? (isOrderCancelled
+                                ? 'O.S. cancelada não pode ser alterada.'
+                                : 'Esta O.S. já está finalizada. Somente Administradores podem salvar alterações.')
+                            : (isAlreadyFinalized && isAdminUser
+                                ? 'Salvar alterações de produtos/serviços na O.S. finalizada (Administrador)'
+                                : 'Salvar Ordem de Serviço')
+                        }
                         className={cn(
-                          "text-white text-xs font-black uppercase tracking-widest py-2.5 px-5 rounded-xl transition-all shadow-md flex items-center gap-1.5",
-                          isSaving
-                            ? "bg-blue-400 cursor-not-allowed opacity-80 pointer-events-none"
-                            : "bg-blue-600 hover:bg-blue-700 cursor-pointer active:scale-95"
+                          "text-xs font-black uppercase tracking-widest py-2.5 px-5 rounded-xl transition-all flex items-center gap-1.5",
+                          !canSaveOrder
+                            ? "bg-slate-200 text-slate-400 border border-slate-300 cursor-not-allowed opacity-60 shadow-none"
+                            : isSaving
+                              ? "bg-blue-400 text-white cursor-not-allowed opacity-80 pointer-events-none shadow-md"
+                              : "bg-blue-600 hover:bg-blue-700 text-white cursor-pointer active:scale-95 shadow-md"
                         )}
                       >
                         {isSaving && !isSavingNext ? (
@@ -7974,11 +9759,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         <button
                           type="button"
                           onClick={(e) => handleSave(e, undefined, undefined, true)}
-                          disabled={isSaving}
+                          disabled={isSaving || !canSaveOrder}
                           className={cn(
                             "text-white text-xs font-black uppercase tracking-widest py-2.5 px-5 rounded-xl transition-all shadow-md flex items-center gap-1.5",
-                            isSaving
-                              ? "bg-purple-400 cursor-wait opacity-80 pointer-events-none ring-2 ring-purple-300"
+                            isSaving || !canSaveOrder
+                              ? "bg-purple-400 cursor-not-allowed opacity-60 pointer-events-none"
                               : "bg-purple-600 hover:bg-purple-700 cursor-pointer active:scale-95"
                           )}
                           title="Salvar esta O.S. e avançar para a próxima máquina do lote"
@@ -7997,9 +9782,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         </button>
                       )}
 
-                      {formStatus !== 'finalizada' && formStatus !== 'cancelada' && (
+                      {!isOrderCancelled && (
                         <>
-                          {isOtherEquipmentSelected && (
+                          {!isAlreadyFinalized && isOtherEquipmentSelected && (
                             <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
                               <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
                               Substitua "OUTRO EQUIPAMENTO" p/ finalizar
@@ -8008,21 +9793,23 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           <button
                             type="button"
                             onClick={handleFinalizeOrder}
-                            disabled={!isFinalizeReady}
+                            disabled={!isFinalizeReady || isAlreadyFinalized}
                             className={cn(
-                              "text-xs font-black uppercase tracking-widest py-2.5 px-5 rounded-xl transition-all shadow-md flex items-center gap-1.5",
-                              isFinalizeReady
-                                ? "bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer active:scale-95"
-                                : "bg-slate-200 text-slate-400 border border-slate-300 cursor-not-allowed opacity-60 shadow-none pointer-events-none"
+                              "text-xs font-black uppercase tracking-widest py-2.5 px-5 rounded-xl transition-all flex items-center gap-1.5",
+                              isFinalizeReady && !isAlreadyFinalized
+                                ? "bg-emerald-600 hover:bg-emerald-700 text-white shadow-md cursor-pointer active:scale-95"
+                                : "bg-slate-200 text-slate-400 border border-slate-300 cursor-not-allowed opacity-60 shadow-none"
                             )}
                             title={
-                              isOtherEquipmentSelected
-                                ? "Obrigatório alterar a opção 'OUTRO EQUIPAMENTO' para a máquina correta antes de finalizar a O.S."
-                                : !isSolutionFilled
-                                  ? "Preencha o campo Solução para liberar o botão de finalizar a O.S."
-                                  : isSolutionDisabled
-                                    ? "O campo Solução está desabilitado ou a O.S. está sendo salva."
-                                    : "Finalizar Ordem de Serviço"
+                              isAlreadyFinalized
+                                ? "Esta Ordem de Serviço já está finalizada."
+                                : isOtherEquipmentSelected
+                                  ? "Obrigatório alterar a opção 'OUTRO EQUIPAMENTO' para a máquina correta antes de finalizar a O.S."
+                                  : !isSolutionFilled
+                                    ? "Preencha o campo Solução para liberar o botão de finalizar a O.S."
+                                    : isSolutionDisabled
+                                      ? "O campo Solução está desabilitado ou a O.S. está sendo salva."
+                                      : "Finalizar Ordem de Serviço"
                             }
                           >
                             <CheckCircle2 className="w-4 h-4" /> Finalizar OS
@@ -8040,410 +9827,396 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     })()}
 
       {/* MODAL: VISUALIZAÇÃO E IMPRESSÃO (PERFEITA COMO O MODELO) */}
-      {isPrintPreviewOpen && selectedOrder && (
-        <div className="print-modal-container fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:w-full print:h-auto print:m-0 print:p-0 print:block">
-            {/* Header de Controle */}
-            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50 no-print print:hidden print-hide">
-              <div className="flex items-center gap-2">
-                <Printer className="w-5 h-5 text-blue-600" />
-                <span className="text-sm font-black text-slate-800 uppercase tracking-widest">Pré-visualização de Impressão (A4)</span>
+      {isPrintPreviewOpen && selectedOrder && (() => {
+        const themeHeaderBg = selectedOrder.serviceCompany === 'alclima' ? 'os-print-bg-alclima' : 'os-print-bg-lefrio';
+        const displayOsNumber = selectedOrder.osNumber || (selectedOrder.id && !selectedOrder.id.startsWith('OS_') ? selectedOrder.id : '00000');
+        const hasPhotos = Boolean(selectedOrder.photos && selectedOrder.photos.length > 0);
+        const totalPages = hasPhotos ? 2 : 1;
+        const matchedClient = clients.find(c => c.id === selectedOrder.clientId);
+        const matchedAddress = addresses.find(a => a.id === selectedOrder.addressId);
+        const formattedAddress = (() => {
+          if (matchedAddress) {
+            const parts = [
+              matchedAddress.street,
+              matchedAddress.number ? `Nº ${matchedAddress.number}` : '',
+              matchedAddress.complement || '',
+              matchedAddress.neighborhood || '',
+              matchedAddress.city || '',
+              matchedAddress.state || '',
+              matchedAddress.cep ? `CEP: ${matchedAddress.cep}` : ''
+            ].filter(Boolean);
+            return (parts.length > 0 ? parts.join(' - ') : (selectedOrder.clientAddress || '-')).toUpperCase();
+          }
+          return (selectedOrder.clientAddress || matchedClient?.fullAddress || '-').toUpperCase();
+        })();
+
+        return (
+          <div className="print-modal-container fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
+            <div className="print-modal-card bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:w-full print:h-auto print:m-0 print:p-0 print:block">
+              {/* Header de Controle */}
+              <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50 no-print print:hidden print-hide">
+                <div className="flex items-center gap-2">
+                  <Printer className="w-5 h-5 text-blue-600" />
+                  <span className="text-sm font-black text-slate-800 uppercase tracking-widest">Pré-visualização de Impressão (A4)</span>
+                  {isHydratingMedia && (
+                    <span className="inline-flex items-center gap-1.5 ml-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Carregando anexos e assinaturas...
+                    </span>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    id="btn-download-excel-print-modal"
+                    onClick={() => downloadOsExcel(selectedOrder)}
+                    disabled={isHydratingMedia}
+                    className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" /> Baixar Excel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => executePrint('os')}
+                    disabled={isHydratingMedia}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" /> Imprimir Agora
+                  </button>
+                  <button
+                    onClick={() => setIsPrintPreviewOpen(false)}
+                    className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-500 text-xs font-bold py-2 px-4 rounded-lg transition-all cursor-pointer"
+                  >
+                    Fechar
+                  </button>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <button
-                  id="btn-download-excel-print-modal"
-                  onClick={() => downloadOsExcel(selectedOrder)}
-                  className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
-                >
-                  <FileSpreadsheet className="w-4 h-4" /> Baixar Excel
-                </button>
-                <button
-                  onClick={executePrint}
-                  className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Printer className="w-4 h-4" /> Imprimir Agora
-                </button>
-                <button
-                  onClick={() => setIsPrintPreviewOpen(false)}
-                  className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-500 text-xs font-bold py-2 px-4 rounded-lg transition-all cursor-pointer"
-                >
-                  Fechar
-                </button>
-              </div>
-            </div>
 
-            {/* Conteúdo Imprimível do Documento */}
-            <div className="flex-1 overflow-y-auto p-8 bg-slate-100 flex flex-col items-center gap-6 print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
-              <div 
-                id="print-area" 
-                className="flex flex-col gap-6"
-                style={{ width: '210mm', color: '#000000', fontFamily: 'Arial, sans-serif' }}
-              >
-                {/* --- PÁGINA 1 --- */}
-                <div className="page-container bg-white p-[12mm] border border-slate-300 shadow-sm relative flex flex-col justify-between print:border-none print:shadow-none print:p-0">
-                  <div className="space-y-4">
-                    {/* Cabeçalho */}
-                    {renderPageHeader(1, selectedOrder.photos && selectedOrder.photos.length > 0 ? 2 : 1)}
+              {/* Conteúdo Imprimível do Documento */}
+              <div className="print-modal-scroll flex-1 overflow-y-auto p-8 bg-slate-100 flex flex-col items-center gap-6">
+                <div id="os-print-area" className="os-print-sheet">
+                  {/* --- PÁGINA 1 --- */}
+                  <div className="os-print-page">
+                    <div className="os-print-body">
+                      {/* Cabeçalho */}
+                      {renderPageHeader(1, totalPages)}
 
-                    {/* Título OS */}
-                    <div className="flex justify-between items-center border-b border-black pb-1">
-                      <span className="text-sm font-black text-black">ORDEM DE SERVIÇO: {selectedOrder.osNumber || (selectedOrder.id && !selectedOrder.id.startsWith('OS_') ? selectedOrder.id : '00000')}</span>
-                      <span className="text-[10px] font-bold text-black">1ª Impressão</span>
-                    </div>
-
-                    {/* CLIENTE */}
-                    <div className="border border-black rounded-none overflow-hidden">
-                      <div className={cn(
-                        "px-2 py-1 text-[9px] font-bold uppercase border-b border-black text-black",
-                        selectedOrder.serviceCompany === 'alclima' ? 'bg-[#90EE90]/60' : 'bg-[#9cbdde]/60'
-                      )}>
-                        CLIENTE
+                      {/* Título OS */}
+                      <div className="os-print-title-row">
+                        <span className="os-print-title-main">ORDEM DE SERVIÇO: {displayOsNumber}</span>
+                        <span className="os-print-title-sub">1ª Impressão</span>
                       </div>
-                      <div className="grid grid-cols-12 text-[8.5px] leading-tight text-black uppercase">
-                        {/* Linha 1 */}
-                        <div className="col-span-8 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">Razão Social: </span>
-                          <span className="font-normal">
-                            {(clients.find(c => c.id === selectedOrder.clientId)?.fullName || clients.find(c => c.id === selectedOrder.clientId)?.name || selectedOrder.clientName || '').toUpperCase()}
-                          </span>
-                        </div>
-                        <div className="col-span-4 p-1.5 border-b border-black">
-                          <span className="font-bold">CNPJ: </span>
-                          <span className="font-normal">{(clients.find(c => c.id === selectedOrder.clientId)?.cnpj || selectedOrder.clientCnpj || '-').toUpperCase()}</span>
-                        </div>
-                        {/* Linha 2 */}
-                        <div className="col-span-8 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">E-mail: </span>
-                          <span className="font-normal">
-                            {(clients.find(c => c.id === selectedOrder.clientId)?.email || selectedOrder.clientEmail || '-').toUpperCase()}
-                          </span>
-                        </div>
-                        <div className="col-span-4 p-1.5 border-b border-black">
-                          <span className="font-bold">Telefone: </span>
-                          <span className="font-normal">{(clients.find(c => c.id === selectedOrder.clientId)?.phone || selectedOrder.clientPhone || '-').toUpperCase()}</span>
-                        </div>
-                        {/* Linha 3 */}
-                        <div className="col-span-12 p-1.5">
-                          <span className="font-bold">Endereço: </span>
-                          <span className="font-normal">
-                            {(() => {
-                              const addr = addresses.find(a => a.id === selectedOrder.addressId);
-                              if (addr) {
-                                const parts = [
-                                  addr.street,
-                                  addr.number ? `Nº ${addr.number}` : '',
-                                  addr.complement || '',
-                                  addr.neighborhood || '',
-                                  addr.city || '',
-                                  addr.state || '',
-                                  addr.cep ? `CEP: ${addr.cep}` : ''
-                                ].filter(Boolean);
-                                return (parts.length > 0 ? parts.join(' - ') : (selectedOrder.clientAddress || '-')).toUpperCase();
-                              }
-                              return (selectedOrder.clientAddress || clients.find(c => c.id === selectedOrder.clientId)?.fullAddress || '-').toUpperCase();
-                            })()}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
 
-                    {/* OS: [número] */}
-                    <div className="border border-black rounded-none overflow-hidden">
-                      <div className={cn(
-                        "px-2 py-1 text-[9px] font-bold uppercase border-b border-black text-black",
-                        selectedOrder.serviceCompany === 'alclima' ? 'bg-[#90EE90]/60' : 'bg-[#9cbdde]/60'
-                      )}>
-                        OS: {selectedOrder.osNumber || (selectedOrder.id && !selectedOrder.id.startsWith('OS_') ? selectedOrder.id : '00000')}
-                      </div>
-                      <div className="grid grid-cols-12 text-[8.5px] leading-tight text-black uppercase">
-                        {/* Linha 1 */}
-                        <div className="col-span-4 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">Situação: </span>
-                          <span className="font-normal">{getStatusLabel(selectedOrder.status).toUpperCase()}</span>
+                      {/* CLIENTE */}
+                      <div className="os-print-box">
+                        <div className={`os-print-box-header ${themeHeaderBg}`}>
+                          CLIENTE
                         </div>
-                        <div className="col-span-8 p-1.5 border-b border-black">
-                          <span className="font-bold">Tipo: </span>
-                          <span className="font-normal">{(selectedOrder.type || '').toUpperCase()}</span>
-                        </div>
-                        {/* Linha 2 */}
-                        <div className="col-span-3 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">Data Abertura: </span>
-                          <span className="font-normal">
-                            {selectedOrder.openedAt ? new Date(selectedOrder.openedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
-                          </span>
-                        </div>
-                        <div className="col-span-3 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">Resp. Abertura: </span>
-                          <span className="font-normal">{(selectedOrder.openedBy || '-').toUpperCase()}</span>
-                        </div>
-                        <div className="col-span-3 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">Execução: </span>
-                          <span className="font-normal">
-                            {(selectedOrder.finishedAt || selectedOrder.updatedAt) ? new Date(selectedOrder.finishedAt || selectedOrder.updatedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
-                          </span>
-                        </div>
-                        <div className="col-span-3 p-1.5 border-b border-black">
-                          <span className="font-bold">OS Externa: </span>
-                          <span className="font-normal">{(selectedOrder.externalOs || '-').toUpperCase()}</span>
-                        </div>
-                        {/* Linha 3: Descrição do Problema */}
-                        <div className={cn("col-span-12 p-1.5", (selectedOrder.diagnosis || selectedOrder.solution) && "border-b border-black")}>
-                          <span className="font-bold">Descrição do Problema: </span>
-                          <span className="font-normal">{(selectedOrder.description || '').toUpperCase()}</span>
-                        </div>
-                        {/* Linha 4: Diagnóstico */}
-                        {selectedOrder.diagnosis && (
-                          <div className={cn("col-span-12 p-1.5", selectedOrder.solution && "border-b border-black")}>
-                            <span className="font-bold">Diagnóstico: </span>
-                            <span className="font-normal">{(selectedOrder.diagnosis || '').toUpperCase()}</span>
+                        <div className="os-print-grid">
+                          {/* Linha 1 */}
+                          <div className="os-print-c8 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">RAZÃO SOCIAL: </span>
+                            <span className="os-print-val">
+                              {(matchedClient?.fullName || matchedClient?.name || selectedOrder.clientName || '').toUpperCase()}
+                            </span>
                           </div>
-                        )}
-                        {/* Linha 5: Solução */}
-                        {selectedOrder.solution && (
-                          <div className="col-span-12 p-1.5">
-                            <span className="font-bold">Solução: </span>
-                            <span className="font-normal">{(selectedOrder.solution || '').toUpperCase()}</span>
+                          <div className="os-print-c4 os-print-cell os-print-bb">
+                            <span className="os-print-lbl">CNPJ: </span>
+                            <span className="os-print-val">{(matchedClient?.cnpj || selectedOrder.clientCnpj || '-').toUpperCase()}</span>
                           </div>
-                        )}
+                          {/* Linha 2 */}
+                          <div className="os-print-c8 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">E-MAIL: </span>
+                            <span className="os-print-val">
+                              {(matchedClient?.email || selectedOrder.clientEmail || '-').toUpperCase()}
+                            </span>
+                          </div>
+                          <div className="os-print-c4 os-print-cell os-print-bb">
+                            <span className="os-print-lbl">TELEFONE: </span>
+                            <span className="os-print-val">{(matchedClient?.phone || selectedOrder.clientPhone || '-').toUpperCase()}</span>
+                          </div>
+                          {/* Linha 3 */}
+                          <div className="os-print-c12 os-print-cell">
+                            <span className="os-print-lbl">ENDEREÇO: </span>
+                            <span className="os-print-val">{formattedAddress}</span>
+                          </div>
+                        </div>
                       </div>
-                    </div>
 
-                    {/* DETALHES (Equipamento) */}
-                    <div className="border border-black rounded-none overflow-hidden">
-                      <div className={cn(
-                        "px-2 py-1 text-[9px] font-bold uppercase border-b border-black text-black",
-                        selectedOrder.serviceCompany === 'alclima' ? 'bg-[#90EE90]/60' : 'bg-[#9cbdde]/60'
-                      )}>
-                        DETALHES
-                      </div>
-                      <div className="grid grid-cols-12 text-[8.5px] leading-tight text-black uppercase">
-                        {/* Linha 1 */}
-                        <div className="col-span-6 p-1.5 border-r border-b border-black">
-                          <span className="font-bold">Equipamento: </span>
-                          <span className="font-normal">{(selectedOrder.equipmentName || '-').toUpperCase()}</span>
+                      {/* OS: [número] */}
+                      <div className="os-print-box">
+                        <div className={`os-print-box-header ${themeHeaderBg}`}>
+                          OS: {displayOsNumber}
                         </div>
-                        <div className="col-span-6 p-1.5 border-b border-black">
-                          <span className="font-bold">Marca: </span>
-                          <span className="font-normal">{(selectedOrder.equipmentBrand || '-').toUpperCase()}</span>
-                        </div>
-                        {/* Linha 2 */}
-                        <div className="col-span-4 p-1.5 border-r border-black">
-                          <span className="font-bold">Setor: </span>
-                          <span className="font-normal">{(selectedOrder.equipmentSector || '-').toUpperCase()}</span>
-                        </div>
-                        <div className="col-span-4 p-1.5 border-r border-black">
-                          <span className="font-bold">BTUs: </span>
-                          <span className="font-normal">{(selectedOrder.equipmentBtus || '-').toUpperCase()}</span>
-                        </div>
-                        <div className="col-span-4 p-1.5">
-                          <span className="font-bold">Patrimônio / Tombamento: </span>
-                          <span className="font-normal">{(selectedOrder.equipmentPatrimony || '-').toUpperCase()}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* TABELA DE PRODUTOS / SERVIÇOS E TOTAL */}
-                    {(((selectedOrder.services && selectedOrder.services.length > 0) || (selectedOrder.products && selectedOrder.products.length > 0)) || selectedOrder.totalValue > 0) && (
-                      <div className="border border-black rounded-none overflow-hidden">
-                        {/* TABELA DE SERVIÇOS */}
-                        {selectedOrder.services && selectedOrder.services.length > 0 && (
-                          <div>
-                            <div className="p-1 font-bold bg-slate-100 border-b border-black text-[8px] uppercase px-2">
-                              Descrição dos Serviços
+                        <div className="os-print-grid">
+                          {/* Linha 1 */}
+                          <div className="os-print-c4 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">SITUAÇÃO: </span>
+                            <span className="os-print-val">{getStatusLabel(selectedOrder.status).toUpperCase()}</span>
+                          </div>
+                          <div className="os-print-c8 os-print-cell os-print-bb">
+                            <span className="os-print-lbl">TIPO: </span>
+                            <span className="os-print-val">{(selectedOrder.type || '').toUpperCase()}</span>
+                          </div>
+                          {/* Linha 2 */}
+                          <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">DATA ABERTURA: </span>
+                            <span className="os-print-val">
+                              {selectedOrder.openedAt ? new Date(selectedOrder.openedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
+                            </span>
+                          </div>
+                          <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">RESP. ABERTURA: </span>
+                            <span className="os-print-val">{(selectedOrder.openedBy || '-').toUpperCase()}</span>
+                          </div>
+                          <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">EXECUÇÃO: </span>
+                            <span className="os-print-val">
+                              {(selectedOrder.finishedAt || selectedOrder.updatedAt) ? new Date(selectedOrder.finishedAt || selectedOrder.updatedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
+                            </span>
+                          </div>
+                          <div className="os-print-c3 os-print-cell os-print-bb">
+                            <span className="os-print-lbl">OS EXTERNA: </span>
+                            <span className="os-print-val">{(selectedOrder.externalOs || '-').toUpperCase()}</span>
+                          </div>
+                          {/* Linha 3: Descrição do Problema */}
+                          <div className={`os-print-c12 os-print-cell ${(selectedOrder.diagnosis || selectedOrder.solution) ? 'os-print-bb' : ''}`}>
+                            <span className="os-print-lbl">DESCRIÇÃO DO PROBLEMA: </span>
+                            <span className="os-print-val">{(selectedOrder.description || '').toUpperCase()}</span>
+                          </div>
+                          {/* Linha 4: Diagnóstico */}
+                          {selectedOrder.diagnosis && (
+                            <div className={`os-print-c12 os-print-cell ${selectedOrder.solution ? 'os-print-bb' : ''}`}>
+                              <span className="os-print-lbl">DIAGNÓSTICO: </span>
+                              <span className="os-print-val">{(selectedOrder.diagnosis || '').toUpperCase()}</span>
                             </div>
-                            <table className="min-w-full text-[8.5px] leading-tight border-collapse">
-                              <thead>
-                                <tr className={cn(
-                                  "border-b border-black text-black",
-                                  selectedOrder.serviceCompany === 'alclima' ? 'bg-[#90EE90]/60' : 'bg-[#9cbdde]/60'
-                                )}>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '8%' }}>Código</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-left" style={{ width: '55%' }}>Descrição dos Serviços</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '6%' }}>Un.</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '6%' }}>Qtd.</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-right" style={{ width: '10%' }}>Valor Unit.</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '7%' }}>Desc. (%)</th>
-                                  <th className="px-2 py-1 font-bold text-right" style={{ width: '10%' }}>Valor Total</th>
-                                </tr>
-                              </thead>
-                              <tbody className="uppercase">
-                                {selectedOrder.services.map((srv, index) => (
-                                  <tr key={index} className="border-b border-black last:border-b-0">
-                                    <td className="border-r border-black px-2 py-1 text-center font-bold">{(srv.code || '').toUpperCase()}</td>
-                                    <td className="border-r border-black px-2 py-1 font-normal leading-relaxed text-left text-black">{(srv.description || '').toUpperCase()}</td>
-                                    <td className="border-r border-black px-2 py-1 text-center">{(srv.unit || '').toUpperCase()}</td>
-                                    <td className="border-r border-black px-2 py-1 text-center">{srv.quantity}</td>
-                                    <td className="border-r border-black px-2 py-1 text-right">R$ {srv.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                    <td className="border-r border-black px-2 py-1 text-center">{srv.discountPercent}%</td>
-                                    <td className="px-2 py-1 text-right font-bold">R$ {srv.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-
-                        {/* TABELA DE PRODUTOS */}
-                        {selectedOrder.products && selectedOrder.products.length > 0 && (
-                          <div className={cn(selectedOrder.services && selectedOrder.services.length > 0 && "border-t border-black")}>
-                            <div className="p-1 font-bold bg-slate-100 border-b border-black text-[8px] uppercase px-2">
-                              Descrição dos Produtos
+                          )}
+                          {/* Linha 5: Solução */}
+                          {selectedOrder.solution && (
+                            <div className="os-print-c12 os-print-cell">
+                              <span className="os-print-lbl">SOLUÇÃO: </span>
+                              <span className="os-print-val">{(selectedOrder.solution || '').toUpperCase()}</span>
                             </div>
-                            <table className="min-w-full text-[8.5px] leading-tight border-collapse">
-                              <thead>
-                                <tr className={cn(
-                                  "border-b border-black text-black",
-                                  selectedOrder.serviceCompany === 'alclima' ? 'bg-[#90EE90]/60' : 'bg-[#9cbdde]/60'
-                                )}>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '8%' }}>Código</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-left" style={{ width: '55%' }}>Descrição dos Produtos</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '6%' }}>Un.</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '6%' }}>Qtd.</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-right" style={{ width: '10%' }}>Valor Unit.</th>
-                                  <th className="border-r border-black px-2 py-1 font-bold text-center" style={{ width: '7%' }}>Desc. (%)</th>
-                                  <th className="px-2 py-1 font-bold text-right" style={{ width: '10%' }}>Valor Total</th>
-                                </tr>
-                              </thead>
-                              <tbody className="uppercase">
-                                {selectedOrder.products.map((prod, index) => (
-                                  <tr key={index} className="border-b border-black last:border-b-0">
-                                    <td className="border-r border-black px-2 py-1 text-center font-bold">{(prod.code || '').toUpperCase()}</td>
-                                    <td className="border-r border-black px-2 py-1 font-normal leading-relaxed text-left text-black">{(prod.description || '').toUpperCase()}</td>
-                                    <td className="border-r border-black px-2 py-1 text-center">{(prod.unit || '').toUpperCase()}</td>
-                                    <td className="border-r border-black px-2 py-1 text-center">{prod.quantity.toFixed(2).replace('.', ',')}</td>
-                                    <td className="border-r border-black px-2 py-1 text-right">R$ {prod.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                    <td className="border-r border-black px-2 py-1 text-center">{prod.discountPercent}%</td>
-                                    <td className="px-2 py-1 text-right font-bold">R$ {prod.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
+                          )}
+                        </div>
+                      </div>
 
-                        {/* LINHA FINAL: TOTAL DA OS */}
-                        <div className="border-t border-black p-2 flex justify-end">
-                          <div className="text-right font-bold text-black text-[10px]">
+                      {/* DETALHES (Equipamento) */}
+                      <div className="os-print-box">
+                        <div className={`os-print-box-header ${themeHeaderBg}`}>
+                          DETALHES
+                        </div>
+                        <div className="os-print-grid">
+                          {/* Linha 1 */}
+                          <div className="os-print-c6 os-print-cell os-print-br os-print-bb">
+                            <span className="os-print-lbl">EQUIPAMENTO: </span>
+                            <span className="os-print-val">{(selectedOrder.equipmentName || '-').toUpperCase()}</span>
+                          </div>
+                          <div className="os-print-c6 os-print-cell os-print-bb">
+                            <span className="os-print-lbl">MARCA: </span>
+                            <span className="os-print-val">{(selectedOrder.equipmentBrand || '-').toUpperCase()}</span>
+                          </div>
+                          {/* Linha 2 */}
+                          <div className="os-print-c4 os-print-cell os-print-br">
+                            <span className="os-print-lbl">SETOR: </span>
+                            <span className="os-print-val">{(selectedOrder.equipmentSector || '-').toUpperCase()}</span>
+                          </div>
+                          <div className="os-print-c4 os-print-cell os-print-br">
+                            <span className="os-print-lbl">BTUS: </span>
+                            <span className="os-print-val">{(selectedOrder.equipmentBtus || '-').toUpperCase()}</span>
+                          </div>
+                          <div className="os-print-c4 os-print-cell">
+                            <span className="os-print-lbl">PATRIMÔNIO / TOMBAMENTO: </span>
+                            <span className="os-print-val">{(selectedOrder.equipmentPatrimony || '-').toUpperCase()}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* TABELA DE PRODUTOS / SERVIÇOS E TOTAL */}
+                      {(((selectedOrder.services && selectedOrder.services.length > 0) || (selectedOrder.products && selectedOrder.products.length > 0)) || selectedOrder.totalValue > 0) && (
+                        <div className="os-print-box">
+                          {/* TABELA DE SERVIÇOS */}
+                          {selectedOrder.services && selectedOrder.services.length > 0 && (
+                            <div>
+                              <div className="os-print-subhead">
+                                DESCRIÇÃO DOS SERVIÇOS
+                              </div>
+                              <table className="os-print-table">
+                                <thead>
+                                  <tr className={themeHeaderBg}>
+                                    <th className="os-print-tc" style={{ width: '8%' }}>Código</th>
+                                    <th className="os-print-tl" style={{ width: '55%' }}>Descrição dos Serviços</th>
+                                    <th className="os-print-tc" style={{ width: '6%' }}>Un.</th>
+                                    <th className="os-print-tc" style={{ width: '6%' }}>Qtd.</th>
+                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Unit.</th>
+                                    <th className="os-print-tc" style={{ width: '7%' }}>Desc. (%)</th>
+                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Total</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {selectedOrder.services.map((srv, index) => (
+                                    <tr key={index}>
+                                      <td className="os-print-tc os-print-bold">{(srv.code || '').toUpperCase()}</td>
+                                      <td className="os-print-tl">{(srv.description || '').toUpperCase()}</td>
+                                      <td className="os-print-tc">{(srv.unit || '').toUpperCase()}</td>
+                                      <td className="os-print-tc">{srv.quantity}</td>
+                                      <td className="os-print-tr">R$ {srv.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                      <td className="os-print-tc">{srv.discountPercent}%</td>
+                                      <td className="os-print-tr os-print-bold">R$ {srv.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* TABELA DE PRODUTOS */}
+                          {selectedOrder.products && selectedOrder.products.length > 0 && (
+                            <div className={selectedOrder.services && selectedOrder.services.length > 0 ? 'os-print-bt' : ''}>
+                              <div className="os-print-subhead">
+                                DESCRIÇÃO DOS PRODUTOS
+                              </div>
+                              <table className="os-print-table">
+                                <thead>
+                                  <tr className={themeHeaderBg}>
+                                    <th className="os-print-tc" style={{ width: '8%' }}>Código</th>
+                                    <th className="os-print-tl" style={{ width: '55%' }}>Descrição dos Produtos</th>
+                                    <th className="os-print-tc" style={{ width: '6%' }}>Un.</th>
+                                    <th className="os-print-tc" style={{ width: '6%' }}>Qtd.</th>
+                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Unit.</th>
+                                    <th className="os-print-tc" style={{ width: '7%' }}>Desc. (%)</th>
+                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Total</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {selectedOrder.products.map((prod, index) => (
+                                    <tr key={index}>
+                                      <td className="os-print-tc os-print-bold">{(prod.code || '').toUpperCase()}</td>
+                                      <td className="os-print-tl">{(prod.description || '').toUpperCase()}</td>
+                                      <td className="os-print-tc">{(prod.unit || '').toUpperCase()}</td>
+                                      <td className="os-print-tc">{prod.quantity.toFixed(2).replace('.', ',')}</td>
+                                      <td className="os-print-tr">R$ {prod.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                      <td className="os-print-tc">{prod.discountPercent}%</td>
+                                      <td className="os-print-tr os-print-bold">R$ {prod.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+
+                          {/* LINHA FINAL: TOTAL DA OS */}
+                          <div className="os-print-total-row">
                             Total da OS: R$ {selectedOrder.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                           </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                    {/* ASSINATURAS E AUTENTICAÇÃO */}
-                    <div className="pt-6 grid grid-cols-12 gap-8 text-[8px] items-end leading-normal">
-                      {/* Coluna Esquerda: Cliente */}
-                      <div className="col-span-6 text-center space-y-1">
-                        <div className="h-12 flex items-center justify-center">
-                          {selectedOrder.clientSignature ? (
-                            <img src={selectedOrder.clientSignature} alt="Assinatura Cliente" className="max-h-12 object-contain" referrerPolicy="no-referrer" />
-                          ) : (
-                            <div className="h-10"></div>
-                          )}
-                        </div>
-                        <div className="w-full border-b border-black mx-auto mb-1"></div>
-                        <span className="font-bold text-black uppercase block">
-                          {selectedOrder.clientRepresentative || 'REPRESENTANTE DO CLIENTE'}
-                        </span>
-                        {selectedOrder.clientRepresentativeMatricula && (
-                          <span className="text-slate-600 block">Matrícula/CPF: {selectedOrder.clientRepresentativeMatricula}</span>
-                        )}
-                        {selectedOrder.clientSignatureDate && (
-                          <span className="text-slate-600 block text-[8px] font-bold">
-                            Assinado às {new Date(selectedOrder.clientSignatureDate).toLocaleTimeString('pt-BR')} ({new Date(selectedOrder.clientSignatureDate).toLocaleDateString('pt-BR')})
-                          </span>
-                        )}
-                        <span className="text-slate-500 block text-[8px] uppercase tracking-wider font-semibold">
-                          {selectedOrder.clientName}
-                        </span>
-                      </div>
-
-                      {/* Coluna Direita: Prestadora */}
-                      <div className="col-span-6 text-center space-y-1">
-                        <div className="text-[8px] text-slate-700 italic font-semibold mb-2 leading-tight">
-                          {(() => {
-                            const t1 = technicians.find(t => t.id === selectedOrder.technicianId);
-                            const t2 = selectedOrder.technician2Id ? technicians.find(t => t.id === selectedOrder.technician2Id) : null;
-                            const names = [t1?.name, t2?.name].filter(Boolean).join(' / ');
-                            const dateStr = selectedOrder.finishedAt ? new Date(selectedOrder.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
-                            return `Equipe autenticada no aplicativo JDSmartOS (APP: ${dateStr} ${names})`;
-                          })()}
-                        </div>
-                        <div className="h-12 flex items-center justify-center">
-                          {selectedOrder.techSignature ? (
-                            <img src={selectedOrder.techSignature} alt="Assinatura Técnico" className="max-h-12 object-contain" referrerPolicy="no-referrer" />
-                          ) : (
-                            <div className="h-10"></div>
-                          )}
-                        </div>
-                        <div className="w-full border-b border-black mx-auto mb-1"></div>
-                        <span className="font-bold text-black uppercase block">
-                          {printCompany?.fullName}
-                        </span>
-                        <span className="text-slate-500 block text-[8px] uppercase tracking-wider font-semibold">
-                          PRESTADORA AUTORIZADA
-                        </span>
-                      </div>
-                    </div>
-
-
-                  </div>
-
-                  {/* Rodapé Página 1 */}
-                  {renderPageFooter(1, selectedOrder.photos && selectedOrder.photos.length > 0 ? 2 : 1)}
-                </div>
-
-                {/* --- PÁGINA 2: ANEXOS FOTOGRÁFICOS --- */}
-                {selectedOrder.photos && selectedOrder.photos.length > 0 && (
-                  <div className="page-container bg-white p-[12mm] border border-slate-300 shadow-sm relative flex flex-col justify-between page-break print:border-none print:shadow-none print:p-0">
-                    <div className="space-y-4">
-                      {/* Cabeçalho */}
-                      {renderPageHeader(2, 2)}
-
-                      {/* Título de Seção */}
-                      <div className="flex justify-between items-center border-b border-black pb-1">
-                        <span className="text-sm font-black text-black">ORDEM DE SERVIÇO: {selectedOrder.osNumber || (selectedOrder.id && !selectedOrder.id.startsWith('OS_') ? selectedOrder.id : '00000')}</span>
-                        <span className="text-[10px] font-bold text-black">Anexos Fotográficos</span>
-                      </div>
-
-                      <div className="border border-black rounded-none overflow-hidden">
-                        <div className={cn(
-                          "px-2 py-1 text-[9px] font-bold uppercase text-black",
-                          selectedOrder.serviceCompany === 'alclima' ? 'bg-[#90EE90]/60' : 'bg-[#9cbdde]/60'
-                        )}>
-                          ANEXOS DO APP - OS: {selectedOrder.osNumber || (selectedOrder.id && !selectedOrder.id.startsWith('OS_') ? selectedOrder.id : '00000')}
-                        </div>
-                      </div>
-
-                      {/* Grid de Fotos */}
-                      <div className="grid grid-cols-2 gap-4 pt-4">
-                        {selectedOrder.photos.slice(0, 4).map((ph, idx) => (
-                          <div key={idx} className="border border-black p-2 rounded-none bg-slate-50 flex flex-col items-center justify-center">
-                            <img 
-                              src={ph} 
-                              alt={`Evidência ${idx + 1}`} 
-                              className="h-44 w-full object-contain rounded-none"
-                              referrerPolicy="no-referrer"
-                            />
-                            <span className="text-[8px] font-black uppercase tracking-widest text-slate-500 mt-2 block">
-                              Foto {idx + 1} - Evidência de Execução
-                            </span>
+                      {/* ASSINATURAS E AUTENTICAÇÃO */}
+                      <div className="os-print-sigs">
+                        {/* Coluna Esquerda: Cliente */}
+                        <div className="os-print-sig-col">
+                          <div className="os-print-sig-box">
+                            {selectedOrder.clientSignature ? (
+                              <img src={selectedOrder.clientSignature} alt="Assinatura Cliente" className="os-print-sig-img" referrerPolicy="no-referrer" />
+                            ) : null}
                           </div>
-                        ))}
+                          <div className="os-print-sig-line"></div>
+                          <span className="os-print-sig-name">
+                            {selectedOrder.clientRepresentative || 'REPRESENTANTE DO CLIENTE'}
+                          </span>
+                          {selectedOrder.clientRepresentativeMatricula && (
+                            <span className="os-print-sig-sub">Matrícula/CPF: {selectedOrder.clientRepresentativeMatricula}</span>
+                          )}
+                          {selectedOrder.clientSignatureDate && (
+                            <span className="os-print-sig-date">
+                              Assinado às {new Date(selectedOrder.clientSignatureDate).toLocaleTimeString('pt-BR')} ({new Date(selectedOrder.clientSignatureDate).toLocaleDateString('pt-BR')})
+                            </span>
+                          )}
+                          <span className="os-print-sig-org">
+                            {selectedOrder.clientName}
+                          </span>
+                        </div>
+
+                        {/* Coluna Direita: Prestadora */}
+                        <div className="os-print-sig-col">
+                          <div className="os-print-sig-note">
+                            {(() => {
+                              const names = resolveOrderTechnicianDisplay(selectedOrder, '');
+                              const dateStr = selectedOrder.finishedAt ? new Date(selectedOrder.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
+                              return `Equipe autenticada no aplicativo JDSmartOS (APP: ${dateStr} ${names})`;
+                            })()}
+                          </div>
+                          <div className="os-print-sig-box">
+                            {selectedOrder.techSignature ? (
+                              <img src={selectedOrder.techSignature} alt="Assinatura Técnico" className="os-print-sig-img" referrerPolicy="no-referrer" />
+                            ) : null}
+                          </div>
+                          <div className="os-print-sig-line"></div>
+                          <span className="os-print-sig-name">
+                            {printCompany?.fullName}
+                          </span>
+                          <span className="os-print-sig-org">
+                            PRESTADORA AUTORIZADA
+                          </span>
+                        </div>
                       </div>
                     </div>
+
+                    {/* Rodapé Página 1 */}
+                    {renderPageFooter(1, totalPages)}
                   </div>
-                )}
+
+                  {/* --- PÁGINA 2: ANEXOS FOTOGRÁFICOS --- */}
+                  {hasPhotos && (
+                    <div className="os-print-page">
+                      <div className="os-print-body">
+                        {/* Cabeçalho */}
+                        {renderPageHeader(2, 2)}
+
+                        {/* Título de Seção */}
+                        <div className="os-print-title-row">
+                          <span className="os-print-title-main">ORDEM DE SERVIÇO: {displayOsNumber}</span>
+                          <span className="os-print-title-sub">Anexos Fotográficos</span>
+                        </div>
+
+                        <div className="os-print-box">
+                          <div className={`os-print-box-header os-print-box-header-solo ${themeHeaderBg}`}>
+                            ANEXOS DO APP - OS: {displayOsNumber}
+                          </div>
+                        </div>
+
+                        {/* Grid de Fotos */}
+                        <div className="os-print-photos-grid">
+                          {(selectedOrder.photos || []).slice(0, 4).map((ph, idx) => (
+                            <div key={idx} className="os-print-photo-card">
+                              <img
+                                src={ph}
+                                alt={`Evidência ${idx + 1}`}
+                                className="os-print-photo-img"
+                                referrerPolicy="no-referrer"
+                              />
+                              <span className="os-print-photo-cap">
+                                Foto {idx + 1} - Evidência de Execução
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Rodapé Página 2 */}
+                      {renderPageFooter(2, 2)}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MODAL: VISUALIZAÇÃO E IMPRESSÃO DE RELATÓRIO CONSOLIDADO */}
       {isReportPrintOpen && (
         <div className="print-modal-container fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:w-full print:h-auto print:m-0 print:p-0 print:block">
+          <div className="print-modal-card bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:w-full print:h-auto print:m-0 print:p-0 print:block">
             {/* Header de Controle */}
             <div className="border-b border-slate-100 p-4 bg-slate-50 no-print print:hidden print-hide space-y-3">
               <div className="flex items-center justify-between">
@@ -8453,7 +10226,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 </div>
                 <div className="flex gap-2">
                   <button
-                    onClick={executePrint}
+                    type="button"
+                    onClick={() => executePrint('report')}
                     className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
                   >
                     <Printer className="w-4 h-4" /> Imprimir Agora
@@ -8493,9 +10267,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             </div>
 
             {/* Conteúdo Imprimível do Relatório */}
-            <div className="flex-1 overflow-y-auto p-8 bg-slate-100 print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
-              <div 
-                id="print-area" 
+            <div className="print-modal-scroll flex-1 overflow-y-auto p-8 bg-slate-100 print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
+              <div
+                id="report-print-area"
                 className="bg-white border border-slate-300 p-8 print:p-0 print:border-none print:shadow-none mx-auto shadow-sm text-black"
                 style={{ width: '100%', maxWidth: '210mm', color: '#000000', fontFamily: 'Arial, sans-serif' }}
               >

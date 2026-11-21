@@ -223,15 +223,27 @@ fun DashboardScreen(
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(10.dp))
+                                val isShowingFallbackDate = uiState.preventiveCount > 0 &&
+                                    uiState.effectiveRouteDate.isNotBlank() &&
+                                    uiState.effectiveRouteDate != uiState.selectedDate
+                                val formattedRouteDate = com.lefrio.atendimento.util.DateTimeUtils.formatDisplayDate(uiState.effectiveRouteDate)
                                 Column {
                                     Text(
-                                        text = "Roteiro Operacional de Hoje",
+                                        text = if (isShowingFallbackDate) {
+                                            "Último Roteiro ($formattedRouteDate)"
+                                        } else {
+                                            "Roteiro Operacional de Hoje"
+                                        },
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Black,
                                         color = TextPrimary
                                     )
                                     Text(
-                                        text = "Técnico escalado: ${user.name}",
+                                        text = if (isShowingFallbackDate) {
+                                            "Sem preventivas hoje • Último agendamento (7 dias)"
+                                        } else {
+                                            "Técnico escalado: ${user.name}"
+                                        },
                                         fontSize = 11.sp,
                                         color = TextSecondary,
                                         fontWeight = FontWeight.Medium

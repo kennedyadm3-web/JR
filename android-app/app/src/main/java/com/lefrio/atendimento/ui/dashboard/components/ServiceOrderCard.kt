@@ -289,11 +289,20 @@ fun ServiceOrderCard(
                             Color(0xFFD97706),
                             "Em andamento • Salvo no aparelho"
                         )
-                        else -> Triple(
-                            Icons.Default.Schedule,
-                            Color(0xFF64748B),
-                            "Programado para Hoje"
-                        )
+                        else -> {
+                            val todayIso = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+                            val plannedIso = (order.plannedDate ?: "").trim().take(10)
+                            val plannedLabel = if (plannedIso.isBlank() || plannedIso == todayIso) {
+                                "Programado para Hoje"
+                            } else {
+                                "Programado para ${com.lefrio.atendimento.util.DateTimeUtils.formatDisplayDate(plannedIso)}"
+                            }
+                            Triple(
+                                Icons.Default.Schedule,
+                                Color(0xFF64748B),
+                                plannedLabel
+                            )
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(

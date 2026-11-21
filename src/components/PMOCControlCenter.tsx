@@ -35,16 +35,21 @@ interface PMOCControlCenterProps {
   userRole?: UserRole;
   month?: string;
   onMonthChange?: (month: string) => void;
-  onRefreshEquipments?: () => Promise<void>;
+  onRefreshEquipments?: (addressId?: string) => Promise<void>;
+  onEquipmentsLoaded?: (addressId: string, loadedEquipments: Equipment[]) => void;
 }
 
-export function PMOCControlCenter({ records, addresses, clients, equipments, techs, onPrintChecklist, onPrintBlankChecklist, onUpdateRecord, userRole, month, onMonthChange, onRefreshEquipments }: PMOCControlCenterProps) {
+export function PMOCControlCenter({ records, addresses, clients, equipments, techs, onPrintChecklist, onPrintBlankChecklist, onUpdateRecord, userRole, month, onMonthChange, onRefreshEquipments, onEquipmentsLoaded }: PMOCControlCenterProps) {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedClientId, setSelectedClientId] = useState<string>('');
   const [selectedAddressId, setSelectedAddressId] = useState<string | null>(null);
   const [selectedCycleFilter, setSelectedCycleFilter] = useState<string>('all');
   const [selectedTechFilter, setSelectedTechFilter] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+
+  // Carregamento sob demanda de equipamentos por endereço selecionado (evita carregar todos os endereços de uma vez)
+  const [onDemandEquipsByAddress, setOnDemandEquipsByAddress] = useState<Record<string, Equipment[]>>({});
+  const [loadingAddressEquipments, setLoadingAddressEquipments] = useState<boolean>(false);
 
   // Sub-Aba Central PMOC
   const [pmocSubTab, setPmocSubTab] = useState<'main' | 'removed'>('main');
@@ -69,6 +74,91 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
   const [isReportModalOpen, setIsReportModalOpen] = useState<boolean>(false);
   const [isPeriodFilterExpanded, setIsPeriodFilterExpanded] = useState<boolean>(false);
 
+  // Carrega somente os equipamentos do endereço selecionado no momento
+  useEffect(() => {
+    if (!selectedAddressId) {
+      setLoadingAddressEquipments(false);
+      return;
+    }
+
+    const cleanAddrId = String(selectedAddressId).trim();
+    const alreadyLoaded = Object.prototype.hasOwnProperty.call(onDemandEquipsByAddress, cleanAddrId);
+    if (alreadyLoaded) {
+      setLoadingAddressEquipments(false);
+      return;
+    }
+
+    let isActive = true;
+    setLoadingAddressEquipments(true);
+
+    dataService
+      .getEquipments(cleanAddrId, false)
+      .then((addrEqs) => {
+        if (!isActive) return;
+        const safeList = Array.isArray(addrEqs) ? addrEqs : [];
+        setOnDemandEquipsByAddress((prev) => ({
+          ...prev,
+          [cleanAddrId]: safeList,
+        }));
+        if (onEquipmentsLoaded) {
+          onEquipmentsLoaded(cleanAddrId, safeList);
+        }
+      })
+      .catch((err) => {
+        console.error('Erro ao carregar equipamentos do endereço selecionado:', err);
+      })
+      .finally(() => {
+        if (isActive) {
+          setLoadingAddressEquipments(false);
+        }
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [selectedAddressId]);
+
+  // Mescla equipamentos recebidos por props com os carregados sob demanda por endereço
+  const effectiveEquipments = useMemo(() => {
+    const loadedAddrIds = new Set(Object.keys(onDemandEquipsByAddress));
+    if (loadedAddrIds.size === 0) return equipments;
+
+    const merged: Equipment[] = [];
+    const seenIds = new Set<string>();
+
+    // Primeiro adiciona equipamentos já carregados sob demanda (fonte mais recente para seus endereços)
+    loadedAddrIds.forEach((addrId) => {
+      const list = onDemandEquipsByAddress[addrId] || [];
+      list.forEach((eq) => {
+        if (eq?.id && !seenIds.has(eq.id)) {
+          seenIds.add(eq.id);
+          merged.push(eq);
+        }
+      });
+    });
+
+    // Mantém equipamentos de outros endereços que já estejam nas props
+    equipments.forEach((eq) => {
+      if (!eq?.id || seenIds.has(eq.id)) return;
+      const eqAddr = String(eq.addressId || '').trim();
+      if (loadedAddrIds.has(eqAddr)) return;
+      seenIds.add(eq.id);
+      merged.push(eq);
+    });
+
+    return merged;
+  }, [equipments, onDemandEquipsByAddress]);
+
+  const getAddressMachineCount = (addressId: string, addressObj?: Address) => {
+    const cleanId = String(addressId || '').trim();
+    if (Object.prototype.hasOwnProperty.call(onDemandEquipsByAddress, cleanId)) {
+      return onDemandEquipsByAddress[cleanId].length;
+    }
+    const propCount = equipments.filter((eq) => String(eq.addressId || '').trim() === cleanId).length;
+    if (propCount > 0) return propCount;
+    return addressObj?.totalMachines ?? 0;
+  };
+
   const loadDeactivatedEquipments = async () => {
     setLoadingDeactivated(true);
     try {
@@ -81,10 +171,6 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
     }
   };
 
-  useEffect(() => {
-    loadDeactivatedEquipments();
-  }, []);
-
   const handleReactivateEquipment = async (eq: Equipment) => {
     setIsReactivating(true);
     try {
@@ -93,8 +179,19 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
         alert(`Máquina "${eq.label || ''} ${eq.name}" (#${eq.id}) reabilitada com sucesso!\n\nEla já voltou a constar como ativa no endereço e está disponível na Folha de Atendimento PMOC e na abertura de Ordens de Serviço.`);
         setReactivateModalEq(null);
         await loadDeactivatedEquipments();
+        const targetAddrId = eq.addressId ? String(eq.addressId).trim() : '';
+        if (targetAddrId) {
+          const freshAddrEqs = await dataService.getEquipments(targetAddrId, false);
+          setOnDemandEquipsByAddress((prev) => ({
+            ...prev,
+            [targetAddrId]: freshAddrEqs || [],
+          }));
+          if (onEquipmentsLoaded) {
+            onEquipmentsLoaded(targetAddrId, freshAddrEqs || []);
+          }
+        }
         if (onRefreshEquipments) {
-          await onRefreshEquipments();
+          await onRefreshEquipments(targetAddrId || undefined);
         }
       } else {
         alert('Erro ao reabilitar máquina. Tente novamente.');
@@ -320,8 +417,8 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
         const checked = rec.checklist.filter(c => c.checked || Boolean(c.checkedAt)).length;
         machinesCount = checked > 0 ? checked : rec.checklist.length;
       } else {
-        const addressEquips = equipments.filter(eq => eq.addressId === rec.addressId);
-        machinesCount = addressEquips.length > 0 ? addressEquips.length : 1;
+        const machineCount = getAddressMachineCount(rec.addressId, addr);
+        machinesCount = machineCount > 0 ? machineCount : 1;
       }
 
       return {
@@ -335,7 +432,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
         machinesCount,
       };
     }).sort((a, b) => b.executionDateRaw.localeCompare(a.executionDateRaw));
-  }, [records, addresses, clients, equipments, reportStartDate, reportEndDate, reportClientId]);
+  }, [records, addresses, clients, effectiveEquipments, reportStartDate, reportEndDate, reportClientId]);
 
   const handleExportPeriodReportExcel = () => {
     if (periodReportData.length === 0) {
@@ -804,7 +901,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
               {last10TechRecords.map(record => {
                 const address = addresses.find(a => a.id === record.addressId);
                 const client = address ? clients.find(c => c.id === address.clientId) : null;
-                const addressEquips = equipments.filter(eq => eq.addressId === record.addressId);
+                const machineCount = getAddressMachineCount(record.addressId, address);
                 const isSelected = selectedRecordId === record.id;
                 const isCompleted = record.status === MaintenanceStatus.COMPLETED;
                 
@@ -851,7 +948,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                     <div className="flex items-center justify-between text-[10px] font-extrabold text-slate-600 bg-slate-50 px-2 py-1.5 rounded-xl border border-slate-100/70 w-full mt-1">
                       <span className="flex items-center gap-1">
                         <Settings className="w-3 h-3 text-slate-400" />
-                        {addressEquips.length} Máq.
+                        {machineCount} Máq.
                       </span>
                       {record.executionDate && (
                         <span className="text-slate-400 text-[9px] font-medium">
@@ -875,7 +972,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
             <>
               {filteredAddresses.map(address => {
                 const client = clients.find(c => c.id === address.clientId);
-                const addressEquips = equipments.filter(eq => eq.addressId === address.id);
+                const machineCount = getAddressMachineCount(address.id, address);
                 const isSelected = selectedAddressId === address.id;
                 
                 return (
@@ -896,7 +993,7 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
                       <span className="text-xs font-black text-slate-500 uppercase tracking-wider">{client?.name}</span>
                       <div className="flex items-center gap-1 bg-slate-100 px-2 py-1 rounded-lg">
                         <Settings className="w-3 h-3 text-slate-500" />
-                        <span className="text-[10px] font-bold text-slate-700">{addressEquips.length} Máq.</span>
+                        <span className="text-[10px] font-bold text-slate-700">{machineCount} Máq.</span>
                       </div>
                     </div>
                     <h3 className="text-sm font-bold text-slate-800 line-clamp-2 leading-snug">{address.street}</h3>
@@ -920,7 +1017,8 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
               addressId={selectedAddressId} 
               addresses={addresses}
               clients={clients}
-              equipments={equipments}
+              equipments={effectiveEquipments}
+              loadingEquipments={loadingAddressEquipments}
               records={records}
               techs={techs}
               selectedCycleFilter={selectedCycleFilter}
@@ -1501,11 +1599,12 @@ export function PMOCControlCenter({ records, addresses, clients, equipments, tec
   );
 }
 
-function AddressDetails({ addressId, addresses, clients, equipments, records, techs, selectedCycleFilter, onPrintChecklist, onPrintBlankChecklist, onUpdateRecord, selectedRecordId, userRole }: { 
+function AddressDetails({ addressId, addresses, clients, equipments, loadingEquipments, records, techs, selectedCycleFilter, onPrintChecklist, onPrintBlankChecklist, onUpdateRecord, selectedRecordId, userRole }: { 
   addressId: string, 
   addresses: Address[],
   clients: Client[],
   equipments: Equipment[],
+  loadingEquipments?: boolean,
   records: MaintenanceRecord[],
   techs: Technician[],
   selectedCycleFilter: string,
@@ -1517,7 +1616,10 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
 }) {
   const address = addresses.find(a => a.id === addressId);
   const client = address ? clients.find(c => c.id === address.clientId) : null;
-  const addressEquips = equipments.filter(eq => eq.addressId === addressId);
+  const addressEquips = useMemo(
+    () => equipments.filter(eq => String(eq.addressId || '').trim() === String(addressId || '').trim()),
+    [equipments, addressId]
+  );
 
   // Estado para o histórico completo do endereço carregado do Firestore
   const [historyRecords, setHistoryRecords] = useState<MaintenanceRecord[]>([]);
@@ -3517,8 +3619,17 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
         <h2 className="text-xl font-black text-slate-800 leading-tight mb-2">{address.street}</h2>
         <div className="flex flex-wrap gap-4 text-sm font-medium text-slate-500">
           <div className="flex items-center gap-1.5">
-            <Settings className="w-4 h-4" />
-            {addressEquips.length} Máquinas Cadastradas
+            {loadingEquipments && addressEquips.length === 0 ? (
+              <>
+                <RefreshCw className="w-4 h-4 animate-spin text-indigo-500" />
+                <span className="text-indigo-600 font-semibold">Carregando máquinas deste endereço...</span>
+              </>
+            ) : (
+              <>
+                <Settings className="w-4 h-4" />
+                {addressEquips.length} Máquinas Cadastradas
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -3540,7 +3651,7 @@ function AddressDetails({ addressId, addresses, clients, equipments, records, te
               // Se tiver concluído, consideramos que fez tudo (ou o length das maquinas na epoca)
               // Mas aqui pegaremos os dados exatos do checklist.
               const isCompleted = record.status === MaintenanceStatus.COMPLETED;
-              const machinesTarget = addressEquips.length; // Estimativa baseada nas maquinas atuais
+              const machinesTarget = addressEquips.length > 0 ? addressEquips.length : (address.totalMachines || 0);
               const percent = machinesTarget > 0 ? Math.min(100, Math.round((totalProcessed / machinesTarget) * 100)) : 0;
               const isScheduledOrWorked = record.plannedDate || record.technician1 || checklist.length > 0;
               const isWorkedByTech = !!(record.techSignature || record.clientSignature || checklist.some(item => 

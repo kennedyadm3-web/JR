@@ -36,7 +36,8 @@ data class DashboardUiState(
     val isLoading: Boolean = false,
     val isSyncing: Boolean = false,
     val syncMessage: String? = null,
-    val selectedDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    val selectedDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
+    val effectiveRouteDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 )
 
 class DashboardViewModel(application: Application) : AndroidViewModel(application) {
@@ -76,10 +77,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                             launch {
                                 try {
                                     FirebaseSyncManager(getApplication()).processPendingSyncQueue()
+                                    val todayDate = getTodayIsoDate()
+                                    _uiState.update { it.copy(selectedDate = todayDate) }
                                     repository.syncDailyItinerary(
                                         technicianName = currentTechName,
                                         technicianId = currentTechId,
-                                        targetDate = _uiState.value.selectedDate
+                                        targetDate = todayDate
                                     )
                                 } catch (_: Exception) {}
                             }
@@ -107,8 +110,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         // Observa Ordens e Atendimentos do banco local Room combinados com o técnico ativo
         viewModelScope.launch {
             combine(repository.getAllOrders(), selectedTechFlow) { rawList, (techName, techId) ->
-                filterOrdersForTech(rawList, techName, techId)
-            }.collect { list ->
+                val todayDate = getTodayIsoDate()
+                filterOrdersForTechAndDate(rawList, techName, techId, todayDate)
+            }.collect { (list, effectiveDate, todayDate) ->
                 val prev = list.count { it.type.contains("PREVENTIVA", ignoreCase = true) }
                 val corr = list.count { it.type.contains("ORDEM", ignoreCase = true) || it.type.contains("CORRETIVA", ignoreCase = true) }
                 val open = list.count { it.status == "aberta" }
@@ -126,6 +130,8 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
                         openCount = open,
                         inProgressCount = progress,
                         completedCount = completed,
+                        selectedDate = todayDate,
+                        effectiveRouteDate = effectiveDate,
                         isLoading = false
                     )
                 }
@@ -133,21 +139,90 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private fun filterOrdersForTech(
+    private fun getTodayIsoDate(): String {
+        return SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+    }
+
+    private fun isIsoDate(value: String): Boolean {
+        return value.length == 10 && value[4] == '-' && value[7] == '-'
+    }
+
+    private fun subtractDays(isoDate: String, days: Int): String {
+        return try {
+            val sdf = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+            val parsed = sdf.parse(isoDate.take(10)) ?: Date()
+            val cal = java.util.Calendar.getInstance().apply {
+                time = parsed
+                add(java.util.Calendar.DAY_OF_YEAR, -days)
+            }
+            sdf.format(cal.time)
+        } catch (_: Exception) {
+            isoDate.take(10)
+        }
+    }
+
+    private fun filterOrdersForTechAndDate(
         allOrders: List<ServiceOrderEntity>,
         rawTechName: String,
-        rawTechId: String
-    ): List<ServiceOrderEntity> {
+        rawTechId: String,
+        todayDate: String
+    ): Triple<List<ServiceOrderEntity>, String, String> {
         val techName = rawTechName.trim().uppercase()
         val techId = rawTechId.trim().uppercase()
-        if (techName.isBlank() && techId.isBlank()) return allOrders
-
-        return allOrders.filter { o ->
-            val t1 = o.technician1.trim().uppercase()
-            val t2 = (o.technician2 ?: "").trim().uppercase()
-            (techName.isNotBlank() && (t1.contains(techName) || techName.contains(t1) || (t2.isNotBlank() && (t2.contains(techName) || techName.contains(t2))))) ||
-            (techId.isNotBlank() && (t1 == techId || t2 == techId))
+        val techOrders = if (techName.isBlank() && techId.isBlank()) {
+            allOrders
+        } else {
+            allOrders.filter { o ->
+                val t1 = o.technician1.trim().uppercase()
+                val t2 = (o.technician2 ?: "").trim().uppercase()
+                (techName.isNotBlank() && (t1.contains(techName) || techName.contains(t1) || (t2.isNotBlank() && (t2.contains(techName) || techName.contains(t2))))) ||
+                (techId.isNotBlank() && (t1 == techId || t2 == techId))
+            }
         }
+
+        val minPastDate = subtractDays(todayDate, 7)
+
+        // Separa preventivas e ordens de serviço corretivas
+        val (preventives, nonPreventives) = techOrders.partition {
+            it.id.startsWith("PREV_") || it.type.contains("PREVENTIVA", ignoreCase = true)
+        }
+
+        // 1. Preventivas: NUNCA mostrar datas futuras (> todayDate).
+        // Se houver agendadas para hoje, exibe somente hoje; senão, exibe a última agendada nos últimos 7 dias.
+        val eligiblePreventives = preventives.filter { o ->
+            val pDate = (o.plannedDate ?: "").trim().take(10)
+            !o.isSyncedWithServer || (isIsoDate(pDate) && pDate <= todayDate && pDate >= minPastDate)
+        }
+
+        val syncedDatesDesc = eligiblePreventives
+            .map { (it.plannedDate ?: "").trim().take(10) }
+            .filter { isIsoDate(it) && it <= todayDate && it >= minPastDate }
+            .distinct()
+            .sortedDescending()
+
+        val activePreventiveDate: String? = when {
+            syncedDatesDesc.contains(todayDate) -> todayDate
+            else -> syncedDatesDesc.firstOrNull { it < todayDate && it >= minPastDate }
+        }
+
+        val visiblePreventives = eligiblePreventives.filter { o ->
+            if (!o.isSyncedWithServer) {
+                true
+            } else if (activePreventiveDate != null) {
+                (o.plannedDate ?: "").trim().take(10) == activePreventiveDate
+            } else {
+                false
+            }
+        }
+
+        // 2. Ordens de Serviço (corretivas): nunca exibir ordens com data futura (> todayDate)
+        val visibleNonPreventives = nonPreventives.filter { o ->
+            val pDate = (o.plannedDate ?: "").trim().take(10)
+            !o.isSyncedWithServer || !isIsoDate(pDate) || pDate <= todayDate
+        }
+
+        val combined = visiblePreventives + visibleNonPreventives
+        return Triple(combined, activePreventiveDate ?: todayDate, todayDate)
     }
 
     /**
@@ -159,11 +234,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         selectedTechFlow.value = Pair(techName, techId)
         startRealtimeItineraryListeners(techName)
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
+            val todayDate = getTodayIsoDate()
+            _uiState.update { it.copy(isLoading = true, selectedDate = todayDate) }
             repository.syncDailyItinerary(
                 technicianName = techName,
                 technicianId = techId,
-                targetDate = _uiState.value.selectedDate
+                targetDate = todayDate
             )
             _uiState.update { it.copy(isLoading = false) }
         }
@@ -220,10 +296,12 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         realtimeSyncJob = viewModelScope.launch {
             delay(600)
             if (currentTechName.isNotBlank()) {
+                val todayDate = getTodayIsoDate()
+                _uiState.update { it.copy(selectedDate = todayDate) }
                 repository.syncDailyItinerary(
                     technicianName = currentTechName,
                     technicianId = currentTechId,
-                    targetDate = _uiState.value.selectedDate
+                    targetDate = todayDate
                 )
             }
         }
@@ -273,7 +351,9 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
 
             var foundCount = 0
             if (currentTechName.isNotBlank()) {
-                foundCount = repository.syncDailyItinerary(currentTechName, currentTechId, _uiState.value.selectedDate)
+                val todayDate = getTodayIsoDate()
+                _uiState.update { it.copy(selectedDate = todayDate) }
+                foundCount = repository.syncDailyItinerary(currentTechName, currentTechId, todayDate)
             }
             val remainingPending = try {
                 db.syncQueueDao().getPendingTasksCountSync()

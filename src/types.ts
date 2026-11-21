@@ -575,10 +575,14 @@ export interface ServiceOrder {
   clientSigneeRegistration?: string;
   serviceCompany?: string; // ID da empresa prestadora configurada
   
-  photos?: string[]; // fotos anexadas do app
+  photos?: string[]; // fotos anexadas do app (carregadas sob demanda quando externalizadas)
   techSignature?: string; // Assinatura digital do Técnico (Base64)
   clientSignature?: string; // Assinatura digital do Representante do Cliente (Base64)
   clientSignatureDate?: string; // Data e hora exata da assinatura do cliente
+  hasClientSignature?: boolean; // Indicador leve de presença de assinatura do cliente (sem trafegar Base64 na listagem)
+  hasTechSignature?: boolean; // Indicador leve de presença de assinatura do técnico
+  photoCount?: number; // Quantidade de fotos anexadas na subcoleção de mídia
+  mediaExternalized?: boolean; // True quando fotos e assinaturas foram movidas para serviceOrders/{id}/media/attachments
   techFinalized?: boolean; // Finalizada pelo técnico em campo
   techFinalizedAt?: string; // Data e hora em que o técnico finalizou em campo
   adminFinalized?: boolean; // Finalizada formalmente pelo Administrativo

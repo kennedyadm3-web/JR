@@ -20,6 +20,26 @@ object DateTimeUtils {
     }
 
     /**
+     * Formata apenas a data: "22/11/2026"
+     */
+    fun formatDisplayDate(dateStr: String?): String {
+        if (dateStr.isNullOrBlank()) return ""
+        val trimmed = dateStr.trim()
+        if (trimmed.length == 10 && trimmed[2] == '/' && trimmed[5] == '/') {
+            return trimmed
+        }
+        val isoPart = trimmed.take(10)
+        if (isoPart.length == 10 && isoPart[4] == '-' && isoPart[7] == '-') {
+            val parts = isoPart.split("-")
+            if (parts.size == 3) {
+                return "${parts[2]}/${parts[1]}/${parts[0]}"
+            }
+        }
+        val date = parseFlexible(trimmed) ?: return trimmed
+        return SimpleDateFormat("dd/MM/yyyy", Locale.getDefault()).format(date)
+    }
+
+    /**
      * Formata apenas a hora e minutos: "18:45"
      */
     fun formatDisplayTime(dateStr: String?): String {

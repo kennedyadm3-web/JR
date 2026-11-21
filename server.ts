@@ -1443,22 +1443,39 @@ async function startServer() {
     }
   });
 
-  // Endpoint dedicado de alta performance para listar equipamentos
+  // Endpoint dedicado de alta performance para listar equipamentos (sob demanda por endereço sem carregar toda a coleção)
   app.get("/api/equipments", async (req, res) => {
     try {
       const addressId = req.query.addressId ? String(req.query.addressId).trim() : "";
       const addressIdsQuery = req.query.addressIds ? String(req.query.addressIds).split(",").map(s => s.trim()).filter(Boolean) : [];
       const includeDeactivated = req.query.includeDeactivated === "true";
 
-      const allEquips = await fetchAllEquipmentsServer();
+      let filtered: any[] = [];
+      let totalCount = 0;
 
-      let filtered = allEquips;
+      // Se addressId foi especificado e o cache global não está aquecido, consulta somente aquele endereço no Firestore
+      const isGlobalCacheWarm = Boolean(serverEquipmentsCache && (Date.now() - serverEquipmentsCache.timestamp < SERVER_EQUIPMENTS_TTL));
 
-      if (addressId) {
-        filtered = filtered.filter(eq => eq && String(eq.addressId || '').trim() === addressId);
-      } else if (addressIdsQuery.length > 0) {
-        const idSet = new Set(addressIdsQuery);
-        filtered = filtered.filter(eq => eq && idSet.has(String(eq.addressId || '').trim()));
+      if (addressId && !isGlobalCacheWarm) {
+        try {
+          const snap = await withTimeout(dbAdmin.collection("equipments").where("addressId", "==", addressId).get(), 4000);
+          filtered = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        } catch {
+          const snap = await clientGetDocs(clientQuery(clientCollection(dbClient, "equipments"), clientWhere("addressId", "==", addressId)));
+          filtered = snap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) }));
+        }
+        totalCount = filtered.length;
+      } else {
+        const allEquips = await fetchAllEquipmentsServer();
+        totalCount = allEquips.length;
+        filtered = allEquips;
+
+        if (addressId) {
+          filtered = filtered.filter(eq => eq && String(eq.addressId || '').trim() === addressId);
+        } else if (addressIdsQuery.length > 0) {
+          const idSet = new Set(addressIdsQuery);
+          filtered = filtered.filter(eq => eq && idSet.has(String(eq.addressId || '').trim()));
+        }
       }
 
       if (!includeDeactivated) {
@@ -1477,7 +1494,7 @@ async function startServer() {
       res.json({
         success: true,
         count: filtered.length,
-        total: allEquips.length,
+        total: totalCount,
         equipments: filtered
       });
     } catch (error: any) {
@@ -1542,9 +1559,23 @@ async function startServer() {
         return res.json(cached.payload);
       }
 
-      const [recordsByDateSnap, recordsByMonthSnap, allTechs, osByDateSnap, osActiveSnap] = await Promise.all([
+      const subtractDaysIso = (isoDate: string, days: number): string => {
+        const parts = isoDate.split("-").map(Number);
+        if (parts.length !== 3 || parts.some(isNaN)) return isoDate;
+        const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+        dt.setUTCDate(dt.getUTCDate() - days);
+        return dt.toISOString().slice(0, 10);
+      };
+      const minPastDate = subtractDaysIso(targetDate, 7);
+      const prevMonth = minPastDate.slice(0, 7);
+      const shouldFetchPrevMonth = prevMonth !== targetMonth;
+
+      const [recordsByDateSnap, recordsByMonthSnap, recordsByPrevMonthSnap, allTechs, osByDateSnap, osActiveSnap] = await Promise.all([
         clientGetDocs(clientQuery(clientCollection(dbClient, "maintenanceRecords"), clientWhere("plannedDate", "==", targetDate))),
         clientGetDocs(clientQuery(clientCollection(dbClient, "maintenanceRecords"), clientWhere("month", "==", targetMonth))),
+        shouldFetchPrevMonth
+          ? clientGetDocs(clientQuery(clientCollection(dbClient, "maintenanceRecords"), clientWhere("month", "==", prevMonth)))
+          : Promise.resolve({ docs: [] as any[] }),
         fetchTechsServer(),
         clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("plannedDate", "==", targetDate))),
         clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("status", "in", ["aberta", "em_atendimento", "pendente"])))
@@ -1553,6 +1584,9 @@ async function startServer() {
       const recordsMap = new Map<string, any>();
       recordsByDateSnap.docs.forEach(doc => recordsMap.set(doc.id, { id: doc.id, ...doc.data() as any }));
       recordsByMonthSnap.docs.forEach(doc => {
+        if (!recordsMap.has(doc.id)) recordsMap.set(doc.id, { id: doc.id, ...doc.data() as any });
+      });
+      recordsByPrevMonthSnap.docs.forEach((doc: any) => {
         if (!recordsMap.has(doc.id)) recordsMap.set(doc.id, { id: doc.id, ...doc.data() as any });
       });
       const allRecords = Array.from(recordsMap.values());
@@ -1664,52 +1698,49 @@ async function startServer() {
         activeAddressScheduleDocId.set(aid, scheduledList[0].id);
       }
 
-      // Determina as datas efetivas do roteiro do técnico (alinhado com o comportamento do PWA)
+      // Determina a data efetiva do roteiro do técnico:
+      // 1. NUNCA exibe datas futuras (> targetDate)
+      // 2. Se houver preventiva agendada para targetDate, exibe somente targetDate
+      // 3. Caso contrário, exibe somente a última data agendada nos últimos 7 dias (minPastDate..targetDate)
+      const isIsoDateStr = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v);
       let effectiveTargetDate = targetDate;
       const techRecordsAllDates = allRecords.filter(r => {
         if (!r || !r.plannedDate) return false;
+        const rDate = String(r.plannedDate).split("T")[0].trim();
+        if (!isIsoDateStr(rDate) || rDate > targetDate || rDate < minPastDate) return false;
         return matchesTechResilient(r.technician1, r.technician2);
       });
 
-      const allTechDatesDesc = Array.from(
-        new Set(techRecordsAllDates.map(r => (r.plannedDate || "").split("T")[0].trim()).filter(Boolean))
+      const eligibleDatesDesc = Array.from(
+        new Set(techRecordsAllDates.map(r => String(r.plannedDate).split("T")[0].trim()).filter(Boolean))
       ).sort((a, b) => b.localeCompare(a));
 
-      const hasExactDateMatch = allTechDatesDesc.includes(targetDate);
+      const activePreventiveDate: string | null = eligibleDatesDesc.includes(targetDate)
+        ? targetDate
+        : (eligibleDatesDesc.find(d => d < targetDate && d >= minPastDate) || null);
+
+      effectiveTargetDate = activePreventiveDate || targetDate;
       const activeRouteDates = new Set<string>();
-      if (hasExactDateMatch) {
-        activeRouteDates.add(targetDate);
-        const lastPrevDate = allTechDatesDesc.find(d => d < targetDate);
-        if (lastPrevDate) activeRouteDates.add(lastPrevDate);
-      } else if (allTechDatesDesc.length > 0) {
-        const pastOrToday = allTechDatesDesc.filter(d => d <= targetDate);
-        const futureDates = [...allTechDatesDesc].reverse().filter(d => d > targetDate);
-        effectiveTargetDate = pastOrToday[0] || futureDates[0] || targetDate;
-        activeRouteDates.add(effectiveTargetDate);
-        // Inclui também a segunda data mais recente da mesma rota caso seja viagem de múltiplos dias
-        if (pastOrToday.length > 1) activeRouteDates.add(pastOrToday[1]);
-        if (futureDates.length > 0) activeRouteDates.add(futureDates[0]);
-      } else {
-        activeRouteDates.add(targetDate);
+      if (activePreventiveDate) {
+        activeRouteDates.add(activePreventiveDate);
       }
 
       // Filtragem dos registros de preventiva:
       const filteredRecords = allRecords.filter((r: any) => {
-        if (!r) return false;
+        if (!r || !activePreventiveDate) return false;
         const rDate = (r.plannedDate || "").split("T")[0].trim();
-        if (!rDate) return false;
-        const matchesDate = rDate === targetDate || rDate === effectiveTargetDate || activeRouteDates.has(rDate);
-        if (!matchesDate) return false;
+        if (!rDate || rDate !== activePreventiveDate) return false;
 
         return matchesTechResilient(r.technician1, r.technician2);
       });
 
-      // Filtragem das Ordens de Serviço:
+      // Filtragem das Ordens de Serviço (nunca exibir datas futuras > targetDate):
       const filteredOS = allOS.filter((os: any) => {
         if (!os || os.status === "cancelada") return false;
         const osDate = (os.plannedDate || (os.openedAt ? os.openedAt.substring(0, 10) : "")).split("T")[0].trim();
+        if (isIsoDateStr(osDate) && osDate > targetDate) return false;
         const isOpenStatus = os.status === "aberta" || os.status === "em_atendimento" || os.status === "em_andamento" || os.status === "pendente";
-        const matchesDate = !osDate || osDate === targetDate || osDate === effectiveTargetDate || activeRouteDates.has(osDate) || isOpenStatus;
+        const matchesDate = !osDate || osDate === targetDate || (activePreventiveDate !== null && osDate === activePreventiveDate) || isOpenStatus;
         if (!matchesDate) return false;
 
         return matchesTechResilient(os.technicianId || os.technician1, os.technician2Id || os.technician2);

@@ -198,6 +198,19 @@ service cloud.firestore {
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clientSignature', 'clientSignatureDate', 'clientSigneeName', 'clientSigneeRegistration', 'clientRepresentative', 'clientRepresentativeMatricula', 'status', 'updatedAt'])
       );
       allow create, delete: if isSignedIn();
+
+      // Subcoleção sob demanda de mídias pesadas (fotos e assinaturas) da O.S.
+      match /media/{mediaId} {
+        allow read: if isSignedIn() || (
+          exists(/databases/$(database)/documents/serviceOrders/$(orderId)) &&
+          get(/databases/$(database)/documents/serviceOrders/$(orderId)).data.shareSignatureToken != null
+        );
+        allow create, update: if isSignedIn() &&
+          mediaId == 'attachments' &&
+          request.resource.data.keys().hasOnly(['photos', 'clientSignature', 'techSignature', 'updatedAt']) &&
+          (!('photos' in request.resource.data) || (request.resource.data.photos is list && request.resource.data.photos.size() <= 16));
+        allow delete: if isSignedIn() && (isAdmin() || isAssistant());
+      }
     }
 
     // 21. Service Catalog (Catálogo de Produtos e Serviços e Tabela de Preços por Cliente)

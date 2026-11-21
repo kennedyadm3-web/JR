@@ -5,12 +5,13 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
+@page {
+  size: A4 portrait;
+  margin: 0mm;
+}
+
 @layer utilities {
   @media print {
-    @page {
-      size: A4 portrait;
-      margin: 0mm !important;
-    }
 
     .print\:hidden,
     .print-hide,
