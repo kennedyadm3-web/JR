@@ -20,6 +20,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -33,13 +35,19 @@ import java.util.UUID
 
 /**
  * Repositório Central de Ordens de Serviço e Atendimentos de Roteiro (Preventivas & Corretivas).
- * Todas as operações gravam primeiro localmente no Room (Offline-First) e sincronizam com o Firestore.
+ * Modelo Híbrido Inteligente (Offline-First): grava tudo localmente no Room e sincroniza por marcos operacionais.
  */
 class ServiceOrderRepository(private val context: Context) {
 
     companion object {
         // Cache em memória de máquinas por endereço alimentado na sincronização do roteiro
         private val cachedEquipmentsByAddress = java.util.concurrent.ConcurrentHashMap<String, MutableList<EquipmentOption>>()
+        private val itinerarySyncMutex = Mutex()
+        @Volatile
+        private var lastItinerarySyncAt: Long = 0L
+        @Volatile
+        private var lastItinerarySyncKey: String = ""
+        private const val ITINERARY_COOLDOWN_MS = 3L * 60L * 1000L // 3 minutos entre pulls automáticos
     }
 
     private val db = AppDatabase.getInstance(context)
@@ -101,26 +109,25 @@ class ServiceOrderRepository(private val context: Context) {
         checklistDao.getChecklistForOrderFlow(orderId)
 
     /**
-     * Sincroniza o Roteiro do Dia do Técnico (Manutenções Preventivas e Ordens de Serviço).
-     * 1. Consulta diretamente o Firestore com queries paralelas filtradas pelo técnico e data, com fallback para a API HTTP.
-     * 2. Associa endereços reais, clientes reais e o parque de máquinas reais cadastradas para o técnico.
+     * Sincroniza o Roteiro do Dia do Técnico (Pull Controlado com Mutex, Cooldown de 3 min e Recorte Temporal).
+     * 1. Consulta apenas a data atual no Firestore; se não houver preventivas hoje, consulta somente o(s) mês(es) da janela de 7 dias.
+     * 2. Nunca baixa histórico antigo com fotos Base64 de meses anteriores.
+     * 3. Reaproveita cache local de equipamentos já carregados no Room (salvo em forceRefresh manual).
      */
     suspend fun syncDailyItinerary(
         technicianName: String,
         technicianId: String,
-        targetDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
-    ) = withContext(Dispatchers.IO) {
+        targetDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date()),
+        forceRefresh: Boolean = false
+    ): Int = withContext(Dispatchers.IO) {
         // 0. Remove limpa e definitivamente qualquer registro de teste/seed antigo ou inválido do aparelho
         orderDao.deleteInvalidAndFakeOrders()
         orderDao.deleteFakeSeedOrders()
         checklistDao.deleteFakeSeedChecklists()
 
-        val ordersToSave = mutableListOf<ServiceOrderEntity>()
-        val checklistToSave = mutableListOf<EquipmentChecklistEntity>()
-        val currentMonth = if (targetDate.length >= 7) targetDate.substring(0, 7) else "2026-11"
-
         val normTechName = technicianName.trim().uppercase()
         val normTechId = technicianId.trim().uppercase()
+        val syncKey = "${normTechName}|${normTechId}|${targetDate}"
 
         // GARANTIA OFFLINE-FIRST: Se o dispositivo não tem internet validada,
         // NUNCA consulta cache vazio nem apaga o banco local Room — retorna imediatamente os dados salvos!
@@ -129,111 +136,88 @@ class ServiceOrderRepository(private val context: Context) {
             return@withContext orderDao.getAllOrders().size
         }
 
-        // Tenta enviar pendências locais ANTES de reconciliar com o servidor
-        try {
-            com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
-        } catch (_: Exception) {}
+        // Cooldown rápido antes de disputar Mutex (evita múltiplos downloads em sequência no 4G)
+        if (!forceRefresh && syncKey == lastItinerarySyncKey && (System.currentTimeMillis() - lastItinerarySyncAt) < ITINERARY_COOLDOWN_MS) {
+            Log.d(TAG, "Pull de roteiro ignorado por cooldown ativo (3 min). Usando cache local Room.")
+            return@withContext orderDao.getAllOrders().size
+        }
 
-        var fetchSuccess = false
-        var serverQuerySucceeded = false
+        itinerarySyncMutex.withLock {
+            if (!forceRefresh && syncKey == lastItinerarySyncKey && (System.currentTimeMillis() - lastItinerarySyncAt) < ITINERARY_COOLDOWN_MS) {
+                return@withLock orderDao.getAllOrders().size
+            }
 
-        // 1. TENTATIVA DIRETA E RESILIENTE NO FIRESTORE (Source.SERVER com timeout para garantir resposta real da nuvem)
-        try {
-            withTimeout(10_000L) { FirebaseConfig.ensureAuthenticated() }
-            val firestore = FirebaseConfig.getFirestore()
+            if (!NetworkMonitor.hasValidatedInternet(context)) {
+                return@withLock orderDao.getAllOrders().size
+            }
 
-            // A) Busca Manutenções Preventivas (maintenanceRecords) com queries direcionadas e paralelas no SERVIDOR
-            val candidateDocsMap = LinkedHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
-            val querySuccessCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val ordersToSave = mutableListOf<ServiceOrderEntity>()
+            val checklistToSave = mutableListOf<EquipmentChecklistEntity>()
+            val currentMonth = if (targetDate.length >= 7) targetDate.substring(0, 7) else "2026-11"
+
+            var fetchSuccess = false
+            var serverQuerySucceeded = false
+
+            // 1. TENTATIVA DIRETA E ENXUTA NO FIRESTORE (Recorte temporal estrito — NUNCA baixa meses históricos!)
             try {
-                coroutineScope {
-                    val qDate = async {
-                        try {
-                            val docs = withTimeout(12_000L) {
-                                firestore.collection("maintenanceRecords")
-                                    .whereEqualTo("plannedDate", targetDate)
-                                    .get(Source.SERVER).await().documents
-                            }
-                            querySuccessCount.incrementAndGet()
-                            docs
-                        } catch (_: Exception) { emptyList() }
-                    }
-                    val qTech1 = async {
-                        try {
-                            if (normTechName.isNotBlank()) {
-                                val docs = withTimeout(12_000L) {
-                                    firestore.collection("maintenanceRecords")
-                                        .whereEqualTo("technician1", normTechName)
-                                        .get(Source.SERVER).await().documents
-                                }
-                                querySuccessCount.incrementAndGet()
-                                docs
-                            } else emptyList()
-                        } catch (_: Exception) { emptyList() }
-                    }
-                    val qTech2 = async {
-                        try {
-                            if (normTechName.isNotBlank()) {
-                                val docs = withTimeout(12_000L) {
-                                    firestore.collection("maintenanceRecords")
-                                        .whereEqualTo("technician2", normTechName)
-                                        .get(Source.SERVER).await().documents
-                                }
-                                querySuccessCount.incrementAndGet()
-                                docs
-                            } else emptyList()
-                        } catch (_: Exception) { emptyList() }
-                    }
+                withTimeout(10_000L) { FirebaseConfig.ensureAuthenticated() }
+                val firestore = FirebaseConfig.getFirestore()
 
-                    for (list in listOf(qDate.await(), qTech1.await(), qTech2.await())) {
-                        for (d in list) {
-                            candidateDocsMap[d.id] = d
-                        }
-                    }
+                val minPastDate = subtractDays(targetDate, 7)
+                val prevMonth = if (minPastDate.length >= 7) minPastDate.substring(0, 7) else currentMonth
+
+                val isEligibleTechDoc: (com.google.firebase.firestore.DocumentSnapshot) -> Boolean = { doc ->
+                    val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
+                    val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
+                    val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+
+                    val isMyTech = matchesTechResilient(t1, normTechName, normTechId) ||
+                                   matchesTechResilient(t2, normTechName, normTechId)
+
+                    isMyTech && isIsoDate(pDate) && pDate <= targetDate && pDate >= minPastDate
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Falha ao buscar maintenanceRecords no servidor: ${e.message}")
-            }
 
-            // Janela válida: nunca exibir datas futuras; se não houver hoje, buscar a última agendada nos últimos 7 dias
-            val minPastDate = subtractDays(targetDate, 7)
-            val prevMonth = if (minPastDate.length >= 7) minPastDate.substring(0, 7) else currentMonth
-
-            val isEligibleTechDoc: (com.google.firebase.firestore.DocumentSnapshot) -> Boolean = { doc ->
-                val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
-                val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
-                val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
-
-                val isMyTech = matchesTechResilient(t1, normTechName, normTechId) ||
-                               matchesTechResilient(t2, normTechName, normTechId)
-
-                isMyTech && isIsoDate(pDate) && pDate <= targetDate && pDate >= minPastDate
-            }
-
-            // Fallback para busca por mês caso o nome do técnico tenha variação de grafia/acento ou não tenha docs na consulta direta
-            if (candidateDocsMap.values.none(isEligibleTechDoc)) {
+                // A) Primeiro busca SOMENTE a data atual (targetDate) — consulta minúscula e sem fotos históricas
+                val candidateDocsMap = LinkedHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
+                val querySuccessCount = java.util.concurrent.atomic.AtomicInteger(0)
                 try {
-                    val monthsToCheck = listOf(currentMonth, prevMonth).distinct()
-                    for (m in monthsToCheck) {
-                        val monthSnap = withTimeout(12_000L) {
-                            firestore.collection("maintenanceRecords")
-                                .whereEqualTo("month", m)
-                                .get(Source.SERVER).await()
-                        }
-                        querySuccessCount.incrementAndGet()
-                        for (d in monthSnap.documents) {
-                            candidateDocsMap[d.id] = d
-                        }
+                    val todayDocs = withTimeout(12_000L) {
+                        firestore.collection("maintenanceRecords")
+                            .whereEqualTo("plannedDate", targetDate)
+                            .get(Source.SERVER).await().documents
+                    }
+                    querySuccessCount.incrementAndGet()
+                    for (d in todayDocs) {
+                        candidateDocsMap[d.id] = d
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Fallback por mês em maintenanceRecords falhou: ${e.message}")
+                    Log.w(TAG, "Falha ao buscar preventivas de hoje no servidor: ${e.message}")
                 }
-            }
 
-            if (querySuccessCount.get() > 0) {
-                serverQuerySucceeded = true
-                fetchSuccess = true
-            }
+                // Somente se NÃO houver preventivas agendadas para hoje, busca a janela dos últimos 7 dias via mês vigente/anterior
+                if (candidateDocsMap.values.none(isEligibleTechDoc)) {
+                    try {
+                        val monthsToCheck = listOf(currentMonth, prevMonth).distinct()
+                        for (m in monthsToCheck) {
+                            val monthSnap = withTimeout(12_000L) {
+                                firestore.collection("maintenanceRecords")
+                                    .whereEqualTo("month", m)
+                                    .get(Source.SERVER).await()
+                            }
+                            querySuccessCount.incrementAndGet()
+                            for (d in monthSnap.documents) {
+                                candidateDocsMap[d.id] = d
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Consulta da janela de 7 dias em maintenanceRecords falhou: ${e.message}")
+                    }
+                }
+
+                if (querySuccessCount.get() > 0) {
+                    serverQuerySucceeded = true
+                    fetchSuccess = true
+                }
 
             // Filtra estritamente documentos do técnico com data válida entre (hoje - 7 dias) e hoje (NUNCA datas futuras)
             val techEligibleDocs = candidateDocsMap.values.filter(isEligibleTechDoc)
@@ -311,38 +295,53 @@ class ServiceOrderRepository(private val context: Context) {
                 }.awaitAll()
             }
 
-            // Busca equipamentos reais para os endereços encontrados em PARALELO
+            // Busca equipamentos reais em PARALELO apenas para endereços sem cache local no Room (ou em forceRefresh manual)
             val equipmentsMap = java.util.concurrent.ConcurrentHashMap<String, MutableList<com.google.firebase.firestore.DocumentSnapshot>>()
+            val localCachedEquipsMap = java.util.concurrent.ConcurrentHashMap<String, List<com.lefrio.atendimento.data.local.dao.AddressEquipmentResult>>()
+            val addressesNeedingEquipFetch = mutableListOf<String>()
+
+            for (aid in matchedAddressIds) {
+                val cleanAid = aid.trim()
+                if (cleanAid.isBlank()) continue
+                if (!forceRefresh) {
+                    val localEquips = try {
+                        checklistDao.getDistinctEquipmentsForAddress(cleanAid).filter { !it.id.startsWith("EQ_") }
+                    } catch (_: Exception) { emptyList() }
+                    if (localEquips.isNotEmpty()) {
+                        localCachedEquipsMap[cleanAid] = localEquips
+                        continue
+                    }
+                }
+                addressesNeedingEquipFetch.add(cleanAid)
+            }
+
             coroutineScope {
-                matchedAddressIds.map { aid ->
+                addressesNeedingEquipFetch.map { cleanAid ->
                     async {
-                        val cleanAid = aid.trim()
-                        if (cleanAid.isNotBlank()) {
-                            try {
-                                val eqSnap = firestore.collection("equipments").whereEqualTo("addressId", cleanAid).get().await()
-                                for (eqDoc in eqSnap.documents) {
-                                    val isActive = eqDoc.getBoolean("active") ?: true
-                                    if (isActive && eqDoc.getString("status") != "deactivated") {
-                                        equipmentsMap.getOrPut(cleanAid) { java.util.Collections.synchronizedList(mutableListOf()) }.add(eqDoc)
-                                        val eqName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split"
-                                        val opt = EquipmentOption(
-                                            id = eqDoc.id,
-                                            addressId = cleanAid,
-                                            name = eqName,
-                                            brand = eqDoc.getString("brand"),
-                                            sector = eqDoc.getString("sector"),
-                                            btu = eqDoc.getString("btus")
-                                        )
-                                        val existingList = cachedEquipmentsByAddress.getOrPut(cleanAid) { java.util.Collections.synchronizedList(mutableListOf()) }
-                                        synchronized(existingList) {
-                                            if (existingList.none { it.id == opt.id }) {
-                                                existingList.add(opt)
-                                            }
+                        try {
+                            val eqSnap = firestore.collection("equipments").whereEqualTo("addressId", cleanAid).get().await()
+                            for (eqDoc in eqSnap.documents) {
+                                val isActive = eqDoc.getBoolean("active") ?: true
+                                if (isActive && eqDoc.getString("status") != "deactivated") {
+                                    equipmentsMap.getOrPut(cleanAid) { java.util.Collections.synchronizedList(mutableListOf()) }.add(eqDoc)
+                                    val eqName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split"
+                                    val opt = EquipmentOption(
+                                        id = eqDoc.id,
+                                        addressId = cleanAid,
+                                        name = eqName,
+                                        brand = eqDoc.getString("brand"),
+                                        sector = eqDoc.getString("sector"),
+                                        btu = eqDoc.getString("btus")
+                                    )
+                                    val existingList = cachedEquipmentsByAddress.getOrPut(cleanAid) { java.util.Collections.synchronizedList(mutableListOf()) }
+                                    synchronized(existingList) {
+                                        if (existingList.none { it.id == opt.id }) {
+                                            existingList.add(opt)
                                         }
                                     }
                                 }
-                            } catch (_: Exception) {}
-                        }
+                            }
+                        } catch (_: Exception) {}
                     }
                 }.awaitAll()
             }
@@ -451,6 +450,7 @@ class ServiceOrderRepository(private val context: Context) {
                 }
 
                 val realEquips = equipmentsMap[addrId] ?: emptyList()
+                val localCachedEquips = localCachedEquipsMap[addrId] ?: emptyList()
                 if (realEquips.isNotEmpty()) {
                     for (eqDoc in realEquips) {
                         val eqName = eqDoc.getString("name") ?: eqDoc.getString("label") ?: "Ar Condicionado Split"
@@ -466,6 +466,29 @@ class ServiceOrderRepository(private val context: Context) {
                                 equipmentBtus = eqDoc.getString("btus"),
                                 equipmentSector = eqDoc.getString("sector") ?: "Geral",
                                 equipmentPatrimony = eqDoc.getString("patrimony"),
+                                isChecked = if (isRemoval) false else ((srvItem?.get("checked") as? Boolean) ?: false),
+                                isSkipped = if (isRemoval) true else ((srvItem?.get("skipped") as? Boolean) ?: false),
+                                notes = (srvItem?.get("notes") as? String) ?: "",
+                                justification = if (isRemoval) REMOVAL_JUSTIFICATION_MARKER else (srvItem?.get("justification") as? String)?.takeIf { it.isNotBlank() },
+                                checkedAt = (srvItem?.get("checkedAt") as? String)?.takeIf { it.isNotBlank() },
+                                isSynced = true
+                            )
+                        )
+                    }
+                } else if (localCachedEquips.isNotEmpty()) {
+                    for (cachedEq in localCachedEquips) {
+                        val eqName = cachedEq.name.ifBlank { "Ar Condicionado Split" }
+                        val srvItem = serverChecklistByEqId[cachedEq.id] ?: serverChecklistByName[eqName.trim().uppercase()]
+                        val isRemoval = (srvItem?.get("requestedRemoval") as? Boolean) == true
+                        checklistToSave.add(
+                            EquipmentChecklistEntity(
+                                id = "CHECK_${orderId}_${cachedEq.id}",
+                                orderId = orderId,
+                                equipmentId = cachedEq.id,
+                                equipmentName = eqName,
+                                equipmentBrand = cachedEq.brand,
+                                equipmentBtus = cachedEq.btu,
+                                equipmentSector = cachedEq.sector ?: "Geral",
                                 isChecked = if (isRemoval) false else ((srvItem?.get("checked") as? Boolean) ?: false),
                                 isSkipped = if (isRemoval) true else ((srvItem?.get("skipped") as? Boolean) ?: false),
                                 notes = (srvItem?.get("notes") as? String) ?: "",
@@ -505,18 +528,66 @@ class ServiceOrderRepository(private val context: Context) {
                 }
             }
 
-            // B) Busca Ordens de Serviço Corretivas reais na coleção 'serviceOrders' (apenas ordens abertas para execução em campo)
+            // B) Busca Ordens de Serviço Corretivas filtradas pelo técnico no SERVIDOR (evita baixar O.S. de toda a empresa no 4G)
             try {
-                val ordersSnap = firestore.collection("serviceOrders")
-                    .whereEqualTo("status", "aberta")
-                    .get().await()
-                for (doc in ordersSnap.documents) {
+                val osCandidateMap = LinkedHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
+                coroutineScope {
+                    val osQueries = buildList {
+                        if (normTechName.isNotBlank()) {
+                            add(async {
+                                try {
+                                    withTimeout(10_000L) {
+                                        firestore.collection("serviceOrders").whereEqualTo("technician1", normTechName).get().await().documents
+                                    }
+                                } catch (_: Exception) { emptyList() }
+                            })
+                            add(async {
+                                try {
+                                    withTimeout(10_000L) {
+                                        firestore.collection("serviceOrders").whereEqualTo("technicianName", normTechName).get().await().documents
+                                    }
+                                } catch (_: Exception) { emptyList() }
+                            })
+                            add(async {
+                                try {
+                                    withTimeout(10_000L) {
+                                        firestore.collection("serviceOrders").whereEqualTo("technician2", normTechName).get().await().documents
+                                    }
+                                } catch (_: Exception) { emptyList() }
+                            })
+                        }
+                        if (normTechId.isNotBlank()) {
+                            add(async {
+                                try {
+                                    withTimeout(10_000L) {
+                                        firestore.collection("serviceOrders").whereEqualTo("technicianId", normTechId).get().await().documents
+                                    }
+                                } catch (_: Exception) { emptyList() }
+                            })
+                            add(async {
+                                try {
+                                    withTimeout(10_000L) {
+                                        firestore.collection("serviceOrders").whereEqualTo("technician2Id", normTechId).get().await().documents
+                                    }
+                                } catch (_: Exception) { emptyList() }
+                            })
+                        }
+                    }
+                    for (docs in osQueries.awaitAll()) {
+                        for (d in docs) {
+                            osCandidateMap[d.id] = d
+                        }
+                    }
+                }
+
+                for (doc in osCandidateMap.values) {
+                    val status = (doc.getString("status") ?: "aberta").trim().lowercase()
+                    if (status != "aberta") continue
                     val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
                     val tName = (doc.getString("technicianName") ?: doc.getString("technician1") ?: "").trim().uppercase()
                     val t2Id = (doc.getString("technician2Id") ?: "").trim().uppercase()
                     val t2Name = (doc.getString("technician2") ?: "").trim().uppercase()
                     val pDate = (doc.getString("plannedDate") ?: (doc.getString("openedAt")?.take(10) ?: "")).trim().take(10)
-                    val status = doc.getString("status") ?: "aberta"
 
                     val matchesTech = matchesTechResilient(tId, normTechName, normTechId) ||
                                       matchesTechResilient(tName, normTechName, normTechId) ||
@@ -857,8 +928,8 @@ class ServiceOrderRepository(private val context: Context) {
 
         // 3. Reconciliação inteligente com o banco Room:
         //    - Remove agendamentos que foram excluídos ou desvinculados pelo administrativo
-        //    - Preserva 100% de trabalhos offline ainda não enviados na fila de sincronização
-        val pendingTasks = syncDao.getPendingTasks()
+        //    - Preserva 100% de trabalhos offline ainda não enviados na fila (incluindo QUARANTINED)
+        val pendingTasks = syncDao.getAllUnfinishedTasks()
         val pendingRefIds = pendingTasks.map { it.referenceId }.toSet()
         val pendingOrderIds = mutableSetOf<String>()
         for (t in pendingTasks) {
@@ -954,6 +1025,7 @@ class ServiceOrderRepository(private val context: Context) {
                         incoming.copy(
                             id = existing.id,
                             equipmentId = existing.equipmentId,
+                            equipmentPatrimony = incoming.equipmentPatrimony ?: existing.equipmentPatrimony,
                             isChecked = existing.isChecked || incoming.isChecked,
                             isSkipped = existing.isSkipped || incoming.isSkipped,
                             notes = if (existing.notes.isNotBlank()) existing.notes else incoming.notes,
@@ -967,6 +1039,7 @@ class ServiceOrderRepository(private val context: Context) {
                         incoming.copy(
                             id = existing.id,
                             equipmentId = existing.equipmentId,
+                            equipmentPatrimony = incoming.equipmentPatrimony ?: existing.equipmentPatrimony,
                             localPhotoPathsJson = if (existing.localPhotoPathsJson != "[]") existing.localPhotoPathsJson else incoming.localPhotoPathsJson,
                             remotePhotoUrlsJson = if (existing.remotePhotoUrlsJson != "[]") existing.remotePhotoUrlsJson else incoming.remotePhotoUrlsJson,
                             isSynced = true
@@ -990,7 +1063,13 @@ class ServiceOrderRepository(private val context: Context) {
             checklistDao.insertAll(finalChecklistMap.values.toList())
         }
 
-        return@withContext ordersToSave.size
+            if (serverQuerySucceeded) {
+                lastItinerarySyncAt = System.currentTimeMillis()
+                lastItinerarySyncKey = syncKey
+            }
+
+            return@withLock ordersToSave.size
+        }
     }
 
     /**
@@ -1049,45 +1128,20 @@ class ServiceOrderRepository(private val context: Context) {
     }
 
     /**
-     * Salva as fotos gerais de observação ("Outros") localmente (offline-first) e enfileira envio para o Firestore.
+     * Salva as fotos gerais de observação ("Outros") 100% localmente no aparelho.
+     * No Modelo Híbrido, as fotos são consolidadas e enviadas em pacote único na finalização do atendimento.
      */
     suspend fun saveOtherPhotos(orderId: String, photoPaths: List<String>) = withContext(Dispatchers.IO) {
         val limited = photoPaths.take(4)
         saveOtherPhotosLocalOnly(orderId, limited)
-        enqueueOrderExtrasSync(orderId, null, limited)
     }
 
     /**
-     * Salva o Relato Técnico (observações gerais do atendimento) no banco local Room e enfileira sincronização.
+     * Salva o Relato Técnico (observações gerais) 100% localmente no Room (sem consumo de 4G durante digitação).
+     * Enviado consolidado na finalização do atendimento.
      */
     suspend fun saveGeneralNotes(orderId: String, notes: String) = withContext(Dispatchers.IO) {
         orderDao.updateGeneralNotes(orderId, notes)
-        enqueueOrderExtrasSync(orderId, notes, getOtherPhotos(orderId))
-    }
-
-    private suspend fun enqueueOrderExtrasSync(
-        orderId: String,
-        routeNotesOverride: String?,
-        otherPhotos: List<String>
-    ) {
-        val existingOrder = orderDao.getOrderById(orderId)
-        val effectiveNotes = routeNotesOverride ?: existingOrder?.generalNotes ?: ""
-        val payload = JSONObject().apply {
-            put("orderId", orderId)
-            put("originalRecordId", existingOrder?.originalId ?: orderId.removePrefix("PREV_"))
-            put("routeNotes", effectiveNotes)
-            put("otherPhotoPaths", JSONArray(otherPhotos.take(4)))
-        }
-        syncDao.deletePendingByTypeAndRef("ORDER_EXTRAS", orderId)
-        syncDao.enqueue(
-            SyncQueueEntity(
-                entityType = "ORDER_EXTRAS",
-                referenceId = orderId,
-                actionType = "UPDATE",
-                payloadJson = payload.toString()
-            )
-        )
-        SyncWorker.triggerImmediateSync(context)
     }
 
     /**
@@ -1180,7 +1234,7 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
-        SyncWorker.triggerImmediateSync(context)
+        // Modelo Híbrido: equipamento novo permanece salvo localmente na fila e será enviado antes da finalização do endereço
         entity
     }
 
@@ -1261,36 +1315,24 @@ class ServiceOrderRepository(private val context: Context) {
         }
 
         // Se pelo menos 1 máquina for atendida/pulada e a O.S. estiver aberta, atualiza para 'em_andamento'
+        // e envia apenas o marco leve de INÍCIO (< 1 KB), sem trafegar checklist item a item no 4G.
         val currentOrder = orderDao.getOrderById(orderId)
         if (currentOrder != null && currentOrder.status == "aberta" && (isChecked || isSkipped)) {
             orderDao.updateStatus(orderId, "em_andamento")
-        }
-
-        val isRemovalReq = justification == REMOVAL_JUSTIFICATION_MARKER
-        val payload = JSONObject().apply {
-            put("orderId", orderId)
-            put("equipmentId", equipmentId)
-            put("isChecked", if (isRemovalReq) false else isChecked)
-            put("isSkipped", if (isRemovalReq) false else isSkipped)
-            put("requestedRemoval", isRemovalReq)
-            put("notes", notes)
-            put("justification", if (isRemovalReq) "" else (justification ?: ""))
-            put("checkedAt", checkedAt ?: "")
-            put("localPhotoPaths", JSONArray(localPhotoPaths.take(3)))
-        }
-
-        val targetRefId = existing?.id ?: checklistId
-        syncDao.deletePendingByTypeAndRef("CHECKLIST_ITEM", targetRefId)
-        syncDao.enqueue(
-            SyncQueueEntity(
-                entityType = "CHECKLIST_ITEM",
-                referenceId = targetRefId,
-                actionType = "UPDATE",
-                payloadJson = payload.toString()
+            val statusPayload = JSONObject().apply {
+                put("status", "em_andamento")
+            }
+            syncDao.deletePendingByTypeAndRef("ORDER_STATUS", orderId)
+            syncDao.enqueue(
+                SyncQueueEntity(
+                    entityType = "ORDER_STATUS",
+                    referenceId = orderId,
+                    actionType = "UPDATE",
+                    payloadJson = statusPayload.toString()
+                )
             )
-        )
-
-        SyncWorker.triggerImmediateSync(context)
+            SyncWorker.triggerImmediateSync(context)
+        }
     }
 
     suspend fun getChecklistForOrderSync(orderId: String): List<EquipmentChecklistEntity> = withContext(Dispatchers.IO) {
@@ -1405,6 +1447,8 @@ class ServiceOrderRepository(private val context: Context) {
             }
         }
 
+        // 2. Compactação imediata da fila: descarta pendências intermediárias obsoletas desta ordem
+        syncDao.deleteRedundantTasksForOrder(orderId)
         syncDao.deletePendingByTypeAndRef("FINALIZE_SERVICE", orderId)
         syncDao.enqueue(
             SyncQueueEntity(
@@ -1415,22 +1459,11 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
-        // 2. Agenda WorkManager imediatamente (garante entrega mesmo se o app for fechado ou o celular reiniciar)
+        // 3. Desacoplamento total da UI: agenda envio assíncrono via WorkManager (política KEEP)
+        // sem bloquear a tela em 4G fraco, liberando o técnico instantaneamente (< 150 ms).
         SyncWorker.triggerImmediateSync(context)
 
-        // 3. ENVIO IMEDIATO APENAS SE HOUVER INTERNET REAL VALIDADA (com timeout curto de 8s para nunca travar a tela)
-        if (NetworkMonitor.hasValidatedInternet(context)) {
-            try {
-                withTimeoutOrNull(8_000L) {
-                    com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Envio imediato indisponível (garantido na fila offline): ${e.message}")
-            }
-        }
-
-        val updatedOrder = orderDao.getOrderById(orderId)
-        return@withContext updatedOrder?.isSyncedWithServer == true
+        return@withContext NetworkMonitor.hasValidatedInternet(context)
     }
 
     // --- OPERAÇÕES DE DESPESAS DE ROTA ---
@@ -1612,19 +1645,8 @@ class ServiceOrderRepository(private val context: Context) {
             )
         )
 
-        // Dispara sincronização em segundo plano como garantia offline
+        // Dispara envio assíncrono em segundo plano via WorkManager (política KEEP) sem travar a tela no 4G
         SyncWorker.triggerImmediateSync(context)
-
-        // ENVIO IMEDIATO APENAS SE HOUVER INTERNET VALIDADA (timeout curto para nunca travar offline)
-        if (NetworkMonitor.hasValidatedInternet(context)) {
-            try {
-                withTimeoutOrNull(8_000L) {
-                    com.lefrio.atendimento.data.sync.FirebaseSyncManager(context).processPendingSyncQueue()
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Envio imediato da O.S. indisponível (será reenviado via SyncWorker): ${e.message}")
-            }
-        }
 
         return entity
     }
@@ -1684,30 +1706,47 @@ class ServiceOrderRepository(private val context: Context) {
         }
 
         // Caso o banco local Room ainda esteja vazio (ex: primeiro clique antes do término do sync),
-        // busca diretamente no Firestore os agendamentos do técnico
-        if (addressMap.isEmpty()) {
+        // busca apenas a data atual (ou mês vigente se vazio) no Firestore — nunca histórico antigo
+        if (addressMap.isEmpty() && NetworkMonitor.hasValidatedInternet(context)) {
             try {
-                FirebaseConfig.ensureAuthenticated()
+                withTimeout(8_000L) { FirebaseConfig.ensureAuthenticated() }
                 val firestore = FirebaseConfig.getFirestore()
                 val normTechName = technicianName.trim().uppercase()
+                val normTechId = technicianId.trim().uppercase()
                 val currentMonth = if (date.length >= 7) date.substring(0, 7) else "2026-11"
+                val minPastDate = subtractDays(date, 7)
 
                 val docs = mutableListOf<com.google.firebase.firestore.DocumentSnapshot>()
-                if (normTechName.isNotBlank()) {
-                    val s1 = firestore.collection("maintenanceRecords")
-                        .whereEqualTo("technician1", normTechName)
-                        .get().await()
-                    val s2 = firestore.collection("maintenanceRecords")
-                        .whereEqualTo("technician2", normTechName)
-                        .get().await()
-                    docs.addAll(s1.documents)
-                    docs.addAll(s2.documents)
+                val byDate = withTimeout(10_000L) {
+                    firestore.collection("maintenanceRecords")
+                        .whereEqualTo("plannedDate", date)
+                        .get().await().documents
+                }
+                docs.addAll(byDate)
+
+                val hasTechDocToday = docs.any { doc ->
+                    val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
+                    val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+                    matchesTechResilient(t1, normTechName, normTechId) || matchesTechResilient(t2, normTechName, normTechId)
+                }
+
+                if (!hasTechDocToday) {
+                    val byMonth = withTimeout(10_000L) {
+                        firestore.collection("maintenanceRecords")
+                            .whereEqualTo("month", currentMonth)
+                            .get().await().documents
+                    }
+                    docs.addAll(byMonth)
                 }
 
                 for (doc in docs) {
-                    val pDate = (doc.getString("plannedDate") ?: "").trim()
-                    val month = (doc.getString("month") ?: "").trim()
-                    if (pDate.isBlank() || (!pDate.startsWith(currentMonth) && month != currentMonth && !pDate.startsWith(date))) {
+                    val t1 = (doc.getString("technician1") ?: "").trim().uppercase()
+                    val t2 = (doc.getString("technician2") ?: "").trim().uppercase()
+                    if (!matchesTechResilient(t1, normTechName, normTechId) && !matchesTechResilient(t2, normTechName, normTechId)) {
+                        continue
+                    }
+                    val pDate = (doc.getString("plannedDate") ?: "").trim().take(10)
+                    if (!isIsoDate(pDate) || pDate > date || pDate < minPastDate) {
                         continue
                     }
                     val addrId = (doc.getString("addressId") ?: "").trim()

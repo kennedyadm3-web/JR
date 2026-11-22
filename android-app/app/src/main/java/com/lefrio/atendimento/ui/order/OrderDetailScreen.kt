@@ -81,7 +81,7 @@ fun OrderDetailScreen(
     LaunchedEffect(uiState.finalizeSuccess) {
         if (uiState.finalizeSuccess) {
             val toastMsg = if (uiState.finalizeSyncedImmediately) {
-                "Atendimento finalizado e enviado ao servidor com sucesso!"
+                "Atendimento finalizado e salvo! Enviando ao servidor em segundo plano."
             } else {
                 "Atendimento salvo com segurança no aparelho! Será enviado automaticamente assim que houver internet estável."
             }

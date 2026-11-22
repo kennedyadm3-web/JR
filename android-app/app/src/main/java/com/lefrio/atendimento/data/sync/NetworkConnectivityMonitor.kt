@@ -9,15 +9,19 @@ import android.util.Log
 import com.lefrio.atendimento.data.auth.AuthRepository
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
 import com.lefrio.atendimento.util.NetworkMonitor
+import com.lefrio.atendimento.util.PhotoCaptureManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Monitor contínuo e automático de conectividade de rede.
- * Garante que assim que houver sinal de internet REAL E VALIDADO (Wi-Fi ou 4G/5G),
- * toda a fila offline pendente seja entregue ao servidor automaticamente sem exigir ação manual.
+ * Coordenador Único de Conectividade (Modelo Híbrido Inteligente).
+ * - Aguarda 5 segundos de sinal 4G/Wi-Fi validado e estável (debounce) antes de disparar sincronização.
+ * - Cancela disparos pendentes caso o sinal oscile em áreas de sombra/elevadores/túneis.
+ * - Sempre esvazia primeiro a fila compactada de envios e só depois executa Pull controlado do roteiro.
  */
 class NetworkConnectivityMonitor(private val context: Context) {
 
@@ -32,6 +36,11 @@ class NetworkConnectivityMonitor(private val context: Context) {
 
     @Volatile
     private var wasValidatedOnline = false
+    private var reconnectSyncJob: Job? = null
+
+    companion object {
+        private const val RECONNECT_STABILITY_DEBOUNCE_MS = 5_000L
+    }
 
     fun startMonitoring() {
         try {
@@ -43,9 +52,8 @@ class NetworkConnectivityMonitor(private val context: Context) {
             connectivityManager.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     if (NetworkMonitor.hasValidatedInternet(context) && !wasValidatedOnline) {
-                        Log.d(TAG, "Internet validada restabelecida (onAvailable). Disparando sincronização automática...")
                         wasValidatedOnline = true
-                        triggerAutoSync()
+                        scheduleStableReconnectSync("onAvailable")
                     }
                 }
 
@@ -53,11 +61,11 @@ class NetworkConnectivityMonitor(private val context: Context) {
                     val validated = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
                         networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                     if (validated && !wasValidatedOnline) {
-                        Log.d(TAG, "Internet validada restabelecida (onCapabilitiesChanged). Disparando sincronização automática...")
                         wasValidatedOnline = true
-                        triggerAutoSync()
+                        scheduleStableReconnectSync("onCapabilitiesChanged")
                     } else if (!validated) {
                         wasValidatedOnline = false
+                        reconnectSyncJob?.cancel()
                     }
                 }
 
@@ -65,6 +73,7 @@ class NetworkConnectivityMonitor(private val context: Context) {
                     if (!NetworkMonitor.hasValidatedInternet(context)) {
                         Log.d(TAG, "Conexão com a Internet perdida. Modo offline ativo.")
                         wasValidatedOnline = false
+                        reconnectSyncJob?.cancel()
                     }
                 }
             })
@@ -74,28 +83,51 @@ class NetworkConnectivityMonitor(private val context: Context) {
     }
 
     /**
-     * Sincroniza automaticamente a fila de envios pendentes e só depois reconcilia o roteiro do técnico logado.
+     * Aguarda 5 segundos de conexão validada contínua para evitar rajadas em áreas de sinal instável.
+     */
+    private fun scheduleStableReconnectSync(source: String) {
+        reconnectSyncJob?.cancel()
+        reconnectSyncJob = scope.launch {
+            Log.d(TAG, "Sinal restabelecido ($source). Aguardando ${RECONNECT_STABILITY_DEBOUNCE_MS / 1000}s de estabilidade 4G...")
+            delay(RECONNECT_STABILITY_DEBOUNCE_MS)
+
+            if (!NetworkMonitor.hasValidatedInternet(context)) {
+                Log.d(TAG, "Sinal oscilou durante janela de estabilização. Sincronização adiada.")
+                wasValidatedOnline = false
+                return@launch
+            }
+
+            triggerAutoSync()
+        }
+    }
+
+    /**
+     * Sincroniza automaticamente a fila compactada de envios e só depois faz Pull controlado do roteiro.
      */
     fun triggerAutoSync() {
-        // Agenda também via WorkManager para sobreviver se o app for fechado durante o envio
+        // Backup via WorkManager (política KEEP) para sobreviver se o app for fechado durante o envio
         SyncWorker.triggerImmediateSync(context)
 
         scope.launch {
             try {
                 if (!NetworkMonitor.hasValidatedInternet(context)) return@launch
 
-                // 1. Processa fila de alterações locais para envio (protegido por Mutex)
-                syncManager.processPendingSyncQueue()
+                // 1. Esvazia fila local compactada e cadenciada (protegida por Mutex)
+                syncManager.processPendingSyncQueue(ignoreBackoff = false)
 
-                // 2. Sincroniza o roteiro do técnico autenticado na sessão ativa
+                // 2. Pull controlado do roteiro (protegido por Mutex + Cooldown de 3 min)
                 val currentTech = authRepository.getSelectedTechnician()
                 if (currentTech != null && currentTech.name.isNotBlank()) {
-                    Log.d(TAG, "Sincronizando itinerário automaticamente para ${currentTech.name}...")
+                    Log.d(TAG, "Executando Pull controlado do roteiro para ${currentTech.name}...")
                     orderRepository.syncDailyItinerary(
                         technicianName = currentTech.name,
-                        technicianId = currentTech.uid
+                        technicianId = currentTech.uid,
+                        forceRefresh = false
                     )
                 }
+
+                // 3. Limpeza diária de mídia sincronizada há mais de 7 dias (gate de 24h)
+                PhotoCaptureManager.cleanupOldSyncedMediaIfDue(context)
             } catch (e: Exception) {
                 Log.w(TAG, "Falha na sincronização automática em segundo plano: ${e.message}")
             }

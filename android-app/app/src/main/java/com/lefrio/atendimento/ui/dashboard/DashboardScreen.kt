@@ -182,6 +182,7 @@ fun DashboardScreen(
                 SyncStatusBar(
                     isOnline = uiState.isOnline,
                     pendingTasksCount = uiState.pendingSyncCount,
+                    quarantinedTasksCount = uiState.quarantinedSyncCount,
                     isSyncing = uiState.isSyncing,
                     onForceSyncClick = { viewModel.forceSync() }
                 )

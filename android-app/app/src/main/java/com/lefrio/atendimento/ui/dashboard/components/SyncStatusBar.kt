@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.sp
 fun SyncStatusBar(
     isOnline: Boolean,
     pendingTasksCount: Int,
+    quarantinedTasksCount: Int = 0,
     isSyncing: Boolean = false,
     onForceSyncClick: () -> Unit
 ) {
@@ -45,32 +47,39 @@ fun SyncStatusBar(
         label = "rotation"
     )
 
+    val totalSavedLocal = pendingTasksCount + quarantinedTasksCount
+
     val bgColor = when {
         !isOnline -> Color(0xFFFEF3C7) // Âmbar / Offline
         isSyncing -> Color(0xFFE0F2FE) // Sky Blue / Varredura Ativa
-        pendingTasksCount > 0 -> Color(0xFFDBEAFE) // Azul / Sincronizando
+        quarantinedTasksCount > 0 -> Color(0xFFFEE2E2) // Vermelho suave / Falha persistente
+        pendingTasksCount > 0 -> Color(0xFFDBEAFE) // Azul / Enviando em segundo plano
         else -> Color(0xFFD1FAE5) // Verde / Sincronizado
     }
 
     val textColor = when {
         !isOnline -> Color(0xFF92400E)
         isSyncing -> Color(0xFF0369A1)
+        quarantinedTasksCount > 0 -> Color(0xFFB91C1C)
         pendingTasksCount > 0 -> Color(0xFF1E40AF)
         else -> Color(0xFF065F46)
     }
 
     val icon = when {
         !isOnline -> Icons.Default.CloudOff
-        isSyncing || pendingTasksCount > 0 -> Icons.Default.Sync
+        isSyncing -> Icons.Default.Sync
+        quarantinedTasksCount > 0 -> Icons.Default.Warning
+        pendingTasksCount > 0 -> Icons.Default.Sync
         else -> Icons.Default.CloudDone
     }
 
     val message = when {
-        !isOnline && pendingTasksCount > 0 -> "Offline • $pendingTasksCount dado(s) salvo(s) com segurança no aparelho"
+        !isOnline && totalSavedLocal > 0 -> "Offline • $totalSavedLocal dado(s) salvo(s) com segurança no aparelho"
         !isOnline -> "Modo Offline • Dados gravados com segurança no aparelho"
-        isSyncing -> "Sincronizando atendimentos e roteiro com o servidor..."
-        pendingTasksCount > 0 -> "$pendingTasksCount pendência(s) aguardando envio • Toque para enviar"
-        else -> "Online • Dados 100% sincronizados com o servidor"
+        isSyncing -> "Sincronizando pendências e roteiro com o servidor..."
+        quarantinedTasksCount > 0 -> "$quarantinedTasksCount envio(s) com falha persistente • Toque para reenviar"
+        pendingTasksCount > 0 -> "$pendingTasksCount pendência(s) na fila • Enviando em segundo plano"
+        else -> "Online • Dados sincronizados • Toque para atualizar roteiro"
     }
 
     Box(
@@ -110,13 +119,17 @@ fun SyncStatusBar(
 
             if (isOnline && !isSyncing) {
                 Text(
-                    text = if (pendingTasksCount > 0) "ENVIAR AGORA" else "ATUALIZAR",
+                    text = when {
+                        quarantinedTasksCount > 0 -> "REENVIAR"
+                        pendingTasksCount > 0 -> "ENVIAR AGORA"
+                        else -> "ATUALIZAR"
+                    },
                     color = textColor,
                     fontSize = 9.sp,
                     fontWeight = FontWeight.Black,
                     modifier = Modifier.padding(start = 6.dp)
                 )
-            } else if (!isOnline && pendingTasksCount > 0) {
+            } else if (!isOnline && totalSavedLocal > 0) {
                 Text(
                     text = "SEGURO LOCAL",
                     color = textColor,

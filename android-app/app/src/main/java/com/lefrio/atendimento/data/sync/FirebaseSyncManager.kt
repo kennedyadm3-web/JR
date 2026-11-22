@@ -12,6 +12,7 @@ import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.util.NetworkMonitor
 import com.lefrio.atendimento.util.PhotoCaptureManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
@@ -32,6 +33,12 @@ class FirebaseSyncManager(private val context: Context) {
 
     companion object {
         private val syncMutex = Mutex()
+        private const val MAX_RETRY_COUNT = 5
+        private const val CADENCE_HEAVY_TASK_DELAY_MS = 800L
+        private const val ADMIN_CACHE_PREFS = "lefrio_admin_recipients_cache"
+        private const val KEY_ADMIN_LIST_JSON = "admin_list_json"
+        private const val KEY_ADMIN_CACHED_AT = "admin_cached_at_ms"
+        private const val ADMIN_CACHE_TTL_MS = 24L * 60L * 60L * 1000L // 24 horas
     }
 
     private val db = AppDatabase.getInstance(context)
@@ -39,10 +46,44 @@ class FirebaseSyncManager(private val context: Context) {
     private val TAG = "FirebaseSyncManager"
 
     /**
-     * Processa todas as tarefas pendentes (incluindo falhas anteriores ou interrompidas) na fila local.
+     * Compacta a fila local antes do envio: para qualquer atendimento que já possua FINALIZE_SERVICE pendente,
+     * descarta eventos intermediários obsoletos (ORDER_STATUS, CHECKLIST_ITEM, ORDER_EXTRAS) da mesma ordem.
+     */
+    private suspend fun compactQueueBeforeProcessing() {
+        try {
+            val allPending = db.syncQueueDao().getPendingTasks()
+            val finalizedOrderIds = allPending
+                .filter { it.entityType == "FINALIZE_SERVICE" }
+                .map { it.referenceId }
+                .distinct()
+
+            for (orderId in finalizedOrderIds) {
+                db.syncQueueDao().deleteRedundantTasksForOrder(orderId)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Aviso ao compactar fila de sincronização: ${e.message}")
+        }
+    }
+
+    /**
+     * Calcula o intervalo mínimo de espera progressiva (backoff) antes de retentar uma tarefa que falhou.
+     */
+    private fun getBackoffDelayMs(retryCount: Int): Long {
+        return when (retryCount) {
+            0 -> 0L
+            1 -> 30_000L       // 30s
+            2 -> 120_000L      // 2 min
+            3 -> 300_000L      // 5 min
+            4 -> 900_000L      // 15 min
+            else -> 1_800_000L // 30 min
+        }
+    }
+
+    /**
+     * Processa todas as tarefas elegíveis na fila local com compactação, cadenciamento e quarentena anti-loop.
      * Nunca trava quando o aparelho está offline e nunca remove uma tarefa sem confirmação real do servidor.
      */
-    suspend fun processPendingSyncQueue(): Int = withContext(Dispatchers.IO) {
+    suspend fun processPendingSyncQueue(ignoreBackoff: Boolean = false): Int = withContext(Dispatchers.IO) {
         if (!NetworkMonitor.hasValidatedInternet(context)) {
             Log.d(TAG, "Aparelho sem internet validada. Fila local preservada para envio automático posterior.")
             return@withContext 0
@@ -53,8 +94,26 @@ class FirebaseSyncManager(private val context: Context) {
                 return@withLock 0
             }
 
+            // 1. Compacta pendências redundantes antes de iniciar o envio (economia massiva de 4G pós-offline)
+            compactQueueBeforeProcessing()
+
             val pendingTasks = db.syncQueueDao().getPendingTasks()
             if (pendingTasks.isEmpty()) return@withLock 0
+
+            val now = System.currentTimeMillis()
+            val readyTasks = if (ignoreBackoff) {
+                pendingTasks
+            } else {
+                pendingTasks.filter { task ->
+                    if (task.status != "FAILED" || task.lastAttemptAt == null) {
+                        true
+                    } else {
+                        (now - task.lastAttemptAt) >= getBackoffDelayMs(task.retryCount)
+                    }
+                }
+            }
+
+            if (readyTasks.isEmpty()) return@withLock 0
 
             // Garante autenticação Firebase antes de tentar enviar
             val authOk = withTimeoutOrNull(10_000L) {
@@ -69,7 +128,7 @@ class FirebaseSyncManager(private val context: Context) {
 
             var successfulSyncs = 0
 
-            for (task in pendingTasks) {
+            for ((index, task) in readyTasks.withIndex()) {
                 if (!NetworkMonitor.hasValidatedInternet(context)) {
                     Log.w(TAG, "Conexão caiu durante a fila de envio. Mantendo tarefas restantes salvas.")
                     break
@@ -83,16 +142,32 @@ class FirebaseSyncManager(private val context: Context) {
                         db.syncQueueDao().updateTaskStatus(task.queueId, "SUCCESS")
                         db.syncQueueDao().removeTask(task)
                         successfulSyncs++
+
+                        // Envio cadenciado após pacotes pesados (finalizações/O.S.) para não saturar 4G/CPU/RAM
+                        val isHeavyTask = task.entityType == "FINALIZE_SERVICE" || task.entityType == "CREATE_SERVICE_ORDER"
+                        if (isHeavyTask && index < readyTasks.lastIndex) {
+                            delay(CADENCE_HEAVY_TASK_DELAY_MS)
+                        }
                     } else {
-                        db.syncQueueDao().markTaskFailed(task.queueId, "Aguardando confirmação do servidor")
+                        handleTaskFailure(task, "Aguardando confirmação do servidor")
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Erro ao sincronizar tarefa #${task.queueId} (${task.entityType}): ${e.message}")
-                    db.syncQueueDao().markTaskFailed(task.queueId, e.message ?: "Conexão instável")
+                    handleTaskFailure(task, e.message ?: "Conexão instável")
                 }
             }
 
             successfulSyncs
+        }
+    }
+
+    private suspend fun handleTaskFailure(task: SyncQueueEntity, reason: String) {
+        val nextRetryCount = task.retryCount + 1
+        if (nextRetryCount >= MAX_RETRY_COUNT) {
+            Log.w(TAG, "Tarefa #${task.queueId} (${task.entityType}) movida para QUARENTENA após $nextRetryCount tentativas: $reason")
+            db.syncQueueDao().markTaskQuarantined(task.queueId, reason)
+        } else {
+            db.syncQueueDao().markTaskFailed(task.queueId, reason)
         }
     }
 
@@ -736,6 +811,79 @@ class FirebaseSyncManager(private val context: Context) {
     }
 
     /**
+     * Obtém os destinatários administrativos com cache local de 24h e consulta filtrada por perfil,
+     * evitando baixar a coleção 'users' inteira em toda finalização no 4G.
+     */
+    private suspend fun getAdminRecipientsCached(): List<Pair<String, String>> {
+        val prefs = context.getSharedPreferences(ADMIN_CACHE_PREFS, Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val cachedAt = prefs.getLong(KEY_ADMIN_CACHED_AT, 0L)
+        val cachedRaw = prefs.getString(KEY_ADMIN_LIST_JSON, null)
+
+        if (!cachedRaw.isNullOrBlank() && (now - cachedAt) < ADMIN_CACHE_TTL_MS) {
+            try {
+                val arr = JSONArray(cachedRaw)
+                val cachedList = mutableListOf<Pair<String, String>>()
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val uid = obj.optString("id", "").trim()
+                    val role = obj.optString("role", "").trim().lowercase()
+                    if (uid.isNotBlank() && role.isNotBlank()) {
+                        cachedList.add(uid to role)
+                    }
+                }
+                if (cachedList.isNotEmpty()) return cachedList
+            } catch (_: Exception) {}
+        }
+
+        val fetchedList = mutableListOf<Pair<String, String>>()
+        try {
+            val adminRoles = listOf("admin", "support", "assistant", "manager", "ADMIN", "SUPPORT", "ASSISTANT", "MANAGER")
+            val usersSnap = firestore.collection("users")
+                .whereIn("role", adminRoles)
+                .get(Source.SERVER)
+                .await()
+
+            for (userDoc in usersSnap.documents) {
+                val role = (userDoc.getString("role") ?: "").trim().lowercase()
+                if (role.isNotBlank()) {
+                    fetchedList.add(userDoc.id to role)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Consulta filtrada de usuários administrativos falhou, usando fallback seguro: ${e.message}")
+            try {
+                val fallbackSnap = firestore.collection("users").get(Source.SERVER).await()
+                val allowed = setOf("admin", "support", "assistant", "manager")
+                for (userDoc in fallbackSnap.documents) {
+                    val role = (userDoc.getString("role") ?: "").trim().lowercase()
+                    if (role in allowed) {
+                        fetchedList.add(userDoc.id to role)
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        if (fetchedList.isNotEmpty()) {
+            try {
+                val arr = JSONArray()
+                for ((uid, role) in fetchedList) {
+                    arr.put(JSONObject().apply {
+                        put("id", uid)
+                        put("role", role)
+                    })
+                }
+                prefs.edit()
+                    .putString(KEY_ADMIN_LIST_JSON, arr.toString())
+                    .putLong(KEY_ADMIN_CACHED_AT, now)
+                    .apply()
+            } catch (_: Exception) {}
+        }
+
+        return fetchedList
+    }
+
+    /**
      * Cria documentos na coleção 'notifications' para todos os usuários administrativos
      * (admin, assistant, support e opcionalmente manager), disparando o sino, popup e som no painel web.
      */
@@ -747,7 +895,7 @@ class FirebaseSyncManager(private val context: Context) {
         includeManagers: Boolean
     ) {
         try {
-            val usersSnap = firestore.collection("users").get(Source.SERVER).await()
+            val recipients = getAdminRecipientsCached()
             val allowedRoles = if (includeManagers) {
                 setOf("admin", "support", "assistant", "manager")
             } else {
@@ -756,12 +904,11 @@ class FirebaseSyncManager(private val context: Context) {
 
             val sanitizedRecordId = recordId.replace("/", "_").ifBlank { System.currentTimeMillis().toString() }
 
-            for (userDoc in usersSnap.documents) {
-                val role = (userDoc.getString("role") ?: "").trim().lowercase()
+            for ((userId, role) in recipients) {
                 if (role !in allowedRoles) continue
 
                 val notifData = hashMapOf<String, Any>(
-                    "userId" to userDoc.id,
+                    "userId" to userId,
                     "title" to title,
                     "content" to content,
                     "type" to type,
@@ -776,14 +923,14 @@ class FirebaseSyncManager(private val context: Context) {
 
                 // ID determinístico garante envio único mesmo em caso de retentativa offline:
                 // na 1ª vez cria o documento; em eventual reenvio, a regra de update impede sobrescrever read=true
-                val deterministicDocId = "${type}_${sanitizedRecordId}_${userDoc.id}"
+                val deterministicDocId = "${type}_${sanitizedRecordId}_${userId}"
                 try {
                     firestore.collection("notifications")
                         .document(deterministicDocId)
                         .set(notifData)
                         .await()
                 } catch (e: Exception) {
-                    Log.w(TAG, "Notificação $deterministicDocId já enviada ou indisponível para ${userDoc.id}: ${e.message}")
+                    Log.w(TAG, "Notificação $deterministicDocId já enviada ou indisponível para $userId: ${e.message}")
                 }
             }
         } catch (e: Exception) {

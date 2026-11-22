@@ -3,16 +3,12 @@ package com.lefrio.atendimento.ui.dashboard
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.firebase.firestore.ListenerRegistration
-import com.lefrio.atendimento.data.FirebaseConfig
 import com.lefrio.atendimento.data.local.AppDatabase
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
 import com.lefrio.atendimento.data.sync.FirebaseSyncManager
 import com.lefrio.atendimento.data.sync.SyncWorker
 import com.lefrio.atendimento.util.NetworkMonitor
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -27,6 +23,7 @@ data class DashboardUiState(
     val searchQuery: String = "",
     val isOnline: Boolean = true,
     val pendingSyncCount: Int = 0,
+    val quarantinedSyncCount: Int = 0,
     val totalVisitsCount: Int = 0,
     val preventiveCount: Int = 0,
     val correctiveCount: Int = 0,
@@ -40,6 +37,11 @@ data class DashboardUiState(
     val effectiveRouteDate: String = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
 )
 
+/**
+ * ViewModel do Painel de Roteiro (Modelo Híbrido Inteligente).
+ * - Sem listeners contínuos em tempo real no Firestore (elimina loop de eco e consumo constante de 4G).
+ * - Pull controlado na abertura do app, retorno estável de rede (via coordenador único) ou botão manual Atualizar.
+ */
 class DashboardViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = ServiceOrderRepository(application)
@@ -52,50 +54,27 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     private var currentTechName: String = ""
     private var currentTechId: String = ""
     private val selectedTechFlow = MutableStateFlow(Pair("", ""))
-    private var tech1Listener: ListenerRegistration? = null
-    private var tech2Listener: ListenerRegistration? = null
-    private var realtimeSyncJob: Job? = null
-    private var lastListenedTechName: String = ""
 
     init {
-        // Observa conectividade de rede validada
+        // Observa conectividade apenas para refletir status visual na barra superior.
+        // Toda a orquestração de reconexão fica centralizada no NetworkConnectivityMonitor (evita disparos duplicados).
         viewModelScope.launch {
-            var hadOffline = false
             networkMonitor.isOnline.collect { online ->
                 _uiState.update { it.copy(isOnline = online) }
-                if (!online) {
-                    hadOffline = true
-                } else {
-                    SyncWorker.triggerImmediateSync(getApplication())
-                    if (currentTechName.isNotBlank()) {
-                        if (tech1Listener == null) {
-                            lastListenedTechName = ""
-                            startRealtimeItineraryListeners(currentTechName)
-                        }
-                        if (hadOffline) {
-                            hadOffline = false
-                            launch {
-                                try {
-                                    FirebaseSyncManager(getApplication()).processPendingSyncQueue()
-                                    val todayDate = getTodayIsoDate()
-                                    _uiState.update { it.copy(selectedDate = todayDate) }
-                                    repository.syncDailyItinerary(
-                                        technicianName = currentTechName,
-                                        technicianId = currentTechId,
-                                        targetDate = todayDate
-                                    )
-                                } catch (_: Exception) {}
-                            }
-                        }
-                    }
-                }
             }
         }
 
-        // Observa tarefas pendentes na fila de sincronização
+        // Observa tarefas ativas pendentes na fila de sincronização
         viewModelScope.launch {
             db.syncQueueDao().getPendingTasksCountFlow().collect { count ->
                 _uiState.update { it.copy(pendingSyncCount = count) }
+            }
+        }
+
+        // Observa tarefas em quarentena (falha persistente após 5 retentativas)
+        viewModelScope.launch {
+            db.syncQueueDao().getQuarantinedTasksCountFlow().collect { count ->
+                _uiState.update { it.copy(quarantinedSyncCount = count) }
             }
         }
 
@@ -226,92 +205,23 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Inicializa ou atualiza o itinerário do dia para o técnico logado
+     * Inicializa o itinerário do dia para o técnico logado (respeitando cooldown de 3 minutos para economizar 4G).
      */
     fun loadItineraryForTechnician(techName: String, techId: String) {
         currentTechName = techName
         currentTechId = techId
         selectedTechFlow.value = Pair(techName, techId)
-        startRealtimeItineraryListeners(techName)
         viewModelScope.launch {
             val todayDate = getTodayIsoDate()
             _uiState.update { it.copy(isLoading = true, selectedDate = todayDate) }
             repository.syncDailyItinerary(
                 technicianName = techName,
                 technicianId = techId,
-                targetDate = todayDate
+                targetDate = todayDate,
+                forceRefresh = false
             )
             _uiState.update { it.copy(isLoading = false) }
         }
-    }
-
-    /**
-     * Escuta alterações em tempo real no Firestore (ex: administrativo excluiu agendamento,
-     * reabriu planilha ou escalou novo endereço) e reconcilia imediatamente o banco local Room.
-     */
-    private fun startRealtimeItineraryListeners(techName: String) {
-        val normTechName = techName.trim().uppercase()
-        if (normTechName.isBlank() || normTechName == lastListenedTechName) return
-        lastListenedTechName = normTechName
-
-        tech1Listener?.remove()
-        tech2Listener?.remove()
-        tech1Listener = null
-        tech2Listener = null
-
-        viewModelScope.launch {
-            try {
-                FirebaseConfig.ensureAuthenticated()
-                val firestore = FirebaseConfig.getFirestore()
-
-                var firstSnap1 = true
-                tech1Listener = firestore.collection("maintenanceRecords")
-                    .whereEqualTo("technician1", normTechName)
-                    .addSnapshotListener { _, error ->
-                        if (error != null) return@addSnapshotListener
-                        if (firstSnap1) {
-                            firstSnap1 = false
-                            return@addSnapshotListener
-                        }
-                        scheduleRealtimeSync()
-                    }
-
-                var firstSnap2 = true
-                tech2Listener = firestore.collection("maintenanceRecords")
-                    .whereEqualTo("technician2", normTechName)
-                    .addSnapshotListener { _, error ->
-                        if (error != null) return@addSnapshotListener
-                        if (firstSnap2) {
-                            firstSnap2 = false
-                            return@addSnapshotListener
-                        }
-                        scheduleRealtimeSync()
-                    }
-            } catch (_: Exception) {}
-        }
-    }
-
-    private fun scheduleRealtimeSync() {
-        realtimeSyncJob?.cancel()
-        realtimeSyncJob = viewModelScope.launch {
-            delay(600)
-            if (currentTechName.isNotBlank()) {
-                val todayDate = getTodayIsoDate()
-                _uiState.update { it.copy(selectedDate = todayDate) }
-                repository.syncDailyItinerary(
-                    technicianName = currentTechName,
-                    technicianId = currentTechId,
-                    targetDate = todayDate
-                )
-            }
-        }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        realtimeSyncJob?.cancel()
-        tech1Listener?.remove()
-        tech2Listener?.remove()
     }
 
     fun setFilter(filter: String) {
@@ -328,6 +238,11 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * Sincronização manual (botão Atualizar / Enviar Agora):
+     * - Reativa eventuais tarefas em quarentena e ignora backoff.
+     * - Ignora cooldown de 3 minutos para puxar novos endereços e equipamentos atualizados do servidor.
+     */
     fun forceSync() {
         viewModelScope.launch {
             if (!NetworkMonitor.hasValidatedInternet(getApplication())) {
@@ -342,9 +257,15 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             _uiState.update { it.copy(isLoading = true, isSyncing = true, syncMessage = null) }
+
+            // Reativa tarefas em quarentena quando o técnico solicita reenvio manual
+            try {
+                db.syncQueueDao().retryAllQuarantinedTasks()
+            } catch (_: Exception) {}
+
             val syncManager = FirebaseSyncManager(getApplication())
             val syncedPending = try {
-                syncManager.processPendingSyncQueue()
+                syncManager.processPendingSyncQueue(ignoreBackoff = true)
             } catch (_: Exception) {
                 0
             }
@@ -353,10 +274,20 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             if (currentTechName.isNotBlank()) {
                 val todayDate = getTodayIsoDate()
                 _uiState.update { it.copy(selectedDate = todayDate) }
-                foundCount = repository.syncDailyItinerary(currentTechName, currentTechId, todayDate)
+                foundCount = repository.syncDailyItinerary(
+                    technicianName = currentTechName,
+                    technicianId = currentTechId,
+                    targetDate = todayDate,
+                    forceRefresh = true
+                )
             }
             val remainingPending = try {
                 db.syncQueueDao().getPendingTasksCountSync()
+            } catch (_: Exception) {
+                0
+            }
+            val remainingQuarantined = try {
+                db.syncQueueDao().getQuarantinedTasksCountSync()
             } catch (_: Exception) {
                 0
             }
@@ -365,9 +296,10 @@ class DashboardViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             val msg = when {
+                remainingQuarantined > 0 -> "$remainingQuarantined pendência(s) exigiu atenção no envio. Verifique sua conexão e toque em Reenviar."
                 remainingPending > 0 -> "Conexão instável: $syncedPending enviado(s), $remainingPending pendência(s) protegida(s) no aparelho para nova tentativa automática."
                 syncedPending > 0 -> "Sincronização concluída! $syncedPending pendência(s) enviada(s) ao servidor e $foundCount endereço(s) no roteiro."
-                foundCount > 0 -> "Sincronização concluída! $foundCount endereço(s)/ordem(ns) no seu roteiro."
+                foundCount > 0 -> "Roteiro atualizado! $foundCount endereço(s)/ordem(ns) disponível(is)."
                 else -> "Sincronização concluída: Servidor verificado, nenhum novo endereço pendente."
             }
             _uiState.update { it.copy(isLoading = false, isSyncing = false, syncMessage = msg) }

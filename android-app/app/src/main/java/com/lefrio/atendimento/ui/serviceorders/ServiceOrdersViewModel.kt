@@ -52,7 +52,7 @@ class ServiceOrdersViewModel(
 
     init {
         loadData()
-        triggerSync()
+        triggerSync(forceRefresh = false)
         observeOrders()
     }
 
@@ -224,14 +224,15 @@ class ServiceOrdersViewModel(
         }
     }
 
-    fun triggerSync() {
+    fun triggerSync(forceRefresh: Boolean = true) {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
             repository.syncDailyItinerary(
                 technicianName = currentUser.name,
                 technicianId = currentUser.uid,
-                targetDate = todayStr
+                targetDate = todayStr,
+                forceRefresh = forceRefresh
             )
             var (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
                 technicianName = currentUser.name,
@@ -244,7 +245,9 @@ class ServiceOrdersViewModel(
                 if (scheduledAddresses.isEmpty()) scheduledAddresses = available.second
             }
             val techs = repository.getAllTechnicians()
-            SyncWorker.triggerImmediateSync(getApplication())
+            if (forceRefresh) {
+                SyncWorker.triggerImmediateSync(getApplication())
+            }
             _uiState.update {
                 it.copy(
                     clients = scheduledClients,

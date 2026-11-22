@@ -117,7 +117,7 @@ fun SignatureScreen(
 
                         Text(
                             text = if (success.syncedImmediately) {
-                                "A Ordem de Serviço #${order?.osNumber} foi finalizada, assinada e enviada ao servidor."
+                                "A Ordem de Serviço #${order?.osNumber} foi finalizada e assinada. O envio ao servidor está sendo concluído em segundo plano."
                             } else {
                                 "A Ordem de Serviço #${order?.osNumber} foi salva no aparelho sem risco de perda e será enviada automaticamente ao servidor assim que a internet estabilizar."
                             },
@@ -154,7 +154,7 @@ fun SignatureScreen(
                                 )
                                 Text(
                                     text = if (success.syncedImmediately) {
-                                        "Envio: Entregue ao servidor ✓"
+                                        "Envio: Enviando em segundo plano ✓"
                                     } else {
                                         "Envio: Na fila segura do aparelho (envio automático)"
                                     },
