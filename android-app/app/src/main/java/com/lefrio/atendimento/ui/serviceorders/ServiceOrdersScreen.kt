@@ -1,8 +1,9 @@
 package com.lefrio.atendimento.ui.serviceorders
 
-import android.widget.Toast
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,8 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,6 +28,7 @@ import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
+import com.lefrio.atendimento.util.DateTimeUtils
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,7 +41,6 @@ fun ServiceOrdersScreen(
     onProfileClick: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val context = LocalContext.current
 
     val infiniteTransition = rememberInfiniteTransition(label = "sync_spin")
     val rotationAngle by infiniteTransition.animateFloat(
@@ -61,13 +62,17 @@ fun ServiceOrdersScreen(
                             text = "Ordens de Serviço",
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Black,
-                            color = BluePrimary
+                            color = BluePrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                         Text(
                             text = "Ordens de Serviço do Dia • ${user.name}",
                             fontSize = 11.sp,
                             color = TextSecondary,
-                            fontWeight = FontWeight.Medium
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 },
@@ -165,21 +170,42 @@ fun ServiceOrdersScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 4.dp),
-                placeholder = { Text("Buscar por O.S., cliente, endereço ou tipo...", fontSize = 12.sp) },
+                textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, color = TextPrimary),
+                placeholder = {
+                    Text(
+                        text = "Buscar O.S., cliente ou endereço...",
+                        fontSize = 13.sp,
+                        color = TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
                 leadingIcon = {
-                    Icon(Icons.Default.Search, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = TextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
                 },
                 trailingIcon = {
                     if (uiState.searchQuery.isNotBlank()) {
                         IconButton(onClick = { viewModel.setSearchQuery("") }) {
-                            Icon(Icons.Default.Close, contentDescription = "Limpar busca", tint = TextSecondary, modifier = Modifier.size(16.dp))
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "Limpar busca",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
                     }
                 },
                 shape = RoundedCornerShape(12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = Color.White,
-                    unfocusedContainerColor = Color.White
+                    unfocusedContainerColor = Color.White,
+                    unfocusedBorderColor = Color(0xFFCBD5E1),
+                    focusedBorderColor = BluePrimary
                 ),
                 singleLine = true
             )
@@ -222,7 +248,7 @@ fun ServiceOrdersScreen(
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(24.dp),
+                        .padding(start = 24.dp, top = 24.dp, end = 24.dp, bottom = 96.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(
@@ -245,24 +271,24 @@ fun ServiceOrdersScreen(
                         }
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Nenhuma O.S. aberta para hoje",
+                            text = "Nenhuma O.S. encontrada",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Clique em '+ NOVA O.S.' abaixo para abrir um atendimento nos endereços previstos no seu roteiro de hoje.",
+                            text = "Toque em '+ NOVA O.S.' abaixo para abrir um atendimento nos endereços do seu roteiro.",
                             fontSize = 12.sp,
                             color = TextSecondary,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 14.dp, top = 6.dp, end = 14.dp, bottom = 80.dp),
+                    contentPadding = PaddingValues(start = 14.dp, top = 6.dp, end = 14.dp, bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(uiState.filteredOrders, key = { it.id }) { order ->
@@ -289,25 +315,30 @@ private fun MetricMiniCard(
         modifier = modifier,
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = bgColor),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        border = BorderStroke(1.dp, textColor.copy(alpha = 0.12f)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 8.dp),
+                .padding(horizontal = 4.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = "$count",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Black,
-                color = textColor
+                color = textColor,
+                maxLines = 1
             )
             Text(
                 text = title,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                color = textColor.copy(alpha = 0.8f)
+                color = textColor.copy(alpha = 0.85f),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -320,19 +351,28 @@ private fun FilterTabChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val shape = RoundedCornerShape(10.dp)
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(shape)
             .background(if (isSelected) BluePrimary else Color.White)
+            .border(
+                width = 1.dp,
+                color = if (isSelected) BluePrimary else Color(0xFFE2E8F0),
+                shape = shape
+            )
             .clickable(onClick = onClick)
-            .padding(vertical = 8.dp),
+            .padding(horizontal = 4.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
             fontSize = 11.sp,
             fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
-            color = if (isSelected) Color.White else TextSecondary
+            color = if (isSelected) Color.White else TextSecondary,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -343,19 +383,36 @@ private fun ServiceOrderItemCard(
     onClick: () -> Unit
 ) {
     val statusColor = when (order.status) {
-        "finalizada" -> Color(0xFF15803D)
+        "finalizada", "pre_finalizada" -> Color(0xFF15803D)
         "em_andamento" -> Color(0xFFB45309)
+        "cancelada" -> Color(0xFFDC2626)
         else -> Color(0xFF1D4ED8)
     }
     val statusBg = when (order.status) {
-        "finalizada" -> Color(0xFFDCFCE7)
+        "finalizada", "pre_finalizada" -> Color(0xFFDCFCE7)
         "em_andamento" -> Color(0xFFFEF3C7)
+        "cancelada" -> Color(0xFFFEE2E2)
         else -> Color(0xFFEFF6FF)
     }
     val statusLabel = when (order.status) {
         "finalizada" -> "CONCLUÍDA"
+        "pre_finalizada" -> "PRÉ-FINALIZADA"
         "em_andamento" -> "EM ATENDIMENTO"
+        "cancelada" -> "CANCELADA"
         else -> "ABERTA"
+    }
+
+    val displayDate = DateTimeUtils.formatDisplayDate(order.plannedDate)
+        .ifBlank { "Data a definir" }
+
+    val formattedAddress = buildString {
+        append(order.addressStreet.trim())
+        if (!order.addressNumber.isNullOrBlank() && !order.addressStreet.contains(order.addressNumber.trim())) {
+            append(", ${order.addressNumber.trim()}")
+        }
+        if (!order.addressCity.isNullOrBlank() && !order.addressStreet.contains(order.addressCity.trim(), ignoreCase = true)) {
+            append(" - ${order.addressCity.trim()}")
+        }
     }
 
     Card(
@@ -364,85 +421,117 @@ private fun ServiceOrderItemCard(
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(14.dp)
         ) {
-            // Linha Superior: Número da O.S. e Badge de Status
+            // Linha 1: Número da O.S. (esquerda) e Badge de Status (direita, sem quebra vertical)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF581C87).copy(alpha = 0.12f))
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "#${order.osNumber}",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color(0xFF581C87)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF581C87).copy(alpha = 0.12f))
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                ) {
                     Text(
-                        text = order.type,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextSecondary,
+                        text = "#${order.osNumber}",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF581C87),
                         maxLines = 1,
+                        softWrap = false,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+
+                Spacer(modifier = Modifier.width(8.dp))
 
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .background(statusBg)
-                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
                 ) {
                     Text(
                         text = statusLabel,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Black,
-                        color = statusColor
+                        color = statusColor,
+                        maxLines = 1,
+                        softWrap = false
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            // Linha 2: Tipo da Manutenção em linha dedicada (evita esmagar a badge de status)
+            if (order.type.isNotBlank()) {
+                Spacer(modifier = Modifier.height(7.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Build,
+                        contentDescription = null,
+                        tint = Color(0xFF64748B),
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = order.type.uppercase(),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextSecondary,
+                        letterSpacing = 0.3.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
 
             // Nome do Cliente
             Text(
                 text = order.clientName,
-                fontSize = 14.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Black,
-                color = TextPrimary
+                color = TextPrimary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
 
             Spacer(modifier = Modifier.height(4.dp))
 
             // Endereço
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.Top
+            ) {
                 Icon(
                     imageVector = Icons.Default.LocationOn,
                     contentDescription = null,
                     tint = Color(0xFFDC2626),
-                    modifier = Modifier.size(14.dp)
+                    modifier = Modifier
+                        .size(14.dp)
+                        .padding(top = 1.dp)
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = order.addressStreet,
-                    fontSize = 11.sp,
+                    text = formattedAddress,
+                    fontSize = 12.sp,
                     color = TextSecondary,
-                    maxLines = 1,
+                    lineHeight = 16.sp,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -455,12 +544,14 @@ private fun ServiceOrderItemCard(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
                         .background(Color(0xFFF8FAFC))
-                        .padding(8.dp)
+                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
                 ) {
                     Text(
                         text = order.generalNotes,
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = TextPrimary,
+                        lineHeight = 16.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -468,36 +559,48 @@ private fun ServiceOrderItemCard(
             }
 
             Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = Color(0xFFF1F5F9), thickness = 1.dp)
+            Spacer(modifier = Modifier.height(8.dp))
 
-            // Linha Inferior com Data e Botão
+            // Linha Inferior com Data e Ação
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Icon(
                         imageVector = Icons.Default.Event,
                         contentDescription = null,
                         tint = TextSecondary,
-                        modifier = Modifier.size(13.dp)
+                        modifier = Modifier.size(14.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = order.plannedDate ?: "Data a definir",
+                        text = displayDate,
                         fontSize = 11.sp,
                         color = TextSecondary,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
+                Spacer(modifier = Modifier.width(8.dp))
+
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = if (order.status == "finalizada") "Ver Detalhes" else "Atender O.S.",
+                        text = if (order.status == "finalizada" || order.status == "pre_finalizada") "Ver Detalhes" else "Atender O.S.",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Black,
-                        color = BluePrimary
+                        color = BluePrimary,
+                        maxLines = 1,
+                        softWrap = false
                     )
+                    Spacer(modifier = Modifier.width(2.dp))
                     Icon(
                         imageVector = Icons.Default.ChevronRight,
                         contentDescription = null,
