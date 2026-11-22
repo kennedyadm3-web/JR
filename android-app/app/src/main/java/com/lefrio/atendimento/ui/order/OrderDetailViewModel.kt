@@ -8,9 +8,11 @@ import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
+import com.lefrio.atendimento.data.sync.FirebaseSyncManager
 import com.lefrio.atendimento.ui.signature.components.SignaturePath
 import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
 import com.lefrio.atendimento.util.GpsAuditManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -246,7 +248,9 @@ class OrderDetailViewModel(
             _uiState.update { it.copy(errorMessage = "Colha a Assinatura Digital do Responsável na área de assinatura.") }
             return
         }
-        if (currentState.completedCount == 0) {
+        val isPreventive = currentState.order?.type?.contains("PREVENTIVA", ignoreCase = true) == true ||
+            currentState.order?.id?.startsWith("PREV_") == true
+        if ((isPreventive || currentState.totalCount > 0) && currentState.completedCount == 0) {
             _uiState.update { it.copy(errorMessage = "Atenda ao menos 1 máquina do checklist antes de finalizar.") }
             return
         }
@@ -305,6 +309,13 @@ class OrderDetailViewModel(
                         finalizeSyncedImmediately = syncedNow,
                         errorMessage = null
                     )
+                }
+
+                // Dispara envio imediato assíncrono em segundo plano para refletir rapidamente no painel administrativo quando online
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        FirebaseSyncManager(getApplication()).processPendingSyncQueue(ignoreBackoff = true)
+                    } catch (_: Exception) {}
                 }
             } catch (t: Throwable) {
                 _uiState.update {

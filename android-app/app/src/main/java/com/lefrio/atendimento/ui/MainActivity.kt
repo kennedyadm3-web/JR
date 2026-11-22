@@ -287,7 +287,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     val detailState by orderDetailViewModel.uiState.collectAsState()
                                     
-                                    if (detailState.order?.status == "finalizada") {
+                                    if (detailState.order?.status == "finalizada" || detailState.order?.status == "pre_finalizada") {
                                         detailState.order?.let { finishedOrder ->
                                             OrderSummaryScreen(
                                                 order = finishedOrder,
@@ -311,7 +311,6 @@ class MainActivity : ComponentActivity() {
                                         onBackClick = { showCreateOrderScreen = false },
                                         onOrderCreated = { createdId ->
                                             showCreateOrderScreen = false
-                                            serviceOrdersViewModel.triggerSync()
                                             selectedOrderId = createdId
                                         }
                                     )

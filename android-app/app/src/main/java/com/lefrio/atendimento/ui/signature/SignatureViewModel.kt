@@ -5,10 +5,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.repository.ServiceOrderRepository
+import com.lefrio.atendimento.data.sync.FirebaseSyncManager
 import com.lefrio.atendimento.ui.signature.components.SignaturePath
 import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
 import com.lefrio.atendimento.util.GpsAuditManager
 import com.lefrio.atendimento.util.GpsLocationResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -116,6 +118,12 @@ class SignatureViewModel(
                 )
 
                 _uiState.value = SignatureUiState.Success(orderId, nowIso, syncedNow)
+
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        FirebaseSyncManager(getApplication()).processPendingSyncQueue(ignoreBackoff = true)
+                    } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 _uiState.value = SignatureUiState.Error(e.message ?: "Erro ao finalizar atendimento.")
             }

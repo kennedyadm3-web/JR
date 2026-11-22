@@ -7,7 +7,9 @@ import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.data.repository.*
+import com.lefrio.atendimento.data.sync.FirebaseSyncManager
 import com.lefrio.atendimento.data.sync.SyncWorker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -117,13 +119,13 @@ class ServiceOrdersViewModel(
         val total = orders.size
         val open = orders.count { it.status == "aberta" }
         val inProg = orders.count { it.status == "em_andamento" }
-        val fin = orders.count { it.status == "finalizada" }
+        val fin = orders.count { it.status == "finalizada" || it.status == "pre_finalizada" }
 
         val tabFiltered = when (tab) {
             OSFilterTab.ALL -> orders
             OSFilterTab.OPEN -> orders.filter { it.status == "aberta" }
             OSFilterTab.IN_PROGRESS -> orders.filter { it.status == "em_andamento" }
-            OSFilterTab.FINISHED -> orders.filter { it.status == "finalizada" }
+            OSFilterTab.FINISHED -> orders.filter { it.status == "finalizada" || it.status == "pre_finalizada" }
         }
 
         val q = query.trim().lowercase()
@@ -218,6 +220,12 @@ class ServiceOrdersViewModel(
                 val created = repository.createServiceOrder(params)
                 closeCreateModal()
                 onSuccess(created.id)
+                // Envio imediato assíncrono (sem travar a UI) para que a O.S. apareça no painel administrativo em segundos quando houver internet
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        FirebaseSyncManager(getApplication()).processPendingSyncQueue(ignoreBackoff = true)
+                    } catch (_: Exception) {}
+                }
             } catch (e: Exception) {
                 onError(e.message ?: "Erro ao criar Ordem de Serviço")
             }
@@ -227,6 +235,13 @@ class ServiceOrdersViewModel(
     fun triggerSync(forceRefresh: Boolean = true) {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }
+            try {
+                // Drena pendências locais antes de baixar do servidor para evitar sobrescrita ou atraso no envio
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    FirebaseSyncManager(getApplication()).processPendingSyncQueue(ignoreBackoff = forceRefresh)
+                }
+            } catch (_: Exception) {}
+
             val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
             repository.syncDailyItinerary(
                 technicianName = currentUser.name,

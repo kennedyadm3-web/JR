@@ -635,27 +635,34 @@ class FirebaseSyncManager(private val context: Context) {
                     }
                 } else {
                     // FLUXO DE ORDEM DE SERVIÇO CORRETIVA: atualiza em 'serviceOrders'
+                    val effectiveFinDate = if (completionDate.isNotBlank()) completionDate else nowIso
+                    val effectiveSigDate = if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso
                     val finalizeMap = hashMapOf<String, Any>(
                         "status" to "aberta",
                         "clientRepresentative" to clientRepresentative,
+                        "clientRepresentativeMatricula" to clientSigneeDoc,
                         "clientSigneeName" to clientRepresentative,
                         "clientSigneeDoc" to clientSigneeDoc,
                         "clientSigneeRegistration" to clientSigneeDoc,
-                        "clientSignatureDate" to (if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso),
-                        "completionDate" to (if (completionDate.isNotBlank()) completionDate else nowIso),
-                        "finishedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
-                        "techFinalizedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
+                        "clientSignatureDate" to effectiveSigDate,
+                        "completionDate" to effectiveFinDate,
+                        "finishedAt" to effectiveFinDate,
+                        "techFinalizedAt" to effectiveFinDate,
                         "techFinalized" to true,
                         "adminFinalized" to false,
                         "clientSignature" to clientSignature,
+                        "hasClientSignature" to clientSignature.isNotBlank(),
                         "generalNotes" to routeNotes,
                         "routeNotes" to routeNotes,
                         "otherPhotos" to encodedOtherPhotos,
+                        "photos" to encodedOtherPhotos,
+                        "photoCount" to encodedOtherPhotos.size,
+                        "mediaExternalized" to false,
                         "completionLatitude" to completionLatitude,
                         "completionLongitude" to completionLongitude,
                         "completionAccuracy" to completionAccuracy,
                         "isLockedForTech" to true,
-                        "updatedAt" to System.currentTimeMillis()
+                        "updatedAt" to FieldValue.serverTimestamp()
                     )
 
                     withTimeout(15_000L) {
@@ -719,6 +726,22 @@ class FirebaseSyncManager(private val context: Context) {
                     } else ""
                 }
 
+                val nowDate = java.util.Date()
+                val nowUtcIso = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.getDefault()).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.format(nowDate)
+                val displayBrDateTime = java.text.SimpleDateFormat("dd/MM/yyyy, HH:mm:ss", java.util.Locale.getDefault()).format(nowDate)
+
+                val openedAtIso = payload.optString("openedAt", "").trim().ifBlank { nowUtcIso }
+                val createdAtIso = payload.optString("createdAt", "").trim().ifBlank { openedAtIso }
+                val completionIso = payload.optString("completionDate", "").trim().ifBlank { if (isTechFinalized) nowUtcIso else "" }
+                val finishedIso = payload.optString("finishedAt", "").trim().ifBlank { completionIso }
+                val techFinalizedIso = payload.optString("techFinalizedAt", "").trim().ifBlank { completionIso }
+                val sigDateIso = payload.optString("clientSignatureDate", "").trim().ifBlank { if (isTechFinalized) nowUtcIso else "" }
+                val fiscalRep = payload.optString("clientRepresentative", "").trim()
+                val fiscalDoc = payload.optString("clientSigneeDoc", "").trim()
+                    .ifBlank { payload.optString("clientSigneeRegistration", "").trim() }
+
                 val osMap = hashMapOf<String, Any>(
                     "id" to orderId,
                     "osNumber" to osNumber,
@@ -729,29 +752,42 @@ class FirebaseSyncManager(private val context: Context) {
                     "equipmentId" to payload.optString("equipmentId", ""),
                     "equipmentName" to payload.optString("equipmentName", ""),
                     "status" to if (isTechFinalized) "aberta" else payload.optString("status", "aberta"),
-                    "type" to payload.optString("type", "MANUTENÇÃO CORRETIVA CONTRATO"),
+                    "type" to payload.optString("type", "MANUTENÇÃO CORRETIVA CONTRATO").uppercase(),
+                    "isWorkshop" to false,
                     "plannedDate" to payload.optString("plannedDate", ""),
                     "technicianId" to payload.optString("technicianId", ""),
                     "technician1" to techName,
+                    "technicianName" to techName,
                     "technician2" to payload.optString("technician2", ""),
-                    "description" to payload.optString("description", ""),
-                    "diagnosis" to payload.optString("diagnosis", ""),
-                    "solution" to payload.optString("solution", ""),
-                    "clientRepresentative" to payload.optString("clientRepresentative", ""),
-                    "clientSigneeName" to payload.optString("clientSigneeName", ""),
-                    "clientSigneeRegistration" to payload.optString("clientSigneeRegistration", ""),
-                    "clientSigneeDoc" to payload.optString("clientSigneeDoc", ""),
-                    "clientSignatureDate" to payload.optString("clientSignatureDate", ""),
-                    "completionDate" to payload.optString("completionDate", ""),
-                    "finishedAt" to payload.optString("finishedAt", ""),
-                    "techFinalizedAt" to payload.optString("techFinalizedAt", ""),
+                    "openedBy" to techName,
+                    "authenticatedTeam" to "Equipe autenticada no aplicativo LeFrio (APP: $displayBrDateTime $techName)",
+                    "description" to payload.optString("description", "").trim().uppercase(),
+                    "diagnosis" to payload.optString("diagnosis", "").trim().uppercase(),
+                    "solution" to payload.optString("solution", "").trim().uppercase(),
+                    "services" to emptyList<Map<String, Any>>(),
+                    "products" to emptyList<Map<String, Any>>(),
+                    "totalValue" to 0.0,
+                    "clientRepresentative" to fiscalRep.uppercase(),
+                    "clientRepresentativeMatricula" to fiscalDoc.uppercase(),
+                    "clientSigneeName" to fiscalRep.uppercase(),
+                    "clientSigneeRegistration" to fiscalDoc.uppercase(),
+                    "clientSigneeDoc" to fiscalDoc.uppercase(),
+                    "clientSignatureDate" to sigDateIso,
+                    "completionDate" to completionIso,
+                    "finishedAt" to finishedIso,
+                    "techFinalizedAt" to techFinalizedIso,
                     "techFinalized" to isTechFinalized,
                     "adminFinalized" to false,
+                    "isLockedForTech" to isTechFinalized,
                     "clientSignature" to clientSig,
+                    "hasClientSignature" to clientSig.isNotBlank(),
+                    "hasTechSignature" to false,
+                    "photoCount" to 0,
+                    "mediaExternalized" to false,
                     "generalNotes" to payload.optString("generalNotes", ""),
-                    "openedAt" to payload.optString("openedAt", ""),
-                    "createdAt" to System.currentTimeMillis(),
-                    "updatedAt" to System.currentTimeMillis()
+                    "openedAt" to openedAtIso,
+                    "createdAt" to createdAtIso,
+                    "updatedAt" to FieldValue.serverTimestamp()
                 )
 
                 withTimeout(15_000L) {

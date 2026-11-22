@@ -581,8 +581,21 @@ class ServiceOrderRepository(private val context: Context) {
                 }
 
                 for (doc in osCandidateMap.values) {
-                    val status = (doc.getString("status") ?: "aberta").trim().lowercase()
-                    if (status != "aberta") continue
+                    val rawStatus = (doc.getString("status") ?: "aberta").trim().lowercase()
+                    if (rawStatus == "cancelada") continue
+
+                    val isTechFinalized = doc.getBoolean("techFinalized") == true ||
+                        doc.getBoolean("isLockedForTech") == true ||
+                        !doc.getString("techFinalizedAt").isNullOrBlank()
+                    val isAdminFinalized = doc.getBoolean("adminFinalized") == true ||
+                        rawStatus == "finalizada" ||
+                        rawStatus == "pre_finalizada"
+                    val effectiveStatus = when {
+                        isTechFinalized || isAdminFinalized -> "finalizada"
+                        rawStatus == "em_andamento" -> "em_andamento"
+                        else -> "aberta"
+                    }
+
                     val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
                     val tName = (doc.getString("technicianName") ?: doc.getString("technician1") ?: "").trim().uppercase()
                     val t2Id = (doc.getString("technician2Id") ?: "").trim().uppercase()
@@ -597,7 +610,7 @@ class ServiceOrderRepository(private val context: Context) {
                     val isFutureDate = isIsoDate(pDate) && pDate > targetDate
                     val matchesDate = !isFutureDate && (pDate.isBlank() || pDate >= minPastDate || pDate.startsWith(currentMonth))
 
-                    if (matchesTech && matchesDate && status != "cancelada") {
+                    if (matchesTech && matchesDate) {
                         val cId = doc.getString("clientId") ?: ""
                         val aId = doc.getString("addressId") ?: ""
                         val addrDoc = addressMap[aId]
@@ -613,6 +626,19 @@ class ServiceOrderRepository(private val context: Context) {
                             "$s$num$neigh".trim()
                         }?.takeIf { it.isNotBlank() } ?: doc.getString("addressStreet")?.takeIf { it.isNotBlank() && it != "Endereço do Chamado" } ?: "Endereço de Atendimento"
 
+                        val serverFiscalName = doc.getString("clientRepresentative")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("clientSigneeName")?.takeIf { it.isNotBlank() }
+                        val serverFiscalDoc = doc.getString("clientSigneeDoc")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("clientSigneeRegistration")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("clientRepresentativeMatricula")?.takeIf { it.isNotBlank() }
+                        val serverSigDate = doc.getString("clientSignatureDate")?.takeIf { it.isNotBlank() }
+                        val serverCompletionDate = doc.getString("techFinalizedAt")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("completionDate")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("finishedAt")?.takeIf { it.isNotBlank() }
+                        val serverNotes = doc.getString("generalNotes")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("description")?.takeIf { it.isNotBlank() }
+                            ?: "Atendimento Corretivo Solicitado"
+
                         if (ordersToSave.none { it.id == doc.id }) {
                             ordersToSave.add(
                                 ServiceOrderEntity(
@@ -623,12 +649,17 @@ class ServiceOrderRepository(private val context: Context) {
                                     clientName = realClientName,
                                     addressId = aId,
                                     addressStreet = realStreet,
-                                    plannedDate = doc.getString("plannedDate") ?: targetDate,
-                                    status = status,
+                                    plannedDate = doc.getString("plannedDate")?.takeIf { it.isNotBlank() } ?: pDate.ifBlank { targetDate },
+                                    status = effectiveStatus,
                                     type = doc.getString("type") ?: "MANUTENÇÃO CORRETIVA CONTRATO",
                                     technician1 = technicianName,
                                     technician2 = doc.getString("technician2"),
-                                    generalNotes = doc.getString("description") ?: "Atendimento Corretivo Solicitado",
+                                    clientRepresentative = serverFiscalName,
+                                    clientSigneeDoc = serverFiscalDoc,
+                                    clientSignatureDate = serverSigDate,
+                                    completionDate = serverCompletionDate,
+                                    generalNotes = serverNotes,
+                                    isLockedForEdit = effectiveStatus == "finalizada",
                                     isSyncedWithServer = true
                                 )
                             )
@@ -896,6 +927,20 @@ class ServiceOrderRepository(private val context: Context) {
                                     continue
                                 }
 
+                                val rawOsStatus = os.optString("status", "aberta").trim().lowercase()
+                                if (rawOsStatus == "cancelada") continue
+                                val osTechFinalized = os.optBoolean("techFinalized", false) ||
+                                    os.optBoolean("isLockedForTech", false) ||
+                                    os.optString("techFinalizedAt", "").isNotBlank()
+                                val osAdminFinalized = os.optBoolean("adminFinalized", false) ||
+                                    rawOsStatus == "finalizada" ||
+                                    rawOsStatus == "pre_finalizada"
+                                val effectiveOsStatus = when {
+                                    osTechFinalized || osAdminFinalized -> "finalizada"
+                                    rawOsStatus == "em_andamento" -> "em_andamento"
+                                    else -> "aberta"
+                                }
+
                                 ordersToSave.add(
                                     ServiceOrderEntity(
                                         id = osId,
@@ -905,12 +950,17 @@ class ServiceOrderRepository(private val context: Context) {
                                         clientName = resolvedClientName,
                                         addressId = addrId,
                                         addressStreet = resolvedStreet,
-                                        plannedDate = os.optString("plannedDate", targetDate),
-                                        status = os.optString("status", "aberta"),
+                                        plannedDate = os.optString("plannedDate", targetDate).ifBlank { targetDate },
+                                        status = effectiveOsStatus,
                                         type = os.optString("type", "ORDEM DE SERVIÇO"),
                                         technician1 = technicianName,
                                         technician2 = os.optString("technician2", null),
-                                        generalNotes = os.optString("description", "Atendimento Corretivo Solicitado"),
+                                        clientRepresentative = os.optString("clientRepresentative", "").ifBlank { os.optString("clientSigneeName", "") }.takeIf { it.isNotBlank() },
+                                        clientSigneeDoc = os.optString("clientSigneeDoc", "").ifBlank { os.optString("clientSigneeRegistration", "") }.ifBlank { os.optString("clientRepresentativeMatricula", "") }.takeIf { it.isNotBlank() },
+                                        clientSignatureDate = os.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
+                                        completionDate = os.optString("techFinalizedAt", "").ifBlank { os.optString("completionDate", "") }.ifBlank { os.optString("finishedAt", "") }.takeIf { it.isNotBlank() },
+                                        generalNotes = os.optString("generalNotes", "").ifBlank { os.optString("description", "Atendimento Corretivo Solicitado") },
+                                        isLockedForEdit = effectiveOsStatus == "finalizada",
                                         isSyncedWithServer = true
                                     )
                                 )
@@ -1540,7 +1590,9 @@ class ServiceOrderRepository(private val context: Context) {
         val shortSeq = (1000 + (timestamp % 9000)).toString()
         val osNumber = "OS-$shortSeq"
 
-        val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.getDefault()).format(Date())
+        val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
         val hasSignature = !params.signaturePath.isNullOrBlank() || !params.signatureBase64.isNullOrBlank()
         val isFinal = params.isFinalized || hasSignature
         val status = if (isFinal) "finalizada" else "aberta"
@@ -1634,6 +1686,7 @@ class ServiceOrderRepository(private val context: Context) {
             put("clientSignature", params.signatureBase64 ?: "")
             put("generalNotes", fullNotes)
             put("openedAt", nowIso)
+            put("createdAt", nowIso)
         }
 
         syncDao.enqueue(

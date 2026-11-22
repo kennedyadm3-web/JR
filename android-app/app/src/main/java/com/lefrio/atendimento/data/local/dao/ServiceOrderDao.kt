@@ -88,7 +88,7 @@ interface ServiceOrderDao {
         SELECT * FROM service_orders 
         WHERE type != 'MANUTENÇÃO PREVENTIVA' 
           AND id NOT LIKE 'PREV_%'
-          AND (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%' OR status IN ('aberta', 'em_andamento'))
+          AND (plannedDate = :date OR plannedDate LIKE :date || '%' OR plannedDate LIKE '%' || :date || '%' OR completionDate LIKE :date || '%' OR status IN ('aberta', 'em_andamento'))
           AND (
             UPPER(technician1) LIKE '%' || UPPER(:technicianName) || '%'
             OR UPPER(technician1) = UPPER(:technicianId)

@@ -211,11 +211,14 @@ fun OrderDetailScreen(
         containerColor = Color(0xFFF8FAFC),
         bottomBar = {
             uiState.order?.let { order ->
-                val isFinalized = order.status == "finalizada"
+                val isFinalized = order.status == "finalizada" || order.status == "pre_finalizada"
+                val requiresChecklist = order.type.contains("PREVENTIVA", ignoreCase = true) ||
+                    order.id.startsWith("PREV_") ||
+                    uiState.totalCount > 0
                 val isFormValid = uiState.fiscalName.trim().isNotBlank() &&
                                   uiState.fiscalDoc.trim().isNotBlank() &&
                                   (signaturePaths.isNotEmpty() || !order.clientSignaturePath.isNullOrBlank()) &&
-                                  uiState.completedCount > 0
+                                  (!requiresChecklist || uiState.completedCount > 0)
 
                 Surface(
                     color = Color.White,

@@ -43,8 +43,10 @@ fun OrderSummaryScreen(
     val context = LocalContext.current
     val pdfGenerator = remember { PdfReportGenerator(context) }
     var isGeneratingPdf by remember { mutableStateOf(false) }
+    val isPreventive = order.type.contains("PREVENTIVA", ignoreCase = true) || order.id.startsWith("PREV_")
 
     fun sharePdfReport() {
+        if (!isPreventive) return
         isGeneratingPdf = true
         try {
             val pdfFile = pdfGenerator.generateOrderPdf(order, equipments)
@@ -59,16 +61,16 @@ fun OrderSummaryScreen(
                 putExtra(Intent.EXTRA_STREAM, uri)
                 putExtra(
                     Intent.EXTRA_SUBJECT,
-                    "Relatório de Atendimento LeFrio - O.S. #${order.osNumber} - ${order.clientName}"
+                    "Relatório de Atendimento LeFrio - ${order.osNumber} - ${order.clientName}"
                 )
                 putExtra(
                     Intent.EXTRA_TEXT,
-                    "Olá! Segue em anexo o Relatório Técnico de Atendimento da Ordem de Serviço #${order.osNumber} realizado pela LeFrio Refrigeração."
+                    "Olá! Segue em anexo o Relatório Técnico de Atendimento #${order.osNumber} realizado pela LeFrio Refrigeração."
                 )
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
 
-            context.startActivity(Intent.createChooser(shareIntent, "Compartilhar Relatório O.S. #${order.osNumber}"))
+            context.startActivity(Intent.createChooser(shareIntent, "Compartilhar Relatório #${order.osNumber}"))
         } catch (e: Exception) {
             Toast.makeText(context, "Erro ao gerar PDF: ${e.message}", Toast.LENGTH_LONG).show()
         } finally {
@@ -81,7 +83,7 @@ fun OrderSummaryScreen(
             TopAppBar(
                 title = {
                     Text(
-                        text = "Comprovante O.S. #${order.osNumber}",
+                        text = if (isPreventive) "Comprovante ${order.osNumber}" else "Resumo O.S. #${order.osNumber}",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Black,
                         color = BluePrimary
@@ -93,8 +95,10 @@ fun OrderSummaryScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { sharePdfReport() }) {
-                        Icon(imageVector = Icons.Default.Share, contentDescription = "Compartilhar", tint = BluePrimary)
+                    if (isPreventive) {
+                        IconButton(onClick = { sharePdfReport() }) {
+                            Icon(imageVector = Icons.Default.Share, contentDescription = "Compartilhar", tint = BluePrimary)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
@@ -123,7 +127,7 @@ fun OrderSummaryScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "ATENDIMENTO FINALIZADO",
+                            text = if (isPreventive) "ATENDIMENTO FINALIZADO" else "O.S. FINALIZADA PELO TÉCNICO",
                             fontWeight = FontWeight.Black,
                             fontSize = 11.sp,
                             color = Color(0xFF059669)
@@ -152,7 +156,15 @@ fun OrderSummaryScreen(
                         color = TextPrimary
                     )
 
-                    val fullAddress = "${order.addressStreet}${order.addressNumber?.let { ", $it" } ?: ""}${order.addressCity?.let { " - $it" } ?: ""}"
+                    val fullAddress = buildString {
+                        append(order.addressStreet.trim())
+                        if (!order.addressNumber.isNullOrBlank() && !order.addressStreet.contains(order.addressNumber.trim())) {
+                            append(", ${order.addressNumber.trim()}")
+                        }
+                        if (!order.addressCity.isNullOrBlank() && !order.addressStreet.contains(order.addressCity.trim(), ignoreCase = true)) {
+                            append(" - ${order.addressCity.trim()}")
+                        }
+                    }
                     Text(
                         text = fullAddress,
                         fontSize = 12.sp,
@@ -167,18 +179,42 @@ fun OrderSummaryScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(text = "Data de Conclusão", fontSize = 10.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
-                            Text(text = order.completionDate ?: "Hoje", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                            val formattedCompletion = com.lefrio.atendimento.util.DateTimeUtils.formatDisplayDateTime(order.completionDate)
+                                .ifBlank { "Hoje" }
+                            Text(text = formattedCompletion, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
                         }
+                        Spacer(modifier = Modifier.width(8.dp))
                         Column(horizontalAlignment = Alignment.End) {
                             Text(text = "Técnico Responsável", fontSize = 10.sp, color = TextSecondary, fontWeight = FontWeight.Bold)
-                            Text(text = order.technician1 ?: "Técnico", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
+                            Text(text = order.technician1, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = TextPrimary)
                         }
                     }
 
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (order.isSyncedWithServer) Icons.Default.CloudDone else Icons.Default.CloudUpload,
+                            contentDescription = null,
+                            tint = if (order.isSyncedWithServer) Color(0xFF059669) else Color(0xFFD97706),
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text(
+                            text = if (order.isSyncedWithServer) {
+                                "Sincronizado com o sistema administrativo"
+                            } else {
+                                "Salvo no aparelho • Enviando ao administrativo..."
+                            },
+                            fontSize = 11.sp,
+                            color = if (order.isSyncedWithServer) Color(0xFF059669) else Color(0xFFD97706),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
                     if (order.completionLatitude != null && order.completionLatitude != 0.0) {
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(imageVector = Icons.Default.LocationOn, contentDescription = null, tint = Color(0xFF059669), modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(4.dp))
@@ -189,6 +225,33 @@ fun OrderSummaryScreen(
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
+                    }
+                }
+            }
+
+            // Detalhes / Laudo Técnico da O.S. (quando houver observações)
+            if (!isPreventive && !order.generalNotes.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        Text(
+                            text = "Laudo e Execução Técnica",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = order.generalNotes,
+                            fontSize = 12.sp,
+                            color = TextSecondary,
+                            lineHeight = 18.sp
+                        )
                     }
                 }
             }
@@ -288,93 +351,127 @@ fun OrderSummaryScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            if (equipments.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(14.dp))
 
-            // Resumo das Máquinas
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-            ) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Text(
-                        text = "Equipamentos do Chamado (${equipments.size})",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp,
-                        color = TextPrimary
-                    )
+                // Resumo das Máquinas
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.White),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(18.dp)) {
+                        Text(
+                            text = "Equipamentos do Chamado (${equipments.size})",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            color = TextPrimary
+                        )
 
-                    Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
 
-                    equipments.forEach { eq ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = eq.equipmentName,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = TextPrimary
-                                )
-                                Text(
-                                    text = "${eq.equipmentSector ?: "Geral"} • ${eq.equipmentBtus ?: ""}",
-                                    fontSize = 10.sp,
-                                    color = TextSecondary
-                                )
-                            }
-
-                            Box(
+                        equipments.forEach { eq ->
+                            Row(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(4.dp))
-                                    .background(if (eq.isChecked) Color(0xFFD1FAE5) else Color(0xFFFEF3C7))
-                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(
-                                    text = if (eq.isChecked) "EXECUTADO" else "PENDÊNCIA",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (eq.isChecked) Color(0xFF059669) else Color(0xFFD97706)
-                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = eq.equipmentName,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "${eq.equipmentSector ?: "Geral"} • ${eq.equipmentBtus ?: ""}",
+                                        fontSize = 10.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (eq.isChecked) Color(0xFFD1FAE5) else Color(0xFFFEF3C7))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = if (eq.isChecked) "EXECUTADO" else "PENDÊNCIA",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (eq.isChecked) Color(0xFF059669) else Color(0xFFD97706)
+                                    )
+                                }
                             }
+                            Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 4.dp))
                         }
-                        Divider(color = Color(0xFFF1F5F9), modifier = Modifier.padding(vertical = 4.dp))
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
-            // BOTÃO DE COMPARTILHAR PDF
-            Button(
-                onClick = { sharePdfReport() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
-                enabled = !isGeneratingPdf
-            ) {
-                if (isGeneratingPdf) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(imageVector = Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "COMPARTILHAR RELATÓRIO PDF (WHATSAPP)",
-                        fontWeight = FontWeight.Black,
-                        fontSize = 12.sp,
-                        letterSpacing = 0.5.sp
-                    )
+            if (isPreventive) {
+                // BOTÃO DE COMPARTILHAR PDF (apenas para preventiva)
+                Button(
+                    onClick = { sharePdfReport() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                    enabled = !isGeneratingPdf
+                ) {
+                    if (isGeneratingPdf) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(imageVector = Icons.Default.PictureAsPdf, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "COMPARTILHAR RELATÓRIO PDF (WHATSAPP)",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 12.sp,
+                            letterSpacing = 0.5.sp
+                        )
+                    }
+                }
+            } else {
+                // Aviso informativo para O.S.: envio/emissão oficial é exclusivo do administrativo
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFEFF6FF),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFBFDBFE))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = BluePrimary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Esta Ordem de Serviço foi encaminhada ao setor administrativo para conferência e tratamento final.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF1E3A8A),
+                            fontWeight = FontWeight.SemiBold,
+                            lineHeight = 16.sp
+                        )
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedButton(
                 onClick = onBackClick,
@@ -384,7 +481,7 @@ fun OrderSummaryScreen(
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Text(
-                    text = "VOLTAR AO PAINEL",
+                    text = if (isPreventive) "VOLTAR AO PAINEL" else "VOLTAR PARA ORDENS DE SERVIÇO",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = TextSecondary
