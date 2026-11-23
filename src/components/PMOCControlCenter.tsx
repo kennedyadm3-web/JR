@@ -2450,6 +2450,18 @@ function AddressDetails({ addressId, addresses, clients, equipments, loadingEqui
     cellTechAuth.value = `Autenticado via App em ${printDatesText}`;
     cellTechAuth.font = { name: 'Arial', size: 8, color: { argb: 'FF6B7280' }, italic: true };
     cellTechAuth.alignment = { vertical: 'middle', horizontal: 'left', indent: 1 };
+
+    const repExtraParts = [
+      record.clientSigneeRole ? `FUNÇÃO: ${record.clientSigneeRole}` : null,
+      record.clientSigneeContact ? `CONTATO: ${record.clientSigneeContact}` : null
+    ].filter(Boolean);
+    if (repExtraParts.length > 0) {
+      worksheet.mergeCells(`I${currentRowNum}:N${currentRowNum}`);
+      const cellRepExtra = worksheet.getCell(`I${currentRowNum}`);
+      cellRepExtra.value = repExtraParts.join(' • ').toUpperCase();
+      cellRepExtra.font = { name: 'Arial', size: 8, color: { argb: 'FF4B5563' } };
+      cellRepExtra.alignment = { vertical: 'middle', horizontal: 'center' };
+    }
     worksheet.getRow(currentRowNum).height = 16;
 
     // Gerar Buffer e fazer Download do Arquivo Excel
@@ -3226,7 +3238,23 @@ function AddressDetails({ addressId, addresses, clients, equipments, loadingEqui
             color: "111827"
           }),
         ],
-      })
+      }),
+      ...((record.clientSigneeRole || record.clientSigneeContact) ? [
+        new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [
+            new TextRun({
+              text: [
+                record.clientSigneeRole ? `FUNÇÃO: ${record.clientSigneeRole}` : null,
+                record.clientSigneeContact ? `CONTATO: ${record.clientSigneeContact}` : null
+              ].filter(Boolean).join(' • ').toUpperCase(),
+              size: 14,
+              font: "Arial",
+              color: "4B5563"
+            }),
+          ],
+        })
+      ] : [])
     );
 
     const footerTable = new Table({

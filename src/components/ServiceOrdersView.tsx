@@ -893,12 +893,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [formDescription, setFormDescription] = useState('');
   const [formDiagnosis, setFormDiagnosis] = useState('');
   const [formSolution, setFormSolution] = useState('');
+  const [formTechnicalReport, setFormTechnicalReport] = useState('');
   const [formServices, setFormServices] = useState<ServiceOrderItem[]>([]);
   const [formProducts, setFormProducts] = useState<ServiceOrderItem[]>([]);
   const [formTechnicianId, setFormTechnicianId] = useState('');
   const [formTechnician2Id, setFormTechnician2Id] = useState('');
   const [formRepresentative, setFormRepresentative] = useState('');
   const [formRepresentativeMatricula, setFormRepresentativeMatricula] = useState('');
+  const [formRepresentativeRole, setFormRepresentativeRole] = useState('');
+  const [formRepresentativeContact, setFormRepresentativeContact] = useState('');
   const [formServiceCompany, setFormServiceCompany] = useState<string>('lefrio');
   const [formPhotos, setFormPhotos] = useState<string[]>([]);
   const [formTechSignature, setFormTechSignature] = useState('');
@@ -1965,6 +1968,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     const selectedClient = clients.find(c => c.id === clientId);
     if (selectedClient) {
       setFormRepresentative('');
+      setFormRepresentativeRole('');
+      setFormRepresentativeContact('');
       if (selectedClient.serviceCompany) {
         setFormServiceCompany(selectedClient.serviceCompany);
       } else {
@@ -2225,6 +2230,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormDescription('');
     setFormDiagnosis('');
     setFormSolution('');
+    setFormTechnicalReport('');
     setFormServices([]);
     setFormProducts([]);
     
@@ -2240,6 +2246,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormTechnician2Id('');
     setFormRepresentative('');
     setFormRepresentativeMatricula('');
+    setFormRepresentativeRole('');
+    setFormRepresentativeContact('');
     setFormServiceCompany('lefrio');
     setFormPhotos([]);
     setFormTechSignature('');
@@ -2564,8 +2572,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     }
     setFormTechnician2Id(resolvedTech2Id);
     
-    setFormRepresentative(order.clientRepresentative || '');
-    setFormRepresentativeMatricula(order.clientRepresentativeMatricula || '');
+    setFormRepresentative(order.clientRepresentative || order.clientSigneeName || '');
+    setFormRepresentativeMatricula(order.clientRepresentativeMatricula || order.clientSigneeRegistration || '');
+    setFormRepresentativeRole(order.clientRepresentativeRole || order.clientSigneeRole || '');
+    setFormRepresentativeContact(order.clientRepresentativeContact || order.clientSigneeContact || '');
+    setFormTechnicalReport(order.technicalReport || order.routeNotes || '');
     setFormServiceCompany(order.serviceCompany || 'lefrio');
     setFormPhotos(order.photos || []);
     setFormTechSignature(order.techSignature || '');
@@ -2843,6 +2854,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         ? (selectedOrder?.diagnosis || (formDiagnosis ? formDiagnosis.trim().toUpperCase() : undefined))
         : (formDiagnosis ? formDiagnosis.trim().toUpperCase() : undefined),
       solution: formSolution ? formSolution.trim().toUpperCase() : undefined,
+      technicalReport: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
+      routeNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       
       services: formServices.map(s => ({
         ...s,
@@ -2881,6 +2894,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       authenticatedTeam,
       clientRepresentative: formRepresentative ? formRepresentative.trim().toUpperCase() : undefined,
       clientRepresentativeMatricula: formRepresentativeMatricula ? formRepresentativeMatricula.trim().toUpperCase() : undefined,
+      clientRepresentativeRole: formRepresentativeRole ? formRepresentativeRole.trim().toUpperCase() : undefined,
+      clientRepresentativeContact: formRepresentativeContact ? formRepresentativeContact.trim().toUpperCase() : undefined,
+      clientSigneeRole: formRepresentativeRole ? formRepresentativeRole.trim().toUpperCase() : undefined,
+      clientSigneeContact: formRepresentativeContact ? formRepresentativeContact.trim().toUpperCase() : undefined,
       serviceCompany: selectedClient?.serviceCompany || formServiceCompany || 'lefrio',
       photos: formPhotos,
       techSignature: formTechSignature || undefined,
@@ -3039,6 +3056,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       description: formDescription ? formDescription.trim().toUpperCase() : '',
       diagnosis: formDiagnosis ? formDiagnosis.trim().toUpperCase() : undefined,
       solution: formSolution ? formSolution.trim().toUpperCase() : undefined,
+      technicalReport: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       services: formServices,
       products: formProducts,
       technicianId: formTechnicianId || undefined,
@@ -3046,6 +3064,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       authenticatedTeam: '',
       clientRepresentative: formRepresentative ? formRepresentative.trim().toUpperCase() : undefined,
       clientRepresentativeMatricula: formRepresentativeMatricula ? formRepresentativeMatricula.trim().toUpperCase() : undefined,
+      clientRepresentativeRole: formRepresentativeRole ? formRepresentativeRole.trim().toUpperCase() : undefined,
+      clientRepresentativeContact: formRepresentativeContact ? formRepresentativeContact.trim().toUpperCase() : undefined,
       serviceCompany: selectedClient?.serviceCompany || formServiceCompany || 'lefrio',
       photos: formPhotos,
       techSignature: formTechSignature || undefined,
@@ -3115,12 +3135,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormDescription(draft.description || '');
     setFormDiagnosis(draft.diagnosis || '');
     setFormSolution(draft.solution || '');
+    setFormTechnicalReport(draft.technicalReport || '');
     setFormServices(draft.services || []);
     setFormProducts(draft.products || []);
     setFormTechnicianId(draft.technicianId || '');
     setFormTechnician2Id(draft.technician2Id || '');
     setFormRepresentative(draft.clientRepresentative || '');
     setFormRepresentativeMatricula(draft.clientRepresentativeMatricula || '');
+    setFormRepresentativeRole(draft.clientRepresentativeRole || '');
+    setFormRepresentativeContact(draft.clientRepresentativeContact || '');
     setFormServiceCompany(draft.serviceCompany || 'lefrio');
     setFormPhotos(draft.photos || []);
     setFormTechSignature(draft.techSignature || '');
@@ -3840,6 +3863,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       description: formDescription ? formDescription.trim().toUpperCase() : selectedOrder.description,
       diagnosis: formDiagnosis ? formDiagnosis.trim().toUpperCase() : selectedOrder.diagnosis,
       solution: formSolution ? formSolution.trim().toUpperCase() : selectedOrder.solution,
+      technicalReport: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : (selectedOrder.technicalReport || selectedOrder.routeNotes),
+      routeNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : (selectedOrder.routeNotes || selectedOrder.technicalReport),
       services: formServices,
       products: formProducts,
       totalValue: Number((servicesSum + productsSum).toFixed(2)),
@@ -3847,6 +3872,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       technician2Id: formTechnician2Id || selectedOrder.technician2Id,
       clientRepresentative: formRepresentative ? formRepresentative.trim().toUpperCase() : selectedOrder.clientRepresentative,
       clientRepresentativeMatricula: formRepresentativeMatricula ? formRepresentativeMatricula.trim().toUpperCase() : selectedOrder.clientRepresentativeMatricula,
+      clientRepresentativeRole: formRepresentativeRole ? formRepresentativeRole.trim().toUpperCase() : (selectedOrder.clientRepresentativeRole || selectedOrder.clientSigneeRole),
+      clientRepresentativeContact: formRepresentativeContact ? formRepresentativeContact.trim().toUpperCase() : (selectedOrder.clientRepresentativeContact || selectedOrder.clientSigneeContact),
       serviceCompany: currentClient?.serviceCompany || formServiceCompany || selectedOrder.serviceCompany,
       photos: formPhotos.length > 0 ? formPhotos : (selectedOrder.photos || []),
       techSignature: formTechSignature || selectedOrder.techSignature,
@@ -5893,22 +5920,31 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <span className="os-print-val">{(orderToRender.externalOs || '-').toUpperCase()}</span>
                 </div>
                 {/* Linha 3: Descrição do Problema */}
-                <div className={`os-print-c12 os-print-cell ${(orderToRender.diagnosis || orderToRender.solution) ? 'os-print-bb' : ''}`}>
+                <div className={`os-print-c12 os-print-cell ${(orderToRender.diagnosis || orderToRender.solution || orderToRender.technicalReport || orderToRender.routeNotes) ? 'os-print-bb' : ''}`}>
                   <span className="os-print-lbl">DESCRIÇÃO DO PROBLEMA: </span>
                   <span className="os-print-val">{(orderToRender.description || '').toUpperCase()}</span>
                 </div>
                 {/* Linha 4: Diagnóstico */}
                 {orderToRender.diagnosis && (
-                  <div className={`os-print-c12 os-print-cell ${orderToRender.solution ? 'os-print-bb' : ''}`}>
+                  <div className={`os-print-c12 os-print-cell ${(orderToRender.solution || orderToRender.technicalReport || orderToRender.routeNotes) ? 'os-print-bb' : ''}`}>
                     <span className="os-print-lbl">DIAGNÓSTICO: </span>
                     <span className="os-print-val">{(orderToRender.diagnosis || '').toUpperCase()}</span>
                   </div>
                 )}
                 {/* Linha 5: Solução */}
                 {orderToRender.solution && (
-                  <div className="os-print-c12 os-print-cell">
+                  <div className={`os-print-c12 os-print-cell ${(orderToRender.technicalReport || orderToRender.routeNotes) ? 'os-print-bb' : ''}`}>
                     <span className="os-print-lbl">SOLUÇÃO: </span>
                     <span className="os-print-val">{(orderToRender.solution || '').toUpperCase()}</span>
+                  </div>
+                )}
+                {/* Linha 6: Relatório Técnico / Observações Gerais */}
+                {(orderToRender.technicalReport || orderToRender.routeNotes) && (
+                  <div className="os-print-c12 os-print-cell">
+                    <span className="os-print-lbl">OBSERVAÇÕES GERAIS / RELATÓRIO TÉCNICO: </span>
+                    <span className="os-print-val" style={{ whiteSpace: 'pre-line' }}>
+                      {(orderToRender.technicalReport || orderToRender.routeNotes || '').toUpperCase()}
+                    </span>
                   </div>
                 )}
               </div>
@@ -6040,6 +6076,16 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 </span>
                 {orderToRender.clientRepresentativeMatricula && (
                   <span className="os-print-sig-sub">Matrícula/CPF: {orderToRender.clientRepresentativeMatricula}</span>
+                )}
+                {(orderToRender.clientRepresentativeRole || orderToRender.clientSigneeRole) && (
+                  <span className="os-print-sig-sub">
+                    Função: {(orderToRender.clientRepresentativeRole || orderToRender.clientSigneeRole || '').toUpperCase()}
+                  </span>
+                )}
+                {(orderToRender.clientRepresentativeContact || orderToRender.clientSigneeContact) && (
+                  <span className="os-print-sig-sub">
+                    E-mail/Contato: {(orderToRender.clientRepresentativeContact || orderToRender.clientSigneeContact || '').toUpperCase()}
+                  </span>
                 )}
                 {orderToRender.clientSignatureDate && (
                   <span className="os-print-sig-date">
@@ -9477,6 +9523,24 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     )}
                   />
                 </div>
+                <div className="md:col-span-2">
+                  <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
+                    Relatório Técnico / Observações Gerais
+                  </label>
+                  <textarea
+                    value={formTechnicalReport}
+                    onChange={(e) => setFormTechnicalReport(e.target.value)}
+                    disabled={isLockedForTech || isSaving}
+                    rows={3}
+                    placeholder="OBSERVAÇÕES GERAIS DO ATENDIMENTO (EXIBIDAS NA FOLHA DE IMPRESSÃO E APROVAÇÃO)..."
+                    className={cn(
+                      "w-full rounded-xl py-2 px-3 text-xs font-semibold outline-none uppercase",
+                      (isLockedForTech || isSaving)
+                        ? "bg-slate-100 border border-slate-200 text-slate-500 cursor-not-allowed"
+                        : "bg-white border border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                    )}
+                  />
+                </div>
               </div>
 
               {userRole !== UserRole.TECHNICIAN && (() => {
@@ -10035,6 +10099,48 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                           </p>
                         )}
                       </div>
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">Função do Fiscal</label>
+                          {isClientInfoLocked && (
+                            <span className="text-[8px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.2 rounded border border-amber-200 uppercase">Inalterável</span>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={formRepresentativeRole}
+                          onChange={(e) => setFormRepresentativeRole(e.target.value)}
+                          disabled={isClientInfoLocked}
+                          placeholder="EX: FISCAL DE CONTRATO / GERENTE"
+                          className={cn(
+                            "w-full border rounded-xl py-1.5 px-3 text-xs font-semibold outline-none transition-all uppercase",
+                            isClientInfoLocked
+                              ? "bg-slate-100 border-slate-200 text-slate-600 cursor-not-allowed"
+                              : "bg-white border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                          )}
+                        />
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">E-mail / Contato do Fiscal</label>
+                          {isClientInfoLocked && (
+                            <span className="text-[8px] font-black text-amber-700 bg-amber-100 px-1.5 py-0.2 rounded border border-amber-200 uppercase">Inalterável</span>
+                          )}
+                        </div>
+                        <input
+                          type="text"
+                          value={formRepresentativeContact}
+                          onChange={(e) => setFormRepresentativeContact(e.target.value)}
+                          disabled={isClientInfoLocked}
+                          placeholder="EX: FISCAL@EMPRESA.COM / (82) 99999-9999"
+                          className={cn(
+                            "w-full border rounded-xl py-1.5 px-3 text-xs font-semibold outline-none transition-all uppercase",
+                            isClientInfoLocked
+                              ? "bg-slate-100 border-slate-200 text-slate-600 cursor-not-allowed"
+                              : "bg-white border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                          )}
+                        />
+                      </div>
                     </div>
 
                     {/* Assinatura do Cliente e Autenticação dos Técnicos */}
@@ -10181,6 +10287,42 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         disabled={isLockedForTech}
                         onChange={(e) => setFormRepresentativeMatricula(e.target.value)}
                         placeholder="Ex: 01234"
+                        className={cn(
+                          "w-full rounded-xl py-2 px-3 text-xs font-semibold outline-none uppercase",
+                          isLockedForTech
+                            ? "bg-slate-100 border border-slate-200 text-slate-500 cursor-not-allowed"
+                            : "bg-white border border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        )}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
+                        Função
+                      </label>
+                      <input
+                        type="text"
+                        value={formRepresentativeRole}
+                        disabled={isLockedForTech}
+                        onChange={(e) => setFormRepresentativeRole(e.target.value)}
+                        placeholder="EX: FISCAL / GERENTE"
+                        className={cn(
+                          "w-full rounded-xl py-2 px-3 text-xs font-semibold outline-none uppercase",
+                          isLockedForTech
+                            ? "bg-slate-100 border border-slate-200 text-slate-500 cursor-not-allowed"
+                            : "bg-white border border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        )}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
+                        E-mail / Contato
+                      </label>
+                      <input
+                        type="text"
+                        value={formRepresentativeContact}
+                        disabled={isLockedForTech}
+                        onChange={(e) => setFormRepresentativeContact(e.target.value)}
+                        placeholder="EX: FISCAL@EMPRESA.COM / TELEFONE"
                         className={cn(
                           "w-full rounded-xl py-2 px-3 text-xs font-semibold outline-none uppercase",
                           isLockedForTech

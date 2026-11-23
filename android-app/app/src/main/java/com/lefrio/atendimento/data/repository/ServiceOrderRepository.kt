@@ -410,6 +410,18 @@ class ServiceOrderRepository(private val context: Context) {
                 if (serverOtherPhotos.isNotEmpty() && getOtherPhotos(orderId).isEmpty()) {
                     saveOtherPhotosLocalOnly(orderId, serverOtherPhotos.take(4))
                 }
+                val serverFiscalRole = doc.getString("clientSigneeRole")?.takeIf { it.isNotBlank() }
+                    ?: doc.getString("clientRepresentativeRole")?.takeIf { it.isNotBlank() }
+                val serverFiscalContact = doc.getString("clientSigneeContact")?.takeIf { it.isNotBlank() }
+                    ?: doc.getString("clientRepresentativeContact")?.takeIf { it.isNotBlank() }
+                if (!serverFiscalRole.isNullOrBlank() || !serverFiscalContact.isNullOrBlank()) {
+                    val (existingRole, existingContact) = getFiscalExtraDraft(orderId)
+                    saveFiscalExtraDraft(
+                        orderId,
+                        existingRole.ifBlank { serverFiscalRole.orEmpty() },
+                        existingContact.ifBlank { serverFiscalContact.orEmpty() }
+                    )
+                }
 
                 ordersToSave.add(
                     ServiceOrderEntity(
@@ -632,6 +644,18 @@ class ServiceOrderRepository(private val context: Context) {
                         val serverFiscalDoc = doc.getString("clientSigneeDoc")?.takeIf { it.isNotBlank() }
                             ?: doc.getString("clientSigneeRegistration")?.takeIf { it.isNotBlank() }
                             ?: doc.getString("clientRepresentativeMatricula")?.takeIf { it.isNotBlank() }
+                        val serverFiscalRole = doc.getString("clientRepresentativeRole")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("clientSigneeRole")?.takeIf { it.isNotBlank() }
+                        val serverFiscalContact = doc.getString("clientRepresentativeContact")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("clientSigneeContact")?.takeIf { it.isNotBlank() }
+                        if (!serverFiscalRole.isNullOrBlank() || !serverFiscalContact.isNullOrBlank()) {
+                            val (existingRole, existingContact) = getFiscalExtraDraft(doc.id)
+                            saveFiscalExtraDraft(
+                                doc.id,
+                                existingRole.ifBlank { serverFiscalRole.orEmpty() },
+                                existingContact.ifBlank { serverFiscalContact.orEmpty() }
+                            )
+                        }
                         val serverSigDate = doc.getString("clientSignatureDate")?.takeIf { it.isNotBlank() }
                         val serverCompletionDate = doc.getString("techFinalizedAt")?.takeIf { it.isNotBlank() }
                             ?: doc.getString("completionDate")?.takeIf { it.isNotBlank() }
@@ -1155,6 +1179,25 @@ class ServiceOrderRepository(private val context: Context) {
     }
 
     /**
+     * Lê Função e E-mail/Contato do fiscal salvos localmente via SharedPreferences (sem alteração de schema Room).
+     */
+    fun getFiscalExtraDraft(orderId: String): Pair<String, String> {
+        val role = extrasPrefs.getString("fiscal_role_$orderId", "") ?: ""
+        val contact = extrasPrefs.getString("fiscal_contact_$orderId", "") ?: ""
+        return Pair(role, contact)
+    }
+
+    /**
+     * Salva Função e E-mail/Contato do fiscal localmente no aparelho.
+     */
+    fun saveFiscalExtraDraft(orderId: String, role: String, contact: String) {
+        extrasPrefs.edit()
+            .putString("fiscal_role_$orderId", role)
+            .putString("fiscal_contact_$orderId", contact)
+            .apply()
+    }
+
+    /**
      * Lê as fotos gerais de observação ("Outros", até 4 imagens) salvas localmente para o atendimento.
      */
     fun getOtherPhotos(orderId: String): List<String> {
@@ -1399,6 +1442,8 @@ class ServiceOrderRepository(private val context: Context) {
         orderId: String,
         signeeName: String,
         signeeDoc: String,
+        signeeRole: String = "",
+        signeeContact: String = "",
         signatureDate: String,
         signatureFilePath: String,
         completionDate: String,
@@ -1416,6 +1461,11 @@ class ServiceOrderRepository(private val context: Context) {
         val addressId = existingOrder?.addressId ?: ""
         val plannedDate = existingOrder?.plannedDate ?: ""
         val month = if (plannedDate.length >= 7) plannedDate.substring(0, 7) else SimpleDateFormat("yyyy-MM", Locale.getDefault()).format(Date())
+
+        val (savedRole, savedContact) = getFiscalExtraDraft(orderId)
+        val effectiveSigneeRole = signeeRole.trim().ifBlank { savedRole.trim() }.uppercase(Locale.getDefault())
+        val effectiveSigneeContact = signeeContact.trim().ifBlank { savedContact.trim() }.uppercase(Locale.getDefault())
+        saveFiscalExtraDraft(orderId, effectiveSigneeRole, effectiveSigneeContact)
 
         val legacyDefaultNote = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão"
         val effectiveRouteNotes = (routeNotes ?: existingOrder?.generalNotes ?: "")
@@ -1472,6 +1522,10 @@ class ServiceOrderRepository(private val context: Context) {
             put("clientSigneeName", signeeName)
             put("clientSigneeDoc", signeeDoc)
             put("clientSigneeRegistration", signeeDoc)
+            put("clientRepresentativeRole", effectiveSigneeRole)
+            put("clientSigneeRole", effectiveSigneeRole)
+            put("clientRepresentativeContact", effectiveSigneeContact)
+            put("clientSigneeContact", effectiveSigneeContact)
             put("clientSignatureDate", signatureDate)
             put("signatureFilePath", signatureFilePath)
             put("completionDate", completionDate)
@@ -1599,6 +1653,10 @@ class ServiceOrderRepository(private val context: Context) {
         val status = if (isFinal) "finalizada" else "aberta"
         val completionDate = if (isFinal) nowIso else null
 
+        val cleanTechnicalReport = params.technicalReport?.trim()?.uppercase(Locale.getDefault()).orEmpty()
+        val cleanFiscalRole = params.fiscalRole?.trim()?.uppercase(Locale.getDefault()).orEmpty()
+        val cleanFiscalContact = params.fiscalContact?.trim()?.uppercase(Locale.getDefault()).orEmpty()
+
         val fullNotes = buildString {
             append("MOTIVO / DESCRIÇÃO: ${params.description.ifBlank { "Atendimento técnico no local" }}")
             if (!params.diagnosis.isNullOrBlank()) {
@@ -1606,6 +1664,9 @@ class ServiceOrderRepository(private val context: Context) {
             }
             if (!params.solution.isNullOrBlank()) {
                 append("\nSOLUÇÃO APLICADA: ${params.solution}")
+            }
+            if (cleanTechnicalReport.isNotBlank()) {
+                append("\nRELATÓRIO TÉCNICO: $cleanTechnicalReport")
             }
         }
 
@@ -1635,6 +1696,7 @@ class ServiceOrderRepository(private val context: Context) {
 
         // 1. Grava no banco local Room imediatamente (offline-first garantido!)
         orderDao.insertOrUpdate(entity)
+        saveFiscalExtraDraft(orderId, cleanFiscalRole, cleanFiscalContact)
 
         // 2. Se informou equipamento, cria item no checklist inicial
         if (!params.equipmentId.isNullOrBlank()) {
@@ -1644,9 +1706,9 @@ class ServiceOrderRepository(private val context: Context) {
                 orderId = orderId,
                 equipmentId = params.equipmentId,
                 equipmentName = params.equipmentName ?: "Equipamento Climatização",
-                equipmentBrand = "Principal",
-                equipmentBtus = "",
-                equipmentSector = "Geral",
+                equipmentBrand = params.equipmentBrand?.takeIf { it.isNotBlank() } ?: "Principal",
+                equipmentBtus = params.equipmentBtus ?: "",
+                equipmentSector = params.equipmentSector?.takeIf { it.isNotBlank() } ?: "Geral",
                 isChecked = isFinal,
                 isSkipped = false,
                 isSynced = false,
@@ -1665,6 +1727,9 @@ class ServiceOrderRepository(private val context: Context) {
             put("addressStreet", params.addressStreet)
             put("equipmentId", params.equipmentId ?: "")
             put("equipmentName", params.equipmentName ?: "")
+            put("equipmentBrand", params.equipmentBrand ?: "")
+            put("equipmentBtus", params.equipmentBtus ?: "")
+            put("equipmentSector", params.equipmentSector ?: "")
             put("status", status)
             put("type", params.type)
             put("plannedDate", params.plannedDate)
@@ -1674,10 +1739,16 @@ class ServiceOrderRepository(private val context: Context) {
             put("description", params.description)
             put("diagnosis", params.diagnosis ?: "")
             put("solution", params.solution ?: "")
+            put("technicalReport", cleanTechnicalReport)
+            put("routeNotes", cleanTechnicalReport)
             put("clientRepresentative", params.fiscalName ?: "")
             put("clientSigneeName", params.fiscalName ?: "")
             put("clientSigneeRegistration", params.fiscalRegistration ?: "")
             put("clientSigneeDoc", params.fiscalRegistration ?: "")
+            put("clientRepresentativeRole", cleanFiscalRole)
+            put("clientSigneeRole", cleanFiscalRole)
+            put("clientRepresentativeContact", cleanFiscalContact)
+            put("clientSigneeContact", cleanFiscalContact)
             put("clientSignaturePath", params.signaturePath ?: "")
             put("clientSignatureDate", if (isFinal) nowIso else "")
             put("completionDate", completionDate ?: "")
@@ -2027,14 +2098,20 @@ data class CreateServiceOrderParams(
     val addressStreet: String,
     val equipmentId: String? = null,
     val equipmentName: String? = null,
+    val equipmentBrand: String? = null,
+    val equipmentBtus: String? = null,
+    val equipmentSector: String? = null,
     val technicianId: String,
     val technicianName: String,
     val technician2Name: String? = null,
     val description: String,
     val diagnosis: String? = null,
     val solution: String? = null,
+    val technicalReport: String? = null,
     val fiscalName: String? = null,
     val fiscalRegistration: String? = null,
+    val fiscalRole: String? = null,
+    val fiscalContact: String? = null,
     val signaturePath: String? = null,
     val signatureBase64: String? = null,
     val isFinalized: Boolean = false

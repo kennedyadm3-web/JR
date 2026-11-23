@@ -305,6 +305,11 @@ export const deduplicateRecordsList = (records: MaintenanceRecord[]): { deduplic
         existing.clientSignatureDate = normR.clientSignatureDate;
         existing.clientSigneeName = normR.clientSigneeName;
         existing.clientSigneeRegistration = normR.clientSigneeRegistration;
+        if (normR.clientSigneeRole) existing.clientSigneeRole = normR.clientSigneeRole;
+        if (normR.clientSigneeContact) existing.clientSigneeContact = normR.clientSigneeContact;
+      } else {
+        if (normR.clientSigneeRole && !existing.clientSigneeRole) existing.clientSigneeRole = normR.clientSigneeRole;
+        if (normR.clientSigneeContact && !existing.clientSigneeContact) existing.clientSigneeContact = normR.clientSigneeContact;
       }
       if (normR.techSignature && !existing.techSignature) existing.techSignature = normR.techSignature;
 

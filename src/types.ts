@@ -256,6 +256,8 @@ export interface MaintenanceRecord {
   completionDate?: string; // Data e hora exata em que a planilha foi finalizada pelo técnico
   clientSigneeName?: string;
   clientSigneeRegistration?: string;
+  clientSigneeRole?: string;
+  clientSigneeContact?: string;
   cycle?: number;
   billingMonth?: string; // Mês da cobrança / competência cobrada na folha de atendimento (ex: "2026-09" exibido como "SET/2026")
   completionLatitude?: number;
@@ -561,6 +563,8 @@ export interface ServiceOrder {
   description: string; // Descrição do problema
   diagnosis?: string; // Diagnóstico
   solution?: string; // Solução
+  technicalReport?: string; // Relatório Técnico / Observações Gerais
+  routeNotes?: string; // Observações Gerais (compatibilidade com atendimento em campo)
   
   services: ServiceOrderItem[];
   products: ServiceOrderItem[];
@@ -571,8 +575,12 @@ export interface ServiceOrder {
   authenticatedTeam?: string; // Ex: "Equipe autenticada no aplicativo JDSmartOS..."
   clientRepresentative?: string; // Nome do representante (ex: ALUÍSIO MELO SIMÕES FILHO)
   clientRepresentativeMatricula?: string; // Matrícula do representante (ex: 0813)
+  clientRepresentativeRole?: string; // Função do representante / fiscal
+  clientRepresentativeContact?: string; // E-mail ou contato do representante / fiscal
   clientSigneeName?: string;
   clientSigneeRegistration?: string;
+  clientSigneeRole?: string;
+  clientSigneeContact?: string;
   serviceCompany?: string; // ID da empresa prestadora configurada
   
   photos?: string[]; // fotos anexadas do app (carregadas sob demanda quando externalizadas)
@@ -623,6 +631,7 @@ export interface TechOSDraft {
   description: string;
   diagnosis?: string;
   solution?: string;
+  technicalReport?: string;
   services: ServiceOrderItem[];
   products: ServiceOrderItem[];
   technicianId?: string;
@@ -630,6 +639,8 @@ export interface TechOSDraft {
   authenticatedTeam?: string;
   clientRepresentative?: string;
   clientRepresentativeMatricula?: string;
+  clientRepresentativeRole?: string;
+  clientRepresentativeContact?: string;
   serviceCompany?: string;
   photos: string[];
   techSignature?: string;

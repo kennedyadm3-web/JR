@@ -1,9 +1,11 @@
 package com.lefrio.atendimento.ui.order
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -42,6 +44,8 @@ import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
 import com.lefrio.atendimento.util.PhotoCaptureManager
+import com.lefrio.atendimento.util.VoiceReportTranscriber
+import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
 
@@ -191,6 +195,118 @@ fun OrderDetailScreen(
         }
     }
 
+    // --- GRAVAÇÃO E TRANSCRIÇÃO DE ÁUDIO EXCLUSIVA PARA O CAMPO RELATÓRIO TÉCNICO (PREVENTIVA) ---
+    var isRecordingReportAudio by remember { mutableStateOf(false) }
+    var partialVoiceTranscript by remember { mutableStateOf("") }
+    var voiceAudioLevel by remember { mutableFloatStateOf(0f) }
+    var recordingElapsedSeconds by remember { mutableIntStateOf(0) }
+
+    val fallbackSpeechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val spoken = matches?.firstOrNull()?.trim().orEmpty()
+            if (spoken.isNotBlank()) {
+                viewModel.appendRouteNotesFromVoice(spoken)
+                Toast.makeText(context, "Áudio transcrito no Relatório Técnico!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val voiceTranscriber = remember(context) {
+        VoiceReportTranscriber(
+            context = context,
+            onListeningStateChanged = { listening ->
+                isRecordingReportAudio = listening
+            },
+            onPartialTranscript = { partial ->
+                partialVoiceTranscript = partial
+            },
+            onFinalSegment = { segment ->
+                viewModel.appendRouteNotesFromVoice(segment)
+            },
+            onAudioLevelChanged = { level ->
+                voiceAudioLevel = level
+            },
+            onError = { errMsg ->
+                Toast.makeText(context, errMsg, Toast.LENGTH_LONG).show()
+            },
+            onFallbackToSystemIntent = {
+                try {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "pt-BR")
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Fale o relatório técnico do atendimento...")
+                    }
+                    fallbackSpeechLauncher.launch(intent)
+                } catch (_: Throwable) {
+                    Toast.makeText(
+                        context,
+                        "Serviço de reconhecimento de voz indisponível neste aparelho.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        )
+    }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            voiceTranscriber.start()
+        } else {
+            Toast.makeText(
+                context,
+                "Permissão de microfone necessária para gravar e transcrever o Relatório Técnico.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    fun toggleVoiceReportRecording() {
+        if (isRecordingReportAudio) {
+            voiceTranscriber.stop()
+            Toast.makeText(context, "Gravação finalizada e transcrita no Relatório Técnico.", Toast.LENGTH_SHORT).show()
+        } else {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                voiceTranscriber.start()
+            } else {
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        }
+    }
+
+    LaunchedEffect(isRecordingReportAudio) {
+        if (isRecordingReportAudio) {
+            recordingElapsedSeconds = 0
+            while (isRecordingReportAudio) {
+                delay(1000L)
+                recordingElapsedSeconds += 1
+            }
+        } else {
+            recordingElapsedSeconds = 0
+        }
+    }
+
+    LaunchedEffect(uiState.order?.status) {
+        if (uiState.order?.status == "finalizada" && isRecordingReportAudio) {
+            voiceTranscriber.stop()
+        }
+    }
+
+    DisposableEffect(voiceTranscriber) {
+        onDispose {
+            voiceTranscriber.release()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -258,6 +374,9 @@ fun OrderDetailScreen(
                         } else {
                             Button(
                                 onClick = {
+                                    if (isRecordingReportAudio) {
+                                        voiceTranscriber.stop()
+                                    }
                                     viewModel.finalizeOrder(context, signaturePaths)
                                 },
                                 enabled = isFormValid && !uiState.isFinalizing,
@@ -728,82 +847,12 @@ fun OrderDetailScreen(
                     )
                 }
 
-                // SEÇÃO 1 ENTRE LISTA DE MÁQUINAS E CLIENTE: RELATO TÉCNICO (Observações Gerais do Atendimento)
+                // SEÇÃO 1 APÓS LISTA DE MÁQUINAS: FOTOS DE OBSERVAÇÕES / OUTROS (até 4 fotos - igual ao PWA)
                 item {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(BluePrimary.copy(alpha = 0.12f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Description,
-                                        contentDescription = null,
-                                        tint = BluePrimary,
-                                        modifier = Modifier.size(17.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column {
-                                    Text(
-                                        text = "RELATO TÉCNICO",
-                                        fontWeight = FontWeight.Black,
-                                        fontSize = 13.sp,
-                                        color = TextPrimary
-                                    )
-                                    Text(
-                                        text = "Observações gerais do atendimento (enviadas ao administrativo e à folha do PMOC)",
-                                        fontSize = 10.sp,
-                                        color = TextSecondary
-                                    )
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(10.dp))
-
-                            OutlinedTextField(
-                                value = uiState.routeNotes,
-                                onValueChange = { viewModel.updateRouteNotes(it.uppercase(Locale.getDefault())) },
-                                placeholder = {
-                                    Text(
-                                        "Descreva observações gerais desta visita, pendências, recomendações ao cliente...",
-                                        fontSize = 11.sp
-                                    )
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 96.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
-                                enabled = order.status != "finalizada",
-                                minLines = 3,
-                                maxLines = 6,
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedContainerColor = Color(0xFFF8FAFC),
-                                    unfocusedContainerColor = Color(0xFFF8FAFC)
-                                )
-                            )
-                        }
-                    }
-                }
-
-                // SEÇÃO 2 ENTRE LISTA DE MÁQUINAS E CLIENTE: FOTOS DE OBSERVAÇÕES / OUTROS (até 4 fotos - igual ao PWA)
-                item {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 4.dp),
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.White),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -936,12 +985,197 @@ fun OrderDetailScreen(
                     }
                 }
 
+                // SEÇÃO 2 LOGO ACIMA DA ÁREA DO FISCAL: RELATÓRIO TÉCNICO (Observações Gerais do Atendimento)
+                item {
+                    val isPreventiveOrder = order.type.contains("PREVENTIVA", ignoreCase = true) ||
+                        order.id.startsWith("PREV_")
+                    val minutesStr = (recordingElapsedSeconds / 60).toString().padStart(2, '0')
+                    val secondsStr = (recordingElapsedSeconds % 60).toString().padStart(2, '0')
+
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(BluePrimary.copy(alpha = 0.12f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Description,
+                                        contentDescription = null,
+                                        tint = BluePrimary,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "RELATÓRIO TÉCNICO",
+                                        fontWeight = FontWeight.Black,
+                                        fontSize = 13.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Observação geral exibida na folha de impressão e na tela de aprovação",
+                                        fontSize = 10.sp,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+
+                            // Botão de Gravação e Transcrição por Voz (exclusivo para Preventiva neste campo)
+                            if (isPreventiveOrder && order.status != "finalizada") {
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Button(
+                                        onClick = { toggleVoiceReportRecording() },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(44.dp),
+                                        shape = RoundedCornerShape(10.dp),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = if (isRecordingReportAudio) Color(0xFFDC2626) else BluePrimary,
+                                            contentColor = Color.White
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isRecordingReportAudio) Icons.Default.Stop else Icons.Default.Mic,
+                                            contentDescription = if (isRecordingReportAudio) "Parar gravação" else "Gravar áudio",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = if (isRecordingReportAudio) {
+                                                "PARAR E TRANSCREVER ($minutesStr:$secondsStr)"
+                                            } else {
+                                                "GRAVAR ÁUDIO PARA TRANSCREVER"
+                                            },
+                                            fontWeight = FontWeight.Black,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                }
+
+                                if (isRecordingReportAudio) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = Color(0xFFFEF2F2),
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFECACA))
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(8.dp)
+                                                            .clip(CircleShape)
+                                                            .background(Color(0xFFDC2626))
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = "OUVINDO... FALE O RELATÓRIO TÉCNICO",
+                                                        fontSize = 10.sp,
+                                                        fontWeight = FontWeight.Black,
+                                                        color = Color(0xFF991B1B)
+                                                    )
+                                                }
+
+                                                // Indicador visual simples de intensidade do microfone
+                                                Row(
+                                                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    val barWeights = listOf(0.35f, 0.7f, 1.0f, 0.65f, 0.4f)
+                                                    barWeights.forEach { weight ->
+                                                        val barHeight = (6f + (voiceAudioLevel * 12f * weight)).dp
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .width(3.dp)
+                                                                .height(barHeight)
+                                                                .clip(RoundedCornerShape(2.dp))
+                                                                .background(Color(0xFFDC2626))
+                                                        )
+                                                    }
+                                                }
+                                            }
+
+                                            if (partialVoiceTranscript.isNotBlank()) {
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                Text(
+                                                    text = "\"$partialVoiceTranscript\"",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = Color(0xFF7F1D1D)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            OutlinedTextField(
+                                value = uiState.routeNotes,
+                                onValueChange = { viewModel.updateRouteNotes(it.uppercase(Locale.getDefault())) },
+                                placeholder = {
+                                    Text(
+                                        if (isPreventiveOrder) {
+                                            "Digite ou grave um áudio para transcrever as observações gerais desta visita..."
+                                        } else {
+                                            "Descreva observações gerais desta visita, pendências, recomendações ao cliente..."
+                                        },
+                                        fontSize = 11.sp
+                                    )
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 96.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                                enabled = order.status != "finalizada",
+                                minLines = 3,
+                                maxLines = 6,
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color(0xFFF8FAFC),
+                                    unfocusedContainerColor = Color(0xFFF8FAFC)
+                                )
+                            )
+                        }
+                    }
+                }
+
                 // SEÇÃO DO RESPONSÁVEL DO CLIENTE E ASSINATURA DIGITAL (Fim da Folha de Atendimento)
                 item {
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.White),
                         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
@@ -1005,6 +1239,44 @@ fun OrderDetailScreen(
                                 onValueChange = { viewModel.updateFiscalDoc(it.uppercase(Locale.getDefault())) },
                                 label = { Text("Matrícula ou CPF do Responsável", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: 123456 ou 000.000.000-00", fontSize = 11.sp) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                                singleLine = true,
+                                enabled = order.status != "finalizada",
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Campo 3: Função do Responsável / Fiscal
+                            OutlinedTextField(
+                                value = uiState.fiscalRole,
+                                onValueChange = { viewModel.updateFiscalRole(it.uppercase(Locale.getDefault())) },
+                                label = { Text("Função", fontSize = 11.sp) },
+                                placeholder = { Text("Ex: GERENTE / FISCAL DE CONTRATO", fontSize = 11.sp) },
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(10.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                                singleLine = true,
+                                enabled = order.status != "finalizada",
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = Color.White,
+                                    unfocusedContainerColor = Color.White
+                                )
+                            )
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Campo 4: E-mail / Contato do Responsável / Fiscal
+                            OutlinedTextField(
+                                value = uiState.fiscalContact,
+                                onValueChange = { viewModel.updateFiscalContact(it.uppercase(Locale.getDefault())) },
+                                label = { Text("E-mail / Contato", fontSize = 11.sp) },
+                                placeholder = { Text("Ex: FISCAL@EMPRESA.COM OU (82) 99999-9999", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
                                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),

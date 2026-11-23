@@ -60,15 +60,21 @@ fun CreateServiceOrderScreen(
     var selectedEquipmentId by remember { mutableStateOf("") }
     var selectedEquipmentName by remember { mutableStateOf("") }
     var selectedEquipmentDisplay by remember { mutableStateOf("") }
+    var selectedEquipmentBrand by remember { mutableStateOf("") }
+    var selectedEquipmentBtus by remember { mutableStateOf("") }
+    var selectedEquipmentSector by remember { mutableStateOf("") }
 
     // Campos Técnicos do Atendimento
     var description by remember { mutableStateOf("") }
     var diagnosis by remember { mutableStateOf("") }
     var solution by remember { mutableStateOf("") }
+    var technicalReport by remember { mutableStateOf("") }
 
     // Campos do Fiscal / Responsável
     var fiscalName by remember { mutableStateOf("") }
     var fiscalRegistration by remember { mutableStateOf("") }
+    var fiscalRole by remember { mutableStateOf("") }
+    var fiscalContact by remember { mutableStateOf("") }
     val signaturePaths = remember { mutableStateListOf<SignaturePath>() }
     var hasSignature by remember { mutableStateOf(false) }
 
@@ -233,12 +239,18 @@ fun CreateServiceOrderScreen(
                                 addressStreet = selectedAddressStreet,
                                 equipmentId = selectedEquipmentId.ifBlank { null },
                                 equipmentName = selectedEquipmentName.ifBlank { null },
+                                equipmentBrand = selectedEquipmentBrand.ifBlank { null },
+                                equipmentBtus = selectedEquipmentBtus.ifBlank { null },
+                                equipmentSector = selectedEquipmentSector.ifBlank { null },
                                 tech2Name = null,
                                 description = description,
                                 diagnosis = diagnosis,
                                 solution = solution,
+                                technicalReport = technicalReport.trim().ifBlank { null },
                                 fiscalName = fiscalName,
                                 fiscalRegistration = fiscalRegistration,
+                                fiscalRole = fiscalRole.trim().ifBlank { null },
+                                fiscalContact = fiscalContact.trim().ifBlank { null },
                                 signaturePath = sigFile?.absolutePath,
                                 signatureBase64 = sigBase64,
                                 isFinalized = true,
@@ -637,6 +649,9 @@ fun CreateServiceOrderScreen(
                                                     selectedEquipmentId = eq.id
                                                     selectedEquipmentName = eq.name
                                                     selectedEquipmentDisplay = displayLabel
+                                                    selectedEquipmentBrand = eq.brand?.trim().orEmpty()
+                                                    selectedEquipmentBtus = eq.btu?.trim().orEmpty()
+                                                    selectedEquipmentSector = eq.sector?.trim().orEmpty()
                                                     equipmentExpanded = false
                                                 }
                                             )
@@ -665,6 +680,9 @@ fun CreateServiceOrderScreen(
                                             selectedEquipmentId = "OUTRO_EQUIPAMENTO"
                                             selectedEquipmentName = "OUTRO EQUIPAMENTO (Avulso)"
                                             selectedEquipmentDisplay = "OUTRO EQUIPAMENTO (AVULSO)"
+                                            selectedEquipmentBrand = ""
+                                            selectedEquipmentBtus = ""
+                                            selectedEquipmentSector = ""
                                             equipmentExpanded = false
                                         }
                                     )
@@ -775,6 +793,70 @@ fun CreateServiceOrderScreen(
                 }
             }
 
+            // SEÇÃO DE RELATÓRIO TÉCNICO (OBSERVAÇÃO GERAL — LOGO ACIMA DA ÁREA DO FISCAL)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(BluePrimary.copy(alpha = 0.12f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Description,
+                                contentDescription = null,
+                                tint = BluePrimary,
+                                modifier = Modifier.size(17.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "RELATÓRIO TÉCNICO",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Black,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "Observação geral exibida na folha de impressão e na aprovação",
+                                fontSize = 10.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = technicalReport,
+                        onValueChange = { technicalReport = it.uppercase(Locale.getDefault()) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 96.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                        minLines = 3,
+                        maxLines = 6,
+                        placeholder = {
+                            Text(
+                                "Descreva observações gerais, recomendações técnicas ou detalhes adicionais do atendimento...",
+                                fontSize = 11.sp
+                            )
+                        }
+                    )
+                }
+            }
+
             // SEÇÃO 3: FISCAL / RESPONSÁVEL DO CLIENTE E ASSINATURA DIGITAL
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -840,6 +922,56 @@ fun CreateServiceOrderScreen(
                             },
                             placeholder = {
                                 Text("Matrícula funcional ou documento do fiscal", fontSize = 11.sp)
+                            },
+                            singleLine = true
+                        )
+                    }
+
+                    // Função do Fiscal
+                    Column {
+                        Text(
+                            text = "FUNÇÃO",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = fiscalRole,
+                            onValueChange = { fiscalRole = it.uppercase(Locale.getDefault()) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                            leadingIcon = {
+                                Icon(Icons.Default.Badge, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
+                            },
+                            placeholder = {
+                                Text("Cargo ou função do responsável / fiscal", fontSize = 11.sp)
+                            },
+                            singleLine = true
+                        )
+                    }
+
+                    // E-mail / Contato do Fiscal
+                    Column {
+                        Text(
+                            text = "E-MAIL / CONTATO",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextSecondary
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = fiscalContact,
+                            onValueChange = { fiscalContact = it.uppercase(Locale.getDefault()) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                            leadingIcon = {
+                                Icon(Icons.Default.Email, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
+                            },
+                            placeholder = {
+                                Text("E-mail ou telefone de contato do fiscal", fontSize = 11.sp)
                             },
                             singleLine = true
                         )

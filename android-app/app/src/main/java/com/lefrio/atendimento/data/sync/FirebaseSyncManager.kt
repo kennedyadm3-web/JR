@@ -482,6 +482,12 @@ class FirebaseSyncManager(private val context: Context) {
                 val osNumber = payload.optString("osNumber", "").trim()
 
                 val routeNotes = payload.optString("routeNotes", "")
+                val clientSigneeRole = payload.optString("clientSigneeRole", "").trim()
+                    .ifBlank { payload.optString("clientRepresentativeRole", "").trim() }
+                    .uppercase()
+                val clientSigneeContact = payload.optString("clientSigneeContact", "").trim()
+                    .ifBlank { payload.optString("clientRepresentativeContact", "").trim() }
+                    .uppercase()
                 val otherPhotoPaths = parseJsonStringArray(payload.optJSONArray("otherPhotoPaths"))
 
                 val checklistArr = payload.optJSONArray("checklist") ?: JSONArray()
@@ -556,6 +562,8 @@ class FirebaseSyncManager(private val context: Context) {
                         "clientSignatureDate" to (if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso),
                         "clientSigneeName" to clientRepresentative,
                         "clientSigneeRegistration" to clientSigneeDoc,
+                        "clientSigneeRole" to clientSigneeRole,
+                        "clientSigneeContact" to clientSigneeContact,
                         "completionDate" to (if (completionDate.isNotBlank()) completionDate else nowIso),
                         "finishedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
                         "techFinalizedAt" to (if (completionDate.isNotBlank()) completionDate else nowIso),
@@ -641,9 +649,13 @@ class FirebaseSyncManager(private val context: Context) {
                         "status" to "aberta",
                         "clientRepresentative" to clientRepresentative,
                         "clientRepresentativeMatricula" to clientSigneeDoc,
+                        "clientRepresentativeRole" to clientSigneeRole,
+                        "clientRepresentativeContact" to clientSigneeContact,
                         "clientSigneeName" to clientRepresentative,
                         "clientSigneeDoc" to clientSigneeDoc,
                         "clientSigneeRegistration" to clientSigneeDoc,
+                        "clientSigneeRole" to clientSigneeRole,
+                        "clientSigneeContact" to clientSigneeContact,
                         "clientSignatureDate" to effectiveSigDate,
                         "completionDate" to effectiveFinDate,
                         "finishedAt" to effectiveFinDate,
@@ -653,6 +665,7 @@ class FirebaseSyncManager(private val context: Context) {
                         "clientSignature" to clientSignature,
                         "hasClientSignature" to clientSignature.isNotBlank(),
                         "generalNotes" to routeNotes,
+                        "technicalReport" to routeNotes,
                         "routeNotes" to routeNotes,
                         "otherPhotos" to encodedOtherPhotos,
                         "photos" to encodedOtherPhotos,
@@ -741,6 +754,12 @@ class FirebaseSyncManager(private val context: Context) {
                 val fiscalRep = payload.optString("clientRepresentative", "").trim()
                 val fiscalDoc = payload.optString("clientSigneeDoc", "").trim()
                     .ifBlank { payload.optString("clientSigneeRegistration", "").trim() }
+                val fiscalRole = payload.optString("clientRepresentativeRole", "").trim()
+                    .ifBlank { payload.optString("clientSigneeRole", "").trim() }
+                val fiscalContact = payload.optString("clientRepresentativeContact", "").trim()
+                    .ifBlank { payload.optString("clientSigneeContact", "").trim() }
+                val techReport = payload.optString("technicalReport", "").trim()
+                    .ifBlank { payload.optString("routeNotes", "").trim() }
 
                 val osMap = hashMapOf<String, Any>(
                     "id" to orderId,
@@ -751,6 +770,9 @@ class FirebaseSyncManager(private val context: Context) {
                     "addressStreet" to addressStreet,
                     "equipmentId" to payload.optString("equipmentId", ""),
                     "equipmentName" to payload.optString("equipmentName", ""),
+                    "equipmentBrand" to payload.optString("equipmentBrand", "").trim().uppercase(),
+                    "equipmentBtus" to payload.optString("equipmentBtus", "").trim().uppercase(),
+                    "equipmentSector" to payload.optString("equipmentSector", "").trim().uppercase(),
                     "status" to if (isTechFinalized) "aberta" else payload.optString("status", "aberta"),
                     "type" to payload.optString("type", "MANUTENÇÃO CORRETIVA CONTRATO").uppercase(),
                     "isWorkshop" to false,
@@ -764,14 +786,20 @@ class FirebaseSyncManager(private val context: Context) {
                     "description" to payload.optString("description", "").trim().uppercase(),
                     "diagnosis" to payload.optString("diagnosis", "").trim().uppercase(),
                     "solution" to payload.optString("solution", "").trim().uppercase(),
+                    "technicalReport" to techReport.uppercase(),
+                    "routeNotes" to techReport.uppercase(),
                     "services" to emptyList<Map<String, Any>>(),
                     "products" to emptyList<Map<String, Any>>(),
                     "totalValue" to 0.0,
                     "clientRepresentative" to fiscalRep.uppercase(),
                     "clientRepresentativeMatricula" to fiscalDoc.uppercase(),
+                    "clientRepresentativeRole" to fiscalRole.uppercase(),
+                    "clientRepresentativeContact" to fiscalContact.uppercase(),
                     "clientSigneeName" to fiscalRep.uppercase(),
                     "clientSigneeRegistration" to fiscalDoc.uppercase(),
                     "clientSigneeDoc" to fiscalDoc.uppercase(),
+                    "clientSigneeRole" to fiscalRole.uppercase(),
+                    "clientSigneeContact" to fiscalContact.uppercase(),
                     "clientSignatureDate" to sigDateIso,
                     "completionDate" to completionIso,
                     "finishedAt" to finishedIso,

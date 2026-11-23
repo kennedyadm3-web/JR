@@ -451,10 +451,10 @@ export function PMOCDocumentViewerModal({
               </tbody>
             </table>
 
-            {/* OBSERVAÇÕES GERAIS */}
-            {record.routeNotes && (
-              <div className="border border-black p-2 mt-3 text-[8.5px]">
-                <span className="font-bold uppercase">Obs Geral: </span>
+            {/* OBSERVAÇÕES GERAIS / RELATÓRIO TÉCNICO */}
+            {record.routeNotes && record.routeNotes.trim().length > 0 && (
+              <div className="border border-black p-2 mt-3 text-[8.5px] whitespace-pre-line">
+                <span className="font-bold uppercase">Observações Gerais / Relatório Técnico: </span>
                 {record.routeNotes}
               </div>
             )}
@@ -486,6 +486,14 @@ export function PMOCDocumentViewerModal({
                   {record.clientSigneeName || '-'}
                   {record.clientSigneeRegistration ? ` (Matrícula: ${record.clientSigneeRegistration})` : ''}
                 </span>
+                {(record.clientSigneeRole || record.clientSigneeContact) && (
+                  <span className="text-[8.5px] font-semibold text-gray-700 mt-0.5 uppercase">
+                    {[
+                      record.clientSigneeRole ? `Função: ${record.clientSigneeRole}` : null,
+                      record.clientSigneeContact ? `Contato: ${record.clientSigneeContact}` : null
+                    ].filter(Boolean).join(' • ')}
+                  </span>
+                )}
                 {(() => {
                   const { clientSignatureDate: pSig } = getRecordTimestamps(record);
                   if (pSig && (pSig.includes('T') || pSig.includes(':'))) {

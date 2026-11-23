@@ -29,6 +29,8 @@ data class OrderDetailUiState(
     val progressPercentage: Float = 0f,
     val fiscalName: String = "",
     val fiscalDoc: String = "",
+    val fiscalRole: String = "",
+    val fiscalContact: String = "",
     val routeNotes: String = "",
     val otherPhotos: List<String> = emptyList(),
     val isSavingEquipment: Boolean = false,
@@ -63,7 +65,14 @@ class OrderDetailViewModel(
 
     private fun loadOrderDetails() {
         val initialOtherPhotos = repository.getOtherPhotos(orderId)
-        _uiState.update { it.copy(otherPhotos = initialOtherPhotos) }
+        val (savedRole, savedContact) = repository.getFiscalExtraDraft(orderId)
+        _uiState.update {
+            it.copy(
+                otherPhotos = initialOtherPhotos,
+                fiscalRole = it.fiscalRole.ifBlank { savedRole },
+                fiscalContact = it.fiscalContact.ifBlank { savedContact }
+            )
+        }
 
         viewModelScope.launch {
             repository.getOrderById(orderId).collect { orderEntity ->
@@ -121,6 +130,16 @@ class OrderDetailViewModel(
         }
     }
 
+    fun updateFiscalRole(role: String) {
+        _uiState.update { it.copy(fiscalRole = role) }
+        repository.saveFiscalExtraDraft(orderId, role, _uiState.value.fiscalContact)
+    }
+
+    fun updateFiscalContact(contact: String) {
+        _uiState.update { it.copy(fiscalContact = contact) }
+        repository.saveFiscalExtraDraft(orderId, _uiState.value.fiscalRole, contact)
+    }
+
     fun updateHasSignature(hasSig: Boolean) {
         _uiState.update { it.copy(hasSignature = hasSig) }
     }
@@ -132,6 +151,26 @@ class OrderDetailViewModel(
         routeNotesSaveJob = viewModelScope.launch {
             delay(500)
             repository.saveGeneralNotes(orderId, notes)
+        }
+    }
+
+    fun appendRouteNotesFromVoice(transcribedSegment: String) {
+        val cleanSegment = transcribedSegment.trim().uppercase(Locale("pt", "BR"))
+        if (cleanSegment.isBlank()) return
+
+        routeNotesInitialized = true
+        val current = _uiState.value.routeNotes.trimEnd()
+        val combined = if (current.isBlank()) {
+            cleanSegment
+        } else {
+            val separator = if (current.endsWith(".") || current.endsWith("!") || current.endsWith("?") || current.endsWith("\n")) " " else ". "
+            "$current$separator$cleanSegment"
+        }
+
+        _uiState.update { it.copy(routeNotes = combined) }
+        routeNotesSaveJob?.cancel()
+        routeNotesSaveJob = viewModelScope.launch {
+            repository.saveGeneralNotes(orderId, combined)
         }
     }
 
@@ -290,6 +329,8 @@ class OrderDetailViewModel(
                     orderId = orderId,
                     signeeName = name,
                     signeeDoc = doc,
+                    signeeRole = currentState.fiscalRole.trim(),
+                    signeeContact = currentState.fiscalContact.trim(),
                     signatureDate = nowIso,
                     signatureFilePath = signatureFilePath,
                     completionDate = nowIso,

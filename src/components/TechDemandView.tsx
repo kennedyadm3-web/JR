@@ -1600,7 +1600,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
           plannedDate: os.plannedDate || effectiveItineraryDate,
           itineraryOrder: os.itineraryOrder !== undefined && os.itineraryOrder !== null ? os.itineraryOrder : 99999,
           notes: os.description || '',
-          routeNotes: os.diagnosis ? `${os.diagnosis} | ${os.solution || ''}` : (os.solution || os.type || ''),
+          routeNotes: os.technicalReport || os.routeNotes || (os.diagnosis ? `${os.diagnosis} | ${os.solution || ''}` : (os.solution || os.type || '')),
           itemType: 'service_order',
           serviceOrder: os,
           address: synthesizedAddr,
@@ -5520,6 +5520,16 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                                   </span>
                                 )}
                               </span>
+                              {(record.clientSigneeRole || record.clientSigneeContact) && (
+                                <div className="text-[10px] font-semibold text-slate-600 leading-tight space-y-0.5">
+                                  {record.clientSigneeRole && (
+                                    <span className="block uppercase">Função: <strong className="text-slate-800">{record.clientSigneeRole}</strong></span>
+                                  )}
+                                  {record.clientSigneeContact && (
+                                    <span className="block uppercase">Contato: <strong className="text-slate-800">{record.clientSigneeContact}</strong></span>
+                                  )}
+                                </div>
+                              )}
                               {(() => {
                                 const { clientSignatureDate: sDate } = getRecordTimestamps(record);
                                 if (record.clientSignature && sDate && (sDate.includes('T') || sDate.includes(':'))) {
@@ -5623,13 +5633,13 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                           </div>
                         </div>
 
-                        {/* RELATO TÉCNICO / OBSERVAÇÕES GERAIS DO ATENDIMENTO */}
+                        {/* RELATÓRIO TÉCNICO / OBSERVAÇÕES GERAIS DO ATENDIMENTO */}
                         {record.routeNotes && record.routeNotes.trim().length > 0 && (
                           <div className="mt-4 p-4 bg-blue-50/60 border border-blue-200 rounded-2xl">
                             <div className="flex items-center gap-2 mb-1.5">
                               <FileText className="w-4 h-4 text-blue-600 shrink-0" />
                               <span className="text-[10px] font-black uppercase tracking-wider text-blue-900">
-                                Relato Técnico / Observações Gerais do Atendimento
+                                Relatório Técnico / Observações Gerais do Atendimento
                               </span>
                             </div>
                             <p className="text-xs font-semibold text-slate-800 whitespace-pre-line leading-relaxed bg-white border border-blue-100 rounded-xl px-3.5 py-2.5">
@@ -6364,6 +6374,16 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                         <span className="text-emerald-700 font-bold flex items-center justify-end gap-1">
                           <Check className="w-3.5 h-3.5" /> Assinado ({recordToHomologate.clientSigneeName || 'Responsável'})
                         </span>
+                        {recordToHomologate.clientSigneeRole && (
+                          <span className="block text-[10px] font-semibold text-slate-600 uppercase">
+                            Função: {recordToHomologate.clientSigneeRole}
+                          </span>
+                        )}
+                        {recordToHomologate.clientSigneeContact && (
+                          <span className="block text-[10px] font-semibold text-slate-600 uppercase">
+                            Contato: {recordToHomologate.clientSigneeContact}
+                          </span>
+                        )}
                         {(() => {
                           const { clientSignatureDate: hSig } = getRecordTimestamps(recordToHomologate);
                           if (hSig && (hSig.includes('T') || hSig.includes(':'))) {
@@ -6380,6 +6400,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                       <span className="text-amber-600 font-bold">Sem assinatura registrada</span>
                     )}
                   </div>
+                  {recordToHomologate.routeNotes && recordToHomologate.routeNotes.trim().length > 0 && (
+                    <div className="border-t border-slate-200/60 pt-2">
+                      <span className="text-slate-400 font-bold uppercase text-[10px] tracking-wider block mb-1">Relatório Técnico / Obs. Geral:</span>
+                      <p className="text-[11px] font-semibold text-slate-700 whitespace-pre-line bg-white border border-slate-200 rounded-lg px-2.5 py-1.5">
+                        {recordToHomologate.routeNotes}
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-2xl p-3.5 text-[11px] text-emerald-900 leading-snug flex items-start gap-2.5">
@@ -7175,16 +7203,16 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
             </tbody>
           </table>
 
-          {/* Route general notes / Relato Técnico */}
+          {/* Route general notes / Relatório Técnico */}
           {printGeneralNotesOption && (
             isPrintingBlank ? (
               <div className="border border-black p-2 mt-4 text-[9px] h-14">
-                <span className="font-bold uppercase">Observações do Cliente / Técnico:</span>
+                <span className="font-bold uppercase">Observações Gerais / Relatório Técnico:</span>
               </div>
             ) : (
               isPrintingChecklist.routeNotes && isPrintingChecklist.routeNotes.trim().length > 0 && (
                 <div className="border border-black p-2 mt-4 text-[9px] whitespace-pre-line">
-                  <span className="font-bold uppercase">Observações / Relato Técnico: </span>
+                  <span className="font-bold uppercase">Observações Gerais / Relatório Técnico: </span>
                   {isPrintingChecklist.routeNotes}
                 </div>
               )
@@ -7234,6 +7262,14 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
                       {isPrintingChecklist.clientSigneeName || '-'}
                       {isPrintingChecklist.clientSigneeRegistration ? " (Matrícula: " + isPrintingChecklist.clientSigneeRegistration + ")" : ""}
                     </span>
+                    {(isPrintingChecklist.clientSigneeRole || isPrintingChecklist.clientSigneeContact) && (
+                      <span className="text-[9px] font-semibold text-gray-700 mt-0.5 uppercase">
+                        {[
+                          isPrintingChecklist.clientSigneeRole ? `Função: ${isPrintingChecklist.clientSigneeRole}` : null,
+                          isPrintingChecklist.clientSigneeContact ? `Contato: ${isPrintingChecklist.clientSigneeContact}` : null
+                        ].filter(Boolean).join(' • ')}
+                      </span>
+                    )}
                     {(() => {
                       const { clientSignatureDate: pSig } = getRecordTimestamps(isPrintingChecklist);
                       if (pSig && (pSig.includes('T') || pSig.includes(':'))) {
