@@ -309,20 +309,36 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   const [executionFilter, setExecutionFilter] = useState<'all' | 'executed' | 'pending'>('all');
   const [pautaSearchTerm, setPautaSearchTerm] = useState('');
 
+  const isFieldTechUser = userRole === UserRole.TECHNICIAN;
+
   const [records, setRecords] = useState<MaintenanceRecord[]>(() => {
+    // Cache offline de localStorage é exclusivo para o técnico em campo (ou navegador explicitamente offline).
+    // No painel administrativo online, nunca inicializa com cache velho para evitar contadores fantasmas/defasados.
+    if (!isFieldTechUser && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      return [];
+    }
     try {
       const saved = localStorage.getItem('lefrio_cached_records');
       return saved ? JSON.parse(saved) : [];
     } catch { return []; }
   });
+  const [livePreCompletedRecords, setLivePreCompletedRecords] = useState<MaintenanceRecord[]>([]);
+  const [hasServerPreCompletedSync, setHasServerPreCompletedSync] = useState<boolean>(false);
+  const [isSyncingApprovals, setIsSyncingApprovals] = useState<boolean>(false);
   const [deviceSettings, setDeviceSettings] = useState<DeviceSettings | null>(null);
   const [addresses, setAddresses] = useState<Address[]>(() => {
+    if (!isFieldTechUser && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      return [];
+    }
     try {
       const saved = localStorage.getItem('lefrio_cached_addresses');
       return saved ? JSON.parse(saved) : [];
     } catch { return []; }
   });
   const [clients, setClients] = useState<Client[]>(() => {
+    if (!isFieldTechUser && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      return [];
+    }
     try {
       const saved = localStorage.getItem('lefrio_cached_clients');
       return saved ? JSON.parse(saved) : [];
@@ -336,7 +352,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(() => typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [isTabletMode, setIsTabletMode] = useState(() => {
-    const isOffice = userRole === UserRole.ADMIN || userRole === UserRole.ASSISTANT;
+    const isOffice = userRole === UserRole.ADMIN || userRole === UserRole.ASSISTANT || userRole === UserRole.SUPPORT;
     return !isOffice;
   });
   const [visibleDemandLimit, setVisibleDemandLimit] = useState<number>(80);
@@ -982,31 +998,70 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   }, [itineraryDate, activeTab, isTabletMode, userRole]);
 
   // Assinatura em tempo real de atendimentos aguardando aprovação (custo mínimo: lê apenas docs status == 'pre_completed')
-  // Garante que atendimentos finalizados no app Android ou PWA cheguem imediatamente à aba Aprovação!
+  // Garante que atendimentos finalizados no app Android ou PWA cheguem imediatamente à aba Aprovação
+  // e que atendimentos aprovados/devolvidos em qualquer outro navegador saiam imediatamente da fila!
   useEffect(() => {
     if (isTabletMode || userRole === UserRole.TECHNICIAN) return;
 
-    const unsubscribe = dataService.subscribePreCompletedRecords((livePreCompleted) => {
+    const unsubscribe = dataService.subscribePreCompletedRecords((livePreCompleted, meta) => {
+      const fromCache = Boolean(meta?.fromCache);
+      const isOfflineNow = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+      // Quando online, aguarda confirmação do servidor (!fromCache) para atualizar a fonte autoritativa
+      // evitando exibir dados obsoletos do IndexedDB local antes da confirmação do Firestore.
+      if (fromCache && !isOfflineNow) {
+        return;
+      }
+
       const liveIds = new Set(livePreCompleted.map(r => r.id));
       const liveKeys = new Set(livePreCompleted.map(r => `${r.month}_${r.addressId}`));
 
+      setLivePreCompletedRecords(livePreCompleted);
+      if (!fromCache) {
+        setHasServerPreCompletedSync(true);
+      }
+
+      let removedStaleCurrentMonth = false;
       setRecords(prev => {
-        // Mantém registros anteriores que não foram substituídos pelos pre_completed em tempo real,
-        // e rebaixa registros que antes estavam como pre_completed mas já saíram da fila no servidor
+        // Remove registros substituídos pelos dados mais recentes do servidor E remove registros
+        // que antes estavam como PRE_COMPLETED em memória mas já foram aprovados/devolvidos no servidor!
         const kept = prev.filter(r => {
           if (liveIds.has(r.id)) return false;
-          if (r.addressId && r.month && liveKeys.has(`${r.month}_${r.addressId}`) && r.status !== MaintenanceStatus.COMPLETED) return false;
+          if (r.addressId && r.month && liveKeys.has(`${r.month}_${r.addressId}`) && r.status !== MaintenanceStatus.COMPLETED) {
+            return false;
+          }
+          if (r.status === MaintenanceStatus.PRE_COMPLETED) {
+            // Não está mais na lista autoritativa do servidor (foi aprovado ou devolvido em outra aba/navegador)
+            if (r.month === month) {
+              removedStaleCurrentMonth = true;
+            }
+            return false;
+          }
           return true;
         });
         const merged = [...livePreCompleted, ...kept];
         return dataService.deduplicateRecordsList(merged).deduplicated;
       });
+
+      // Se algum atendimento do mês atual saiu da fila de aprovação remotamente, atualiza os registros do mês
+      // direto do servidor para que a pauta semanal reflita o novo status (Concluído ou Pendente) sem recarregar a página.
+      if (removedStaleCurrentMonth && !fromCache) {
+        dataService.getRecords(month, { lightweight: true, forceServer: true })
+          .then(freshMonth => {
+            if (!freshMonth) return;
+            setRecords(prev => {
+              const otherMonths = prev.filter(r => r.month !== month);
+              return dataService.deduplicateRecordsList([...freshMonth, ...otherMonths]).deduplicated;
+            });
+          })
+          .catch(() => {});
+      }
     });
 
     return () => {
       unsubscribe();
     };
-  }, [isTabletMode, userRole]);
+  }, [isTabletMode, userRole, month]);
 
   // Sincronização automática com cooldown de 5 minutos quando o usuário volta ao app (evita recarregar tudo ao alternar janelas)
   useEffect(() => {
@@ -1122,6 +1177,9 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
   const loadData = async (forceBypassCache: boolean = false) => {
     setLoading(true);
+    if (forceBypassCache) {
+      setIsSyncingApprovals(true);
+    }
     lastSyncTimestampRef.current = Date.now();
     if (forceBypassCache) {
       dataService.clearCache('records_');
@@ -1129,10 +1187,12 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       loadedApprovedRef.current = false;
     }
     try {
-      // OTIMIZAÇÃO CRÍTICA: Carrega apenas o mês selecionado e os metadados essenciais na abertura
+      const isOfficeOnline = !isTabletMode && userRole !== UserRole.TECHNICIAN && (typeof navigator === 'undefined' || navigator.onLine !== false);
+      // OTIMIZAÇÃO CRÍTICA: No modo administrativo online, garante leitura direta do servidor Firestore
+      // para nunca exibir dados defasados do IndexedDB local ao abrir a página ou clicar em Atualizar.
       const [monthRecords, pre, a, c, t, settings, soSettings] = await Promise.all([
-        dataService.getRecords(month, { lightweight: true }).catch(err => { console.error('Error loading records for month:', month, err); return []; }),
-        dataService.getPreCompletedRecords().catch(err => { console.error('Error loading pre-completed records:', err); return []; }),
+        dataService.getRecords(month, { lightweight: true, forceServer: forceBypassCache || isOfficeOnline }).catch(err => { console.error('Error loading records for month:', month, err); return []; }),
+        dataService.getPreCompletedRecords({ forceServer: forceBypassCache || isOfficeOnline }).catch(err => { console.error('Error loading pre-completed records:', err); return []; }),
         dataService.getAddresses().catch(err => { console.error('Error loading addresses:', err); return []; }),
         dataService.getClients().catch(err => { console.error('Error loading clients:', err); return []; }),
         dataService.getTechnicians().catch(err => { console.error('Error loading technicians:', err); return []; }),
@@ -1140,13 +1200,22 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         dataService.getServiceOrderSettings().catch(err => { console.warn('Error loading service order settings:', err); return null; })
       ]);
 
-      const allLoadedRecords = [...(monthRecords || []), ...(pre || [])].filter(Boolean);
+      const authoritativePre = pre || [];
+      if (!isTabletMode && userRole !== UserRole.TECHNICIAN) {
+        setLivePreCompletedRecords(authoritativePre);
+        setHasServerPreCompletedSync(true);
+      }
+
+      const allLoadedRecords = [...(monthRecords || []), ...authoritativePre].filter(Boolean);
       const { deduplicated } = dataService.deduplicateRecordsList(allLoadedRecords);
       const combinedRecords = deduplicated;
 
       setRecords(prev => {
         if (!forceBypassCache && prev.length > 0) {
-          const merged = [...combinedRecords, ...prev.filter(r => r.month !== month)];
+          // Nunca re-injeta registros PRE_COMPLETED antigos de outros meses vindos de prev/cache,
+          // pois `authoritativePre` já contém 100% da fila de aprovação atual de todos os meses.
+          const otherMonthsClean = prev.filter(r => r.month !== month && r.status !== MaintenanceStatus.PRE_COMPLETED);
+          const merged = [...combinedRecords, ...otherMonthsClean];
           return dataService.deduplicateRecordsList(merged).deduplicated;
         }
         return combinedRecords;
@@ -1171,20 +1240,26 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         dataService.getRecentApprovedRecords(30).then(appvd => setRecentApprovedRecords(appvd || [])).catch(() => {});
       }
 
-      // Persiste cache para acesso offline instantâneo no aplicativo Android/Tablet do técnico
+      // Persiste cache local SOMENTE no modo Tablet/Técnico (campo offline).
+      // No modo Administrativo desktop, remove cache antigo do localStorage para nunca exibir números defasados.
       try {
         if (typeof window !== 'undefined') {
-          localStorage.setItem('lefrio_cached_records', JSON.stringify(combinedRecords.slice(0, 500)));
-          localStorage.setItem('lefrio_cached_addresses', JSON.stringify(a || []));
-          localStorage.setItem('lefrio_cached_clients', JSON.stringify(c || []));
+          if (isTabletMode || userRole === UserRole.TECHNICIAN) {
+            localStorage.setItem('lefrio_cached_records', JSON.stringify(combinedRecords.slice(0, 500)));
+            localStorage.setItem('lefrio_cached_addresses', JSON.stringify(a || []));
+            localStorage.setItem('lefrio_cached_clients', JSON.stringify(c || []));
+          } else {
+            localStorage.removeItem('lefrio_cached_records');
+          }
         }
       } catch (e) {
-        console.warn('Erro ao salvar cache local de endereços e roteiro:', e);
+        console.warn('Erro ao gerenciar cache local de endereços e roteiro:', e);
       }
     } catch (error) {
       console.error('Error loading tech demand data:', error);
     } finally {
       setLoading(false);
+      setIsSyncingApprovals(false);
     }
   };
 
@@ -1740,8 +1815,13 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
   };
 
   // Pre-completed records for the approval workflow (deduplicated by address and month)
+  // No modo administrativo, usa diretamente a fonte autoritativa em tempo real do servidor (livePreCompletedRecords)
+  // para garantir contagem 100% idêntica entre todos os navegadores, abas e domínios.
   const preCompletedRecords = useMemo(() => {
-    const raw = records.filter(r => {
+    const isAdminDesktop = !isTabletMode && userRole !== UserRole.TECHNICIAN;
+    const sourceList = isAdminDesktop ? livePreCompletedRecords : records;
+
+    const raw = sourceList.filter(r => {
       if (!r || isOSRecord(r)) return false;
       // REGRA: Deixe pendente para aprovação SOMENTE os atendimentos de ontem (28/09/2026) e hoje (29/09/2026) ou futuros.
       // Todo o restante anterior já foi formalmente homologado pelo administrativo.
@@ -1801,7 +1881,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
     });
 
     return Array.from(map.values());
-  }, [records]);
+  }, [livePreCompletedRecords, records, isTabletMode, userRole]);
 
   // Group technicians with pending approvals (based on technician 1)
   const pendingApprovalTechs = useMemo(() => {
@@ -2729,7 +2809,8 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
         console.error("Erro ao processar jateamento na aprovação:", jetErr);
       }
 
-      setRecords(prev => prev.map(r => r.id === record.id ? { ...r, ...updates } : r));
+      setRecords(prev => prev.map(r => (r.id === record.id || (r.addressId === record.addressId && r.month === record.month)) ? { ...r, ...updates } : r));
+      setLivePreCompletedRecords(prev => prev.filter(r => r.id !== record.id && !(r.addressId === record.addressId && r.month === record.month)));
       setRecentApprovedRecords(prev => {
         const next = [{ ...record, ...updates }, ...prev.filter(r => r.id !== record.id)];
         next.sort((a, b) => {
@@ -2816,6 +2897,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       }
 
       setRecords(prev => prev.map(r => (r.id === record.id || (r.addressId === record.addressId && r.month === record.month)) ? { ...r, ...updates } : r));
+      setLivePreCompletedRecords(prev => prev.filter(r => r.id !== record.id && !(r.addressId === record.addressId && r.month === record.month)));
       setRecentApprovedRecords(prev => prev.filter(r => r.id !== record.id && r.addressId !== record.addressId));
       setSelectedApprovalRecordId(null);
       alert("Atendimento devolvido como rascunho com sucesso!\n\nO status retornou para 'Em Aberto' e todos os dados já preenchidos (checklists das máquinas, nome do cliente, matrícula e assinaturas digitais) foram totalmente mantidos para nova edição no aplicativo.");
@@ -2842,6 +2924,11 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
       await dataService.upsertRecord({ ...record, ...updates });
 
       setRecords(prev => prev.map(r => (r.id === record.id || (r.addressId === record.addressId && r.month === record.month)) ? { ...r, ...updates } : r));
+      setLivePreCompletedRecords(prev => {
+        const updatedItem = { ...record, ...updates } as MaintenanceRecord;
+        const withoutOld = prev.filter(r => r.id !== record.id && !(r.addressId === record.addressId && r.month === record.month));
+        return [updatedItem, ...withoutOld];
+      });
       setRecentApprovedRecords(prev => prev.filter(r => r.id !== record.id && r.addressId !== record.addressId));
       setSelectedApprovalRecordId(record.id);
       setApprovalSidebarTab('pending');
@@ -3213,7 +3300,7 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
             >
               <ClipboardCheck className="w-4 h-4 text-amber-500" />
               Aprovação
-              {preCompletedRecords.length > 0 && (
+              {hasServerPreCompletedSync && preCompletedRecords.length > 0 && (
                 <span className="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full font-black ml-1.5 animate-pulse">
                   {preCompletedRecords.length}
                 </span>
@@ -4833,20 +4920,32 @@ export default function TechDemandView({ userRole, managerClientId, userProfile 
 
                 {approvalSidebarTab === 'pending' ? (
                   <>
-                    <div className="border-b border-gray-150 pb-2 flex items-center justify-between">
+                    <div className="border-b border-gray-150 pb-2 flex items-center justify-between gap-2">
                       <h4 className="font-extrabold text-[11px] text-gray-500 uppercase tracking-wider flex items-center gap-1.5">
                         <Clock className="w-3.5 h-3.5 text-amber-500" />
                         Aguardando Aprovação ({filteredPreCompletedRecords.length}{approvalTechFilter ? ` de ${preCompletedRecords.length}` : ''})
                       </h4>
-                      {approvalTechFilter && (
+                      <div className="flex items-center gap-2 shrink-0">
+                        {approvalTechFilter && (
+                          <button
+                            type="button"
+                            onClick={() => setApprovalTechFilter(null)}
+                            className="text-[10px] font-bold text-amber-600 hover:text-amber-700 underline cursor-pointer"
+                          >
+                            Limpar
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => setApprovalTechFilter(null)}
-                          className="text-[10px] font-bold text-amber-600 hover:text-amber-700 underline cursor-pointer"
+                          onClick={() => loadData(true)}
+                          disabled={loading || isSyncingApprovals}
+                          title="Sincronizar fila diretamente com o servidor"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-50"
                         >
-                          Limpar
+                          <RefreshCw className={cn("w-3 h-3", (loading || isSyncingApprovals) && "animate-spin")} />
+                          Atualizar
                         </button>
-                      )}
+                      </div>
                     </div>
 
                     {/* FILTRO POR TÉCNICO (TAGS / CHIPS) */}

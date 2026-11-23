@@ -17,6 +17,7 @@ import {
   serverTimestamp, 
   writeBatch,
   getDocsFromCache,
+  getDocsFromServer,
   getDocFromCache,
   getCountFromServer,
   onSnapshot
@@ -57,8 +58,13 @@ const isRetryableFirestoreError = (error: any): boolean => {
   );
 };
 
-const getDocs = async (q: any, timeoutMs: number = 25000): Promise<any> => {
-  const attemptFetch = async (ms: number) => fetchWithTimeout(firestoreGetDocs(q), ms, 'Firestore getDocs timeout');
+const getDocs = async (q: any, timeoutMs: number = 25000, preferServer: boolean = false): Promise<any> => {
+  const attemptFetch = async (ms: number) =>
+    fetchWithTimeout(
+      preferServer ? getDocsFromServer(q) : firestoreGetDocs(q),
+      ms,
+      'Firestore getDocs timeout'
+    );
 
   try {
     if (isClientOffline()) {
@@ -406,7 +412,7 @@ const TTL_CONFIG: Record<string, number> = {
   
   // Histórico de manutenções homologadas: 10 minutos
   records_approved: 10 * 60 * 1000,
-  records_pre_completed: 5 * 60 * 1000,
+  records_pre_completed: 15 * 1000,
   
   // Registros agendados e por data: 2 minutos (alta fidelidade para técnicos em campo)
   records_plannedDate: 2 * 60 * 1000,
@@ -1396,13 +1402,17 @@ export const dataService = {
     }
   },
 
-  async getRecords(month: string, options?: { lightweight?: boolean }): Promise<MaintenanceRecord[]> {
+  async getRecords(month: string, options?: { lightweight?: boolean; forceServer?: boolean }): Promise<MaintenanceRecord[]> {
     const isLight = options?.lightweight ?? false;
+    const forceServer = options?.forceServer ?? false;
     const cacheKey = isLight ? `records_light_${month}` : `records_${month}`;
+    if (forceServer) {
+      clearCache(cacheKey);
+    }
     return getCachedData(cacheKey, async () => {
       try {
         const q = query(collection(db, COLLECTIONS.RECORDS), where('month', '==', month));
-        const snapshot = await getDocs(q);
+        const snapshot = await getDocs(q, 25000, forceServer);
         const rawList = snapshot.docs.map(doc => {
           const data = doc.data() as any;
           if (isLight && Array.isArray(data.checklist)) {
@@ -1530,12 +1540,16 @@ export const dataService = {
     clearCache(prefix);
   },
 
-  async getPreCompletedRecords(): Promise<MaintenanceRecord[]> {
+  async getPreCompletedRecords(options?: { forceServer?: boolean }): Promise<MaintenanceRecord[]> {
+    const forceServer = options?.forceServer ?? false;
+    if (forceServer) {
+      clearCache('records_pre_completed');
+    }
     return getCachedData('records_pre_completed', async () => {
       try {
-        // OTIMIZAÇÃO FIRESTORE: Busca apenas documentos com status PRE_COMPLETED sem re-baixar o mês inteiro
+        // OTIMIZAÇÃO FIRESTORE: Busca apenas documentos com status PRE_COMPLETED diretamente do servidor quando online
         const q = query(collection(db, COLLECTIONS.RECORDS), where('status', '==', MaintenanceStatus.PRE_COMPLETED));
-        const snapshot = await getDocs(q);
+        const snapshot = await getDocs(q, 25000, forceServer || !isClientOffline());
         const rawList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as MaintenanceRecord));
 
         const { deduplicated } = deduplicateRecordsList(rawList);
@@ -1567,11 +1581,11 @@ export const dataService = {
         handleFirestoreError(e, OperationType.LIST, COLLECTIONS.RECORDS);
         return [];
       }
-    }, 2 * 60 * 1000);
+    }, forceServer ? 1 : 15 * 1000);
   },
 
   subscribePreCompletedRecords(
-    callback: (records: MaintenanceRecord[], meta?: { fromCache: boolean }) => void
+    callback: (records: MaintenanceRecord[], meta?: { fromCache: boolean; hasPendingWrites?: boolean }) => void
   ): () => void {
     try {
       const q = query(
@@ -1579,8 +1593,10 @@ export const dataService = {
         where('status', '==', MaintenanceStatus.PRE_COMPLETED)
       );
 
-      const unsub = onSnapshot(q, (snapshot) => {
-        clearCache('records_pre_completed');
+      const unsub = onSnapshot(q, { includeMetadataChanges: true }, (snapshot) => {
+        if (!snapshot.metadata.fromCache) {
+          clearCache('records_pre_completed');
+        }
         const rawList = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() } as MaintenanceRecord));
         const { deduplicated } = deduplicateRecordsList(rawList);
 
@@ -1601,7 +1617,10 @@ export const dataService = {
           return r.status === MaintenanceStatus.PRE_COMPLETED;
         });
 
-        callback(validPending, { fromCache: snapshot.metadata.fromCache });
+        callback(validPending, {
+          fromCache: snapshot.metadata.fromCache,
+          hasPendingWrites: snapshot.metadata.hasPendingWrites
+        });
       }, (err) => {
         console.warn('[Realtime Listener] Erro em subscribePreCompletedRecords:', err);
       });
@@ -4280,12 +4299,21 @@ export const dataService = {
     if (!withoutHash) return [];
 
     const upper = withoutHash.toUpperCase();
+    const withoutOsPrefix = upper.replace(/^OS[-_\s]*/i, '').trim();
     const candidates = Array.from(
-      new Set([upper, withoutHash, `#${upper}`, `#${withoutHash}`].filter(Boolean))
+      new Set([
+        upper,
+        withoutHash,
+        `#${upper}`,
+        `#${withoutHash}`,
+        withoutOsPrefix,
+        withoutOsPrefix ? `OS-${withoutOsPrefix}` : '',
+        withoutOsPrefix ? `#OS-${withoutOsPrefix}` : ''
+      ].filter(Boolean))
     ).slice(0, 10);
 
     const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
-    const idCandidates = Array.from(new Set([upper, withoutHash]));
+    const idCandidates = Array.from(new Set([upper, withoutHash, withoutOsPrefix].filter(Boolean)));
 
     try {
       const queries: Promise<any>[] = [

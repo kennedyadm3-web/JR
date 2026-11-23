@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -30,6 +31,7 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -39,6 +41,7 @@ import com.lefrio.atendimento.ui.dashboard.components.SyncStatusBar
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,7 +50,6 @@ fun DashboardScreen(
     viewModel: DashboardViewModel,
     onMenuClick: () -> Unit = {},
     onOrderClick: (orderId: String) -> Unit,
-    onExpensesClick: () -> Unit,
     onNotificationsClick: () -> Unit,
     onProfileClick: () -> Unit,
     onLogoutClick: () -> Unit
@@ -129,13 +131,6 @@ fun DashboardScreen(
                             imageVector = Icons.Default.Notifications,
                             contentDescription = "Avisos e Notificações",
                             tint = BluePrimary
-                        )
-                    }
-                    IconButton(onClick = onExpensesClick) {
-                        Icon(
-                            imageVector = Icons.Default.ReceiptLong,
-                            contentDescription = "Despesas de Rota",
-                            tint = Color(0xFF059669)
                         )
                     }
                     IconButton(
@@ -378,7 +373,7 @@ fun DashboardScreen(
                 Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                     OutlinedTextField(
                         value = uiState.searchQuery,
-                        onValueChange = { viewModel.setSearchQuery(it) },
+                        onValueChange = { viewModel.setSearchQuery(it.uppercase(Locale.getDefault())) },
                         placeholder = { Text("Buscar cliente, preventiva, O.S. ou rua...", fontSize = 12.sp) },
                         leadingIcon = {
                             Icon(
@@ -390,6 +385,7 @@ fun DashboardScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedContainerColor = Color.White,
                             unfocusedContainerColor = Color.White

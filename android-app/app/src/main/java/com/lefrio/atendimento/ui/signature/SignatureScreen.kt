@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -14,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -22,6 +24,7 @@ import com.lefrio.atendimento.ui.signature.components.SignaturePath
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,8 +45,8 @@ fun SignatureScreen(
     val scrollState = rememberScrollState()
 
     LaunchedEffect(order) {
-        order?.clientRepresentative?.let { if (it.isNotBlank()) signeeName = it }
-        order?.clientSigneeDoc?.let { if (it.isNotBlank()) signeeDoc = it }
+        order?.clientRepresentative?.let { if (it.isNotBlank()) signeeName = it.uppercase(Locale.getDefault()) }
+        order?.clientSigneeDoc?.let { if (it.isNotBlank()) signeeDoc = it.uppercase(Locale.getDefault()) }
     }
 
     Scaffold(
@@ -250,13 +253,14 @@ fun SignatureScreen(
 
                 OutlinedTextField(
                     value = signeeName,
-                    onValueChange = { signeeName = it },
+                    onValueChange = { signeeName = it.uppercase(Locale.getDefault()) },
                     label = { Text("Nome Completo do Recebedor", fontSize = 11.sp) },
                     leadingIcon = {
                         Icon(imageVector = Icons.Default.Person, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
                     },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                     singleLine = true
                 )
 
@@ -264,13 +268,14 @@ fun SignatureScreen(
 
                 OutlinedTextField(
                     value = signeeDoc,
-                    onValueChange = { signeeDoc = it },
+                    onValueChange = { signeeDoc = it.uppercase(Locale.getDefault()) },
                     label = { Text("Documento (RG ou CPF)", fontSize = 11.sp) },
                     leadingIcon = {
                         Icon(imageVector = Icons.Default.Badge, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
                     },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                     singleLine = true
                 )
 

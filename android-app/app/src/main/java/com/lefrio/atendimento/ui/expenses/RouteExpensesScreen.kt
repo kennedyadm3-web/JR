@@ -20,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -238,7 +239,7 @@ fun RouteExpensesScreen(
                             // Valor em R$
                             OutlinedTextField(
                                 value = amountText,
-                                onValueChange = { amountText = it.replace(",", ".") },
+                                onValueChange = { amountText = it.replace(",", ".").uppercase(Locale.getDefault()) },
                                 label = { Text("Valor (R$)", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: 50.00", fontSize = 11.sp) },
                                 leadingIcon = {
@@ -255,11 +256,12 @@ fun RouteExpensesScreen(
                             // Descrição / Estabelecimento
                             OutlinedTextField(
                                 value = description,
-                                onValueChange = { description = it },
+                                onValueChange = { description = it.uppercase(Locale.getDefault()) },
                                 label = { Text("Descrição / Estabelecimento", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: Posto BR Combustível", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true
                             )
 

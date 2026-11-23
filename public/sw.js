@@ -1,7 +1,5 @@
-const CACHE_NAME = 'lefrio-cache-v3';
+const CACHE_NAME = 'lefrio-cache-v4';
 const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
   '/manifest.json'
 ];
 
@@ -32,15 +30,16 @@ self.addEventListener('activate', (event) => {
 });
 
 // Fetch Event - Network first, fallback to cache for static assets.
-// EXCLUDE firestore and auth endpoints (they are handled natively by Firestore's offline cache)
+// EXCLUDE firestore, auth, API routes and sw.js
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Skip Firebase/Firestore/Google API calls, Vite dev modules, API routes, chrome-extensions and dev socket
+  // Skip Firebase/Firestore/Google API calls, Vite dev modules, API routes, sw.js, chrome-extensions and dev socket
   if (
     url.hostname.includes('firestore.googleapis.com') ||
     url.hostname.includes('firebase') ||
     url.hostname.includes('identitytoolkit') ||
+    url.pathname === '/sw.js' ||
     url.pathname.startsWith('/src/') ||
     url.pathname.startsWith('/node_modules/') ||
     url.pathname.startsWith('/@') ||
@@ -52,11 +51,13 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  const isNavigation = event.request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html');
+
   event.respondWith(
-    fetch(event.request)
+    fetch(isNavigation ? new Request(event.request, { cache: 'no-store' }) : event.request)
       .then((response) => {
-        // If valid response, clone and save it to static assets cache
-        if (response && response.status === 200 && response.type === 'basic') {
+        // Cacheia apenas assets estáticos com hash/versão (evita prender index.html antigo)
+        if (!isNavigation && response && response.status === 200 && response.type === 'basic') {
           const responseToCache = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, responseToCache);
@@ -71,8 +72,7 @@ self.addEventListener('fetch', (event) => {
           if (cachedResponse) {
             return cachedResponse;
           }
-          // If offline and request is for a navigation page, return index.html
-          if (event.request.mode === 'navigate') {
+          if (isNavigation) {
             return caches.match('/');
           }
         });

@@ -3858,11 +3858,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   };
 
   // Executar Impressão Nativa do Navegador em iframe isolado com CSS 100% embutido (sem baixar arquivo e sem bugs de layout)
-  const executePrint = (target: 'os' | 'report' = 'os') => {
-    const isOsTarget = target === 'os' && Boolean(document.getElementById('os-print-area'));
-    const printEl = isOsTarget
-      ? document.getElementById('os-print-area')
-      : document.getElementById('report-print-area') || document.getElementById('os-print-area');
+  const executePrint = (target: 'os' | 'batch' | 'report' = 'os') => {
+    const isBatchTarget = target === 'batch' && Boolean(document.getElementById('os-batch-print-area'));
+    const isOsTarget = (target === 'os' && Boolean(document.getElementById('os-print-area'))) || isBatchTarget;
+    const printEl = isBatchTarget
+      ? document.getElementById('os-batch-print-area')
+      : (target === 'os' && document.getElementById('os-print-area'))
+        ? document.getElementById('os-print-area')
+        : document.getElementById('report-print-area') || document.getElementById('os-print-area');
 
     if (!printEl) {
       window.focus();
@@ -3897,9 +3900,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         return;
       }
 
-      const docTitle = isOsTarget
-        ? `Ordem de Serviço ${selectedOrder?.osNumber || ''}`.trim()
-        : 'Relatório Consolidado de Ordens de Serviço';
+      const docTitle = isBatchTarget
+        ? `Impressão em Lote de O.S. (${new Date().toLocaleDateString('pt-BR')})`
+        : isOsTarget
+          ? `Ordem de Serviço ${selectedOrder?.osNumber || ''}`.trim()
+          : 'Relatório Consolidado de Ordens de Serviço';
 
       let headStyles = '';
       if (isOsTarget) {
@@ -5449,13 +5454,295 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
   const [isReportPrintOpen, setIsReportPrintOpen] = useState(false);
 
-  const renderPageHeader = (pageNum: number, totalPages: number) => {
-    if (!selectedOrder) return null;
-    const printCompany = getActiveCompanyForOrder(selectedOrder.serviceCompany);
+  // --- ESTADOS E FUNÇÕES DE IMPRESSÃO EM LOTE DE O.S. (ARQUIVO ÚNICO) ---
+  interface BatchPrintOrderEntry {
+    key: string;
+    queriedNumber: string;
+    status: 'loading' | 'found' | 'not_found';
+    selected: boolean;
+    order?: ServiceOrder;
+  }
+
+  const [isBatchPrintModalOpen, setIsBatchPrintModalOpen] = useState(false);
+  const [batchPrintMode, setBatchPrintMode] = useState<'manual' | 'report'>('manual');
+  const [batchPrintInput, setBatchPrintInput] = useState('');
+  const [batchPrintEntries, setBatchPrintEntries] = useState<BatchPrintOrderEntry[]>([]);
+  const [batchPrintViewMode, setBatchPrintViewMode] = useState<'selection' | 'preview'>('selection');
+  const [isBatchPrinting, setIsBatchPrinting] = useState(false);
+  const batchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleOpenBatchPrintModal = (mode: 'manual' | 'report') => {
+    setBatchPrintViewMode('selection');
+    setBatchPrintInput('');
+
+    if (mode === 'report') {
+      setBatchPrintMode('report');
+      const reportEntries: BatchPrintOrderEntry[] = reportFilteredOrders.map((o) => {
+        const displayNum = o.osNumber || (o.id && !o.id.startsWith('OS_') ? o.id : '00000');
+        return {
+          key: o.id,
+          queriedNumber: String(displayNum).replace(/^#+/, '').toUpperCase(),
+          status: 'found',
+          selected: true,
+          order: o
+        };
+      });
+      setBatchPrintEntries(reportEntries);
+      setIsBatchPrintModalOpen(true);
+    } else {
+      if (batchPrintMode === 'report') {
+        setBatchPrintEntries([]);
+      }
+      setBatchPrintMode('manual');
+      setIsBatchPrintModalOpen(true);
+      setTimeout(() => {
+        batchInputRef.current?.focus();
+      }, 80);
+    }
+  };
+
+  const handleAddBatchOsInput = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const raw = batchPrintInput.trim();
+    if (!raw) return;
+
+    const tokens = raw
+      .split(/[,;\s\n]+/)
+      .map((t) => t.replace(/^#+/, '').trim().toUpperCase())
+      .filter(Boolean);
+
+    setBatchPrintInput('');
+    setTimeout(() => {
+      batchInputRef.current?.focus();
+    }, 20);
+
+    if (tokens.length === 0) return;
+
+    for (const cleanToken of tokens) {
+      const cleanDigits = cleanToken.replace(/^OS[-_\s]*/i, '').trim();
+
+      // Verifica se já está na lista do modal
+      let alreadyInBatch = false;
+      setBatchPrintEntries((prev) => {
+        const existingIndex = prev.findIndex((item) => {
+          const itemNum = (item.order?.osNumber || item.queriedNumber || '').replace(/^#+/, '').trim().toUpperCase();
+          const itemDigits = itemNum.replace(/^OS[-_\s]*/i, '').trim();
+          return (
+            itemNum === cleanToken ||
+            (cleanDigits && itemDigits === cleanDigits) ||
+            item.order?.id?.toUpperCase() === cleanToken
+          );
+        });
+        if (existingIndex >= 0) {
+          alreadyInBatch = true;
+          const updated = [...prev];
+          updated[existingIndex] = { ...updated[existingIndex], selected: true };
+          return updated;
+        }
+        return prev;
+      });
+
+      if (alreadyInBatch) continue;
+
+      // Procura primeiro em memória local (orders ou reportRawOrders)
+      const localPool = [...orders, ...reportRawOrders];
+      const localMatches = localPool.filter((o) => {
+        const oNum = String(o.osNumber || '').replace(/^#+/, '').trim().toUpperCase();
+        const oDigits = oNum.replace(/^OS[-_\s]*/i, '').trim();
+        return (
+          oNum === cleanToken ||
+          (cleanDigits && oDigits === cleanDigits) ||
+          String(o.id || '').toUpperCase() === cleanToken
+        );
+      });
+
+      const uniqueLocalMap = new Map<string, ServiceOrder>();
+      localMatches.forEach((m) => uniqueLocalMap.set(m.id, m));
+      const uniqueLocal = Array.from(uniqueLocalMap.values());
+
+      if (uniqueLocal.length > 0) {
+        setBatchPrintEntries((prev) => {
+          const existingIds = new Set(prev.map((p) => p.order?.id || p.key));
+          const toAdd: BatchPrintOrderEntry[] = [];
+          for (const ord of uniqueLocal) {
+            if (!existingIds.has(ord.id)) {
+              const dispNum = ord.osNumber || (ord.id && !ord.id.startsWith('OS_') ? ord.id : cleanToken);
+              toAdd.push({
+                key: ord.id,
+                queriedNumber: String(dispNum).replace(/^#+/, '').toUpperCase(),
+                status: 'found',
+                selected: true,
+                order: ord
+              });
+            }
+          }
+          return [...prev, ...toAdd];
+        });
+        continue;
+      }
+
+      // Caso não esteja na memória local, busca diretamente no Firestore sem travar a digitação da próxima O.S.
+      const tempKey = `pending_${cleanToken}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      setBatchPrintEntries((prev) => [
+        ...prev,
+        {
+          key: tempKey,
+          queriedNumber: cleanToken,
+          status: 'loading',
+          selected: true
+        }
+      ]);
+
+      dataService
+        .findServiceOrderByExactNumber(cleanToken, managerClientId)
+        .then((found) => {
+          const normalized = normalizeOrdersInMemory(found);
+          setBatchPrintEntries((prev) => {
+            const idx = prev.findIndex((item) => item.key === tempKey);
+            if (idx === -1) return prev;
+
+            if (normalized.length === 0) {
+              const copy = [...prev];
+              copy[idx] = {
+                ...copy[idx],
+                status: 'not_found',
+                selected: false
+              };
+              return copy;
+            }
+
+            const existingOrderIds = new Set(
+              prev.filter((item) => item.key !== tempKey && item.order?.id).map((item) => item.order!.id)
+            );
+            const newEntries: BatchPrintOrderEntry[] = normalized
+              .filter((ord) => !existingOrderIds.has(ord.id))
+              .map((ord) => {
+                const dispNum = ord.osNumber || (ord.id && !ord.id.startsWith('OS_') ? ord.id : cleanToken);
+                return {
+                  key: ord.id,
+                  queriedNumber: String(dispNum).replace(/^#+/, '').toUpperCase(),
+                  status: 'found' as const,
+                  selected: true,
+                  order: ord
+                };
+              });
+
+            const copy = [...prev];
+            copy.splice(idx, 1, ...newEntries);
+            return copy;
+          });
+        })
+        .catch((err) => {
+          console.warn(`Erro ao buscar O.S. #${cleanToken} para impressão em lote:`, err);
+          setBatchPrintEntries((prev) =>
+            prev.map((item) =>
+              item.key === tempKey ? { ...item, status: 'not_found', selected: false } : item
+            )
+          );
+        });
+    }
+  };
+
+  const selectedBatchOrders = useMemo(() => {
+    return batchPrintEntries
+      .filter((e) => e.status === 'found' && e.selected && e.order)
+      .map((e) => e.order!);
+  }, [batchPrintEntries]);
+
+  const isAnyBatchEntryLoading = useMemo(() => {
+    return batchPrintEntries.some((e) => e.status === 'loading');
+  }, [batchPrintEntries]);
+
+  const handleToggleBatchEntry = (entryKey: string) => {
+    setBatchPrintEntries((prev) =>
+      prev.map((item) =>
+        item.key === entryKey && item.status === 'found'
+          ? { ...item, selected: !item.selected }
+          : item
+      )
+    );
+  };
+
+  const handleRemoveBatchEntry = (entryKey: string) => {
+    setBatchPrintEntries((prev) => prev.filter((item) => item.key !== entryKey));
+  };
+
+  const handleSelectAllBatchEntries = (selectAll: boolean) => {
+    setBatchPrintEntries((prev) =>
+      prev.map((item) => (item.status === 'found' ? { ...item, selected: selectAll } : item))
+    );
+  };
+
+  const handleExecuteBatchPrint = async (openPreviewOnly = false) => {
+    const ordersToPrint = batchPrintEntries
+      .filter((e) => e.status === 'found' && e.selected && e.order)
+      .map((e) => e.order!);
+
+    if (ordersToPrint.length === 0) return;
+
+    setIsBatchPrinting(true);
+    try {
+      // Hidrata mídias (assinaturas e fotos externalizadas) em lotes paralelos de 5 O.S.
+      const hydratedMap = new Map<string, ServiceOrder>();
+      const needsHydrationList = ordersToPrint.filter((order) =>
+        Boolean(
+          order.id &&
+          (order.mediaExternalized ||
+            (order.hasClientSignature && !order.clientSignature) ||
+            (order.hasTechSignature && !order.techSignature) ||
+            ((order.photoCount || 0) > 0 && (!order.photos || order.photos.length === 0)))
+        )
+      );
+
+      const chunkSize = 5;
+      for (let i = 0; i < needsHydrationList.length; i += chunkSize) {
+        const chunk = needsHydrationList.slice(i, i + chunkSize);
+        const results = await Promise.all(
+          chunk.map((ord) =>
+            dataService.hydrateServiceOrderMedia(ord).catch((err) => {
+              console.warn(`Aviso ao hidratar mídias da O.S. ${ord.osNumber}:`, err);
+              return ord;
+            })
+          )
+        );
+        results.forEach((hyd) => {
+          if (hyd && hyd.id) hydratedMap.set(hyd.id, hyd);
+        });
+      }
+
+      if (hydratedMap.size > 0) {
+        setBatchPrintEntries((prev) =>
+          prev.map((item) => {
+            if (item.order && hydratedMap.has(item.order.id)) {
+              return {
+                ...item,
+                order: { ...item.order, ...hydratedMap.get(item.order.id)! }
+              };
+            }
+            return item;
+          })
+        );
+      }
+
+      if (openPreviewOnly) {
+        setBatchPrintViewMode('preview');
+      } else {
+        setTimeout(() => {
+          executePrint('batch');
+        }, 180);
+      }
+    } finally {
+      setIsBatchPrinting(false);
+    }
+  };
+
+  const renderPageHeader = (pageNum: number, totalPages: number, targetOrder: ServiceOrder | null = selectedOrder) => {
+    if (!targetOrder) return null;
+    const printCompany = getActiveCompanyForOrder(targetOrder.serviceCompany);
     return (
       <div className="os-print-header">
         <div className="os-print-header-left">
-          {renderCompanyLogo(selectedOrder.serviceCompany, "os-print-logo")}
+          {renderCompanyLogo(targetOrder.serviceCompany, "os-print-logo")}
           <div className="os-print-company">
             <span className="os-print-company-name">
               {printCompany?.fullName}
@@ -5474,9 +5761,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     );
   };
 
-  const renderPageFooter = (pageNum: number, totalPages: number) => {
-    if (!selectedOrder) return null;
-    const printCompany = getActiveCompanyForOrder(selectedOrder.serviceCompany);
+  const renderPageFooter = (pageNum: number, totalPages: number, targetOrder: ServiceOrder | null = selectedOrder) => {
+    if (!targetOrder) return null;
+    const printCompany = getActiveCompanyForOrder(targetOrder.serviceCompany);
     return (
       <div className="os-print-footer">
         <div>
@@ -5491,6 +5778,350 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           Gerado em: {new Date().toLocaleDateString('pt-BR')} às {new Date().toLocaleTimeString('pt-BR')}
         </div>
       </div>
+    );
+  };
+
+  // Renderiza as páginas A4 (Página 1 + Página 2 opcional de Anexos Fotográficos) de uma Ordem de Serviço
+  const renderOrderPrintPages = (orderToRender: ServiceOrder) => {
+    const themeHeaderBg = orderToRender.serviceCompany === 'alclima' ? 'os-print-bg-alclima' : 'os-print-bg-lefrio';
+    const displayOsNumber = orderToRender.osNumber || (orderToRender.id && !orderToRender.id.startsWith('OS_') ? orderToRender.id : '00000');
+    const hasPhotos = Boolean(orderToRender.photos && orderToRender.photos.length > 0);
+    const totalOrderPages = hasPhotos ? 2 : 1;
+    const matchedClient = clients.find(c => c.id === orderToRender.clientId);
+    const matchedAddress = addresses.find(a => a.id === orderToRender.addressId);
+    const orderPrintCompany = getActiveCompanyForOrder(orderToRender.serviceCompany);
+    const formattedAddress = (() => {
+      if (matchedAddress) {
+        const parts = [
+          matchedAddress.street,
+          matchedAddress.number ? `Nº ${matchedAddress.number}` : '',
+          matchedAddress.complement || '',
+          matchedAddress.neighborhood || '',
+          matchedAddress.city || '',
+          matchedAddress.state || '',
+          matchedAddress.cep ? `CEP: ${matchedAddress.cep}` : ''
+        ].filter(Boolean);
+        return (parts.length > 0 ? parts.join(' - ') : (orderToRender.clientAddress || '-')).toUpperCase();
+      }
+      return (orderToRender.clientAddress || matchedClient?.fullAddress || '-').toUpperCase();
+    })();
+
+    return (
+      <>
+        {/* --- PÁGINA 1 --- */}
+        <div className="os-print-page">
+          <div className="os-print-body">
+            {/* Cabeçalho */}
+            {renderPageHeader(1, totalOrderPages, orderToRender)}
+
+            {/* Título OS */}
+            <div className="os-print-title-row">
+              <span className="os-print-title-main">ORDEM DE SERVIÇO: {displayOsNumber}</span>
+              <span className="os-print-title-sub">1ª Impressão</span>
+            </div>
+
+            {/* CLIENTE */}
+            <div className="os-print-box">
+              <div className={`os-print-box-header ${themeHeaderBg}`}>
+                CLIENTE
+              </div>
+              <div className="os-print-grid">
+                {/* Linha 1 */}
+                <div className="os-print-c8 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">RAZÃO SOCIAL: </span>
+                  <span className="os-print-val">
+                    {(matchedClient?.fullName || matchedClient?.name || orderToRender.clientName || '').toUpperCase()}
+                  </span>
+                </div>
+                <div className="os-print-c4 os-print-cell os-print-bb">
+                  <span className="os-print-lbl">CNPJ: </span>
+                  <span className="os-print-val">{(matchedClient?.cnpj || orderToRender.clientCnpj || '-').toUpperCase()}</span>
+                </div>
+                {/* Linha 2 */}
+                <div className="os-print-c8 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">E-MAIL: </span>
+                  <span className="os-print-val">
+                    {(matchedClient?.email || orderToRender.clientEmail || '-').toUpperCase()}
+                  </span>
+                </div>
+                <div className="os-print-c4 os-print-cell os-print-bb">
+                  <span className="os-print-lbl">TELEFONE: </span>
+                  <span className="os-print-val">{(matchedClient?.phone || orderToRender.clientPhone || '-').toUpperCase()}</span>
+                </div>
+                {/* Linha 3 */}
+                <div className="os-print-c12 os-print-cell">
+                  <span className="os-print-lbl">ENDEREÇO: </span>
+                  <span className="os-print-val">{formattedAddress}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* OS: [número] */}
+            <div className="os-print-box">
+              <div className={`os-print-box-header ${themeHeaderBg}`}>
+                OS: {displayOsNumber}
+              </div>
+              <div className="os-print-grid">
+                {/* Linha 1 */}
+                <div className="os-print-c4 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">SITUAÇÃO: </span>
+                  <span className="os-print-val">{getStatusLabel(orderToRender.status).toUpperCase()}</span>
+                </div>
+                <div className="os-print-c8 os-print-cell os-print-bb">
+                  <span className="os-print-lbl">TIPO: </span>
+                  <span className="os-print-val">{(orderToRender.type || '').toUpperCase()}</span>
+                </div>
+                {/* Linha 2 */}
+                <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">DATA ABERTURA: </span>
+                  <span className="os-print-val">
+                    {orderToRender.openedAt ? new Date(orderToRender.openedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
+                  </span>
+                </div>
+                <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">RESP. ABERTURA: </span>
+                  <span className="os-print-val">{(orderToRender.openedBy || '-').toUpperCase()}</span>
+                </div>
+                <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">EXECUÇÃO: </span>
+                  <span className="os-print-val">
+                    {(orderToRender.finishedAt || orderToRender.updatedAt) ? new Date(orderToRender.finishedAt || orderToRender.updatedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
+                  </span>
+                </div>
+                <div className="os-print-c3 os-print-cell os-print-bb">
+                  <span className="os-print-lbl">OS EXTERNA: </span>
+                  <span className="os-print-val">{(orderToRender.externalOs || '-').toUpperCase()}</span>
+                </div>
+                {/* Linha 3: Descrição do Problema */}
+                <div className={`os-print-c12 os-print-cell ${(orderToRender.diagnosis || orderToRender.solution) ? 'os-print-bb' : ''}`}>
+                  <span className="os-print-lbl">DESCRIÇÃO DO PROBLEMA: </span>
+                  <span className="os-print-val">{(orderToRender.description || '').toUpperCase()}</span>
+                </div>
+                {/* Linha 4: Diagnóstico */}
+                {orderToRender.diagnosis && (
+                  <div className={`os-print-c12 os-print-cell ${orderToRender.solution ? 'os-print-bb' : ''}`}>
+                    <span className="os-print-lbl">DIAGNÓSTICO: </span>
+                    <span className="os-print-val">{(orderToRender.diagnosis || '').toUpperCase()}</span>
+                  </div>
+                )}
+                {/* Linha 5: Solução */}
+                {orderToRender.solution && (
+                  <div className="os-print-c12 os-print-cell">
+                    <span className="os-print-lbl">SOLUÇÃO: </span>
+                    <span className="os-print-val">{(orderToRender.solution || '').toUpperCase()}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* DETALHES (Equipamento) */}
+            <div className="os-print-box">
+              <div className={`os-print-box-header ${themeHeaderBg}`}>
+                DETALHES
+              </div>
+              <div className="os-print-grid">
+                {/* Linha 1 */}
+                <div className="os-print-c6 os-print-cell os-print-br os-print-bb">
+                  <span className="os-print-lbl">EQUIPAMENTO: </span>
+                  <span className="os-print-val">{(orderToRender.equipmentName || '-').toUpperCase()}</span>
+                </div>
+                <div className="os-print-c6 os-print-cell os-print-bb">
+                  <span className="os-print-lbl">MARCA: </span>
+                  <span className="os-print-val">{(orderToRender.equipmentBrand || '-').toUpperCase()}</span>
+                </div>
+                {/* Linha 2 */}
+                <div className="os-print-c4 os-print-cell os-print-br">
+                  <span className="os-print-lbl">SETOR: </span>
+                  <span className="os-print-val">{(orderToRender.equipmentSector || '-').toUpperCase()}</span>
+                </div>
+                <div className="os-print-c4 os-print-cell os-print-br">
+                  <span className="os-print-lbl">BTUS: </span>
+                  <span className="os-print-val">{(orderToRender.equipmentBtus || '-').toUpperCase()}</span>
+                </div>
+                <div className="os-print-c4 os-print-cell">
+                  <span className="os-print-lbl">PATRIMÔNIO / TOMBAMENTO: </span>
+                  <span className="os-print-val">{(orderToRender.equipmentPatrimony || '-').toUpperCase()}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* TABELA DE PRODUTOS / SERVIÇOS E TOTAL */}
+            {(((orderToRender.services && orderToRender.services.length > 0) || (orderToRender.products && orderToRender.products.length > 0)) || orderToRender.totalValue > 0) && (
+              <div className="os-print-box">
+                {/* TABELA DE SERVIÇOS */}
+                {orderToRender.services && orderToRender.services.length > 0 && (
+                  <div>
+                    <div className="os-print-subhead">
+                      DESCRIÇÃO DOS SERVIÇOS
+                    </div>
+                    <table className="os-print-table">
+                      <thead>
+                        <tr className={themeHeaderBg}>
+                          <th className="os-print-tc" style={{ width: '8%' }}>Código</th>
+                          <th className="os-print-tl" style={{ width: '55%' }}>Descrição dos Serviços</th>
+                          <th className="os-print-tc" style={{ width: '6%' }}>Un.</th>
+                          <th className="os-print-tc" style={{ width: '6%' }}>Qtd.</th>
+                          <th className="os-print-tr" style={{ width: '10%' }}>Valor Unit.</th>
+                          <th className="os-print-tc" style={{ width: '7%' }}>Desc. (%)</th>
+                          <th className="os-print-tr" style={{ width: '10%' }}>Valor Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {orderToRender.services.map((srv, index) => (
+                          <tr key={index}>
+                            <td className="os-print-tc os-print-bold">{(srv.code || '').toUpperCase()}</td>
+                            <td className="os-print-tl">{(srv.description || '').toUpperCase()}</td>
+                            <td className="os-print-tc">{(srv.unit || '').toUpperCase()}</td>
+                            <td className="os-print-tc">{srv.quantity}</td>
+                            <td className="os-print-tr">R$ {srv.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                            <td className="os-print-tc">{srv.discountPercent}%</td>
+                            <td className="os-print-tr os-print-bold">R$ {srv.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* TABELA DE PRODUTOS */}
+                {orderToRender.products && orderToRender.products.length > 0 && (
+                  <div className={orderToRender.services && orderToRender.services.length > 0 ? 'os-print-bt' : ''}>
+                    <div className="os-print-subhead">
+                      DESCRIÇÃO DOS PRODUTOS
+                    </div>
+                    <table className="os-print-table">
+                      <thead>
+                        <tr className={themeHeaderBg}>
+                          <th className="os-print-tc" style={{ width: '8%' }}>Código</th>
+                          <th className="os-print-tl" style={{ width: '55%' }}>Descrição dos Produtos</th>
+                          <th className="os-print-tc" style={{ width: '6%' }}>Un.</th>
+                          <th className="os-print-tc" style={{ width: '6%' }}>Qtd.</th>
+                          <th className="os-print-tr" style={{ width: '10%' }}>Valor Unit.</th>
+                          <th className="os-print-tc" style={{ width: '7%' }}>Desc. (%)</th>
+                          <th className="os-print-tr" style={{ width: '10%' }}>Valor Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {orderToRender.products.map((prod, index) => (
+                          <tr key={index}>
+                            <td className="os-print-tc os-print-bold">{(prod.code || '').toUpperCase()}</td>
+                            <td className="os-print-tl">{(prod.description || '').toUpperCase()}</td>
+                            <td className="os-print-tc">{(prod.unit || '').toUpperCase()}</td>
+                            <td className="os-print-tc">{prod.quantity.toFixed(2).replace('.', ',')}</td>
+                            <td className="os-print-tr">R$ {prod.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                            <td className="os-print-tc">{prod.discountPercent}%</td>
+                            <td className="os-print-tr os-print-bold">R$ {prod.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* LINHA FINAL: TOTAL DA OS */}
+                <div className="os-print-total-row">
+                  Total da OS: R$ {orderToRender.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                </div>
+              </div>
+            )}
+
+            {/* ASSINATURAS E AUTENTICAÇÃO */}
+            <div className="os-print-sigs">
+              {/* Coluna Esquerda: Cliente */}
+              <div className="os-print-sig-col">
+                <div className="os-print-sig-box">
+                  {orderToRender.clientSignature ? (
+                    <img src={orderToRender.clientSignature} alt="Assinatura Cliente" className="os-print-sig-img" referrerPolicy="no-referrer" />
+                  ) : null}
+                </div>
+                <div className="os-print-sig-line"></div>
+                <span className="os-print-sig-name">
+                  {orderToRender.clientRepresentative || 'REPRESENTANTE DO CLIENTE'}
+                </span>
+                {orderToRender.clientRepresentativeMatricula && (
+                  <span className="os-print-sig-sub">Matrícula/CPF: {orderToRender.clientRepresentativeMatricula}</span>
+                )}
+                {orderToRender.clientSignatureDate && (
+                  <span className="os-print-sig-date">
+                    Assinado às {new Date(orderToRender.clientSignatureDate).toLocaleTimeString('pt-BR')} ({new Date(orderToRender.clientSignatureDate).toLocaleDateString('pt-BR')})
+                  </span>
+                )}
+                <span className="os-print-sig-org">
+                  {orderToRender.clientName}
+                </span>
+              </div>
+
+              {/* Coluna Direita: Prestadora */}
+              <div className="os-print-sig-col">
+                <div className="os-print-sig-note">
+                  {(() => {
+                    const names = resolveOrderTechnicianDisplay(orderToRender, '');
+                    const dateStr = orderToRender.finishedAt ? new Date(orderToRender.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
+                    return `Equipe autenticada no aplicativo JDSmartOS (APP: ${dateStr} ${names})`;
+                  })()}
+                </div>
+                <div className="os-print-sig-box">
+                  {orderToRender.techSignature ? (
+                    <img src={orderToRender.techSignature} alt="Assinatura Técnico" className="os-print-sig-img" referrerPolicy="no-referrer" />
+                  ) : null}
+                </div>
+                <div className="os-print-sig-line"></div>
+                <span className="os-print-sig-name">
+                  {orderPrintCompany?.fullName}
+                </span>
+                <span className="os-print-sig-org">
+                  PRESTADORA AUTORIZADA
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Rodapé Página 1 */}
+          {renderPageFooter(1, totalOrderPages, orderToRender)}
+        </div>
+
+        {/* --- PÁGINA 2: ANEXOS FOTOGRÁFICOS --- */}
+        {hasPhotos && (
+          <div className="os-print-page">
+            <div className="os-print-body">
+              {/* Cabeçalho */}
+              {renderPageHeader(2, 2, orderToRender)}
+
+              {/* Título de Seção */}
+              <div className="os-print-title-row">
+                <span className="os-print-title-main">ORDEM DE SERVIÇO: {displayOsNumber}</span>
+                <span className="os-print-title-sub">Anexos Fotográficos</span>
+              </div>
+
+              <div className="os-print-box">
+                <div className={`os-print-box-header os-print-box-header-solo ${themeHeaderBg}`}>
+                  ANEXOS DO APP - OS: {displayOsNumber}
+                </div>
+              </div>
+
+              {/* Grid de Fotos */}
+              <div className="os-print-photos-grid">
+                {(orderToRender.photos || []).slice(0, 4).map((ph, idx) => (
+                  <div key={idx} className="os-print-photo-card">
+                    <img
+                      src={ph}
+                      alt={`Evidência ${idx + 1}`}
+                      className="os-print-photo-img"
+                      referrerPolicy="no-referrer"
+                    />
+                    <span className="os-print-photo-cap">
+                      Foto {idx + 1} - Evidência de Execução
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Rodapé Página 2 */}
+            {renderPageFooter(2, 2, orderToRender)}
+          </div>
+        )}
+      </>
     );
   };
 
@@ -6634,13 +7265,13 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
             </div>
 
-            {/* Botão Filtro de Oficina com Indicador de Quantidade + Atualizar */}
+            {/* Botão Filtro de Oficina (reduzido pela metade) + Botão de Impressão em Lote + Atualizar */}
             <div className="flex items-center justify-end gap-2 md:col-span-6">
               <button
                 type="button"
                 onClick={() => setWorkshopOnlyFilter(prev => !prev)}
                 className={cn(
-                  "flex-1 py-2 px-3 rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center justify-between border cursor-pointer shadow-3xs",
+                  "flex-1 min-w-0 py-2 px-2.5 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-between border cursor-pointer shadow-3xs",
                   workshopOnlyFilter
                     ? "bg-purple-600 text-white border-purple-700 shadow-purple-500/25 ring-2 ring-purple-400/30"
                     : "bg-slate-50 hover:bg-purple-50/60 text-slate-700 border-slate-200 hover:border-purple-200"
@@ -6652,15 +7283,25 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <span className="truncate">Apenas Oficina</span>
                 </div>
                 <span className={cn(
-                  "px-2 py-0.5 rounded-full text-[10px] font-black shrink-0 ml-1.5 leading-none transition-all",
+                  "px-1.5 py-0.5 rounded-full text-[9px] font-black shrink-0 ml-1 leading-none transition-all",
                   workshopOnlyFilter
                     ? "bg-amber-400 text-slate-950 shadow-2xs"
                     : totalWorkshopOrders > 0
                       ? "bg-purple-100 text-purple-900 border border-purple-200"
                       : "bg-slate-200 text-slate-600"
                 )}>
-                  {totalWorkshopOrders} na oficina
+                  {totalWorkshopOrders}
                 </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleOpenBatchPrintModal('manual')}
+                className="flex-1 min-w-0 py-2 px-2.5 rounded-xl text-[11px] font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 border border-blue-200 bg-blue-50/80 hover:bg-blue-600 text-blue-700 hover:text-white cursor-pointer shadow-3xs"
+                title="Digitar números de O.S. com Enter e imprimir todas de uma só vez em um arquivo único"
+              >
+                <Printer className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Impressão em Lote</span>
               </button>
 
               <button
@@ -7323,22 +7964,36 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
 
               {/* Botões de Ação do Relatório */}
-              <div className="flex items-end gap-2">
+              <div className="flex items-end gap-1.5">
                 <button
                   type="button"
                   onClick={handleExportCSV}
                   disabled={reportFilteredOrders.length === 0}
-                  className="flex-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 text-[10px] font-black uppercase tracking-wider py-2.5 px-4 rounded-xl transition-all border border-slate-200 flex items-center justify-center gap-2 h-[38px] cursor-pointer"
+                  className="flex-1 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed text-slate-700 text-[10px] font-black uppercase tracking-wider py-2 px-2.5 rounded-xl transition-all border border-slate-200 flex items-center justify-center gap-1.5 h-[38px] cursor-pointer"
+                  title="Exportar listagem para planilha CSV"
                 >
-                  <Download className="w-4 h-4 text-slate-500" /> Exportar CSV
+                  <Download className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  <span className="truncate">CSV</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setIsReportPrintOpen(true)}
                   disabled={reportFilteredOrders.length === 0}
-                  className="flex-1 bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-black uppercase tracking-wider py-2.5 px-4 rounded-xl transition-all border border-blue-200/50 flex items-center justify-center gap-2 h-[38px] cursor-pointer"
+                  className="flex-1 bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-black uppercase tracking-wider py-2 px-2.5 rounded-xl transition-all border border-blue-200/50 flex items-center justify-center gap-1.5 h-[38px] cursor-pointer"
+                  title="Imprimir resumo consolidado do relatório"
                 >
-                  <Printer className="w-4 h-4" /> Imprimir Resumo
+                  <Printer className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Resumo</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleOpenBatchPrintModal('report')}
+                  disabled={reportFilteredOrders.length === 0}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-black uppercase tracking-wider py-2 px-2.5 rounded-xl transition-all border border-indigo-700 flex items-center justify-center gap-1.5 h-[38px] cursor-pointer shadow-3xs"
+                  title="Abrir modal com as O.S. deste relatório preenchidas para selecionar/desmarcar e imprimir em lote em arquivo único"
+                >
+                  <Layers className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">Imprimir em Lote</span>
                 </button>
               </div>
             </div>
@@ -7584,11 +8239,22 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
           {/* Tabela de Resultados no Relatório (Paginada e com lookup O(1) de Técnico) */}
           <div className="bg-white border border-slate-200/80 rounded-2xl shadow-3xs overflow-hidden no-print">
             <div className="p-4 bg-slate-50 border-b border-slate-100 flex flex-wrap justify-between items-center gap-3">
-              <div className="flex items-center gap-2.5">
+              <div className="flex items-center gap-2.5 flex-wrap">
                 <h3 className="text-xs font-black uppercase text-slate-700 tracking-wider">Ordens de Serviço Filtradas</h3>
                 <span className="text-[10px] font-black bg-blue-50 text-blue-600 px-2.5 py-1 rounded-full uppercase tracking-wider">
                   {totalReportOrders} Resultados
                 </span>
+                {totalReportOrders > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenBatchPrintModal('report')}
+                    className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase tracking-wider rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-3xs"
+                    title="Selecionar ou desmarcar as O.S. filtradas para impressão em lote em arquivo único"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Impressão em Lote ({totalReportOrders} O.S.)</span>
+                  </button>
+                )}
               </div>
               {totalReportOrders > 0 && (
                 <div className="flex items-center gap-3 text-xs text-slate-500">
@@ -9827,391 +10493,387 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     })()}
 
       {/* MODAL: VISUALIZAÇÃO E IMPRESSÃO (PERFEITA COMO O MODELO) */}
-      {isPrintPreviewOpen && selectedOrder && (() => {
-        const themeHeaderBg = selectedOrder.serviceCompany === 'alclima' ? 'os-print-bg-alclima' : 'os-print-bg-lefrio';
-        const displayOsNumber = selectedOrder.osNumber || (selectedOrder.id && !selectedOrder.id.startsWith('OS_') ? selectedOrder.id : '00000');
-        const hasPhotos = Boolean(selectedOrder.photos && selectedOrder.photos.length > 0);
-        const totalPages = hasPhotos ? 2 : 1;
-        const matchedClient = clients.find(c => c.id === selectedOrder.clientId);
-        const matchedAddress = addresses.find(a => a.id === selectedOrder.addressId);
-        const formattedAddress = (() => {
-          if (matchedAddress) {
-            const parts = [
-              matchedAddress.street,
-              matchedAddress.number ? `Nº ${matchedAddress.number}` : '',
-              matchedAddress.complement || '',
-              matchedAddress.neighborhood || '',
-              matchedAddress.city || '',
-              matchedAddress.state || '',
-              matchedAddress.cep ? `CEP: ${matchedAddress.cep}` : ''
-            ].filter(Boolean);
-            return (parts.length > 0 ? parts.join(' - ') : (selectedOrder.clientAddress || '-')).toUpperCase();
-          }
-          return (selectedOrder.clientAddress || matchedClient?.fullAddress || '-').toUpperCase();
-        })();
-
-        return (
-          <div className="print-modal-container fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
-            <div className="print-modal-card bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:w-full print:h-auto print:m-0 print:p-0 print:block">
-              {/* Header de Controle */}
-              <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50 no-print print:hidden print-hide">
-                <div className="flex items-center gap-2">
-                  <Printer className="w-5 h-5 text-blue-600" />
-                  <span className="text-sm font-black text-slate-800 uppercase tracking-widest">Pré-visualização de Impressão (A4)</span>
-                  {isHydratingMedia && (
-                    <span className="inline-flex items-center gap-1.5 ml-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">
-                      <Loader2 className="w-3 h-3 animate-spin" /> Carregando anexos e assinaturas...
-                    </span>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    id="btn-download-excel-print-modal"
-                    onClick={() => downloadOsExcel(selectedOrder)}
-                    disabled={isHydratingMedia}
-                    className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <FileSpreadsheet className="w-4 h-4" /> Baixar Excel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => executePrint('os')}
-                    disabled={isHydratingMedia}
-                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Printer className="w-4 h-4" /> Imprimir Agora
-                  </button>
-                  <button
-                    onClick={() => setIsPrintPreviewOpen(false)}
-                    className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-500 text-xs font-bold py-2 px-4 rounded-lg transition-all cursor-pointer"
-                  >
-                    Fechar
-                  </button>
-                </div>
+      {isPrintPreviewOpen && selectedOrder && (
+        <div className="print-modal-container fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto print:static print:p-0 print:m-0 print:bg-white print:overflow-visible print:block print:w-full print:h-auto">
+          <div className="print-modal-card bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[95vh] print:border-none print:shadow-none print:rounded-none print:max-w-none print:max-h-none print:w-full print:h-auto print:m-0 print:p-0 print:block">
+            {/* Header de Controle */}
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4 bg-slate-50 no-print print:hidden print-hide">
+              <div className="flex items-center gap-2">
+                <Printer className="w-5 h-5 text-blue-600" />
+                <span className="text-sm font-black text-slate-800 uppercase tracking-widest">Pré-visualização de Impressão (A4)</span>
+                {isHydratingMedia && (
+                  <span className="inline-flex items-center gap-1.5 ml-2 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Carregando anexos e assinaturas...
+                  </span>
+                )}
               </div>
+              <div className="flex gap-2">
+                <button
+                  id="btn-download-excel-print-modal"
+                  onClick={() => downloadOsExcel(selectedOrder)}
+                  disabled={isHydratingMedia}
+                  className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-4 h-4" /> Baixar Excel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => executePrint('os')}
+                  disabled={isHydratingMedia}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-xs font-black uppercase tracking-widest py-2 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Printer className="w-4 h-4" /> Imprimir Agora
+                </button>
+                <button
+                  onClick={() => setIsPrintPreviewOpen(false)}
+                  className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-500 text-xs font-bold py-2 px-4 rounded-lg transition-all cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
 
-              {/* Conteúdo Imprimível do Documento */}
-              <div className="print-modal-scroll flex-1 overflow-y-auto p-8 bg-slate-100 flex flex-col items-center gap-6">
-                <div id="os-print-area" className="os-print-sheet">
-                  {/* --- PÁGINA 1 --- */}
-                  <div className="os-print-page">
-                    <div className="os-print-body">
-                      {/* Cabeçalho */}
-                      {renderPageHeader(1, totalPages)}
-
-                      {/* Título OS */}
-                      <div className="os-print-title-row">
-                        <span className="os-print-title-main">ORDEM DE SERVIÇO: {displayOsNumber}</span>
-                        <span className="os-print-title-sub">1ª Impressão</span>
-                      </div>
-
-                      {/* CLIENTE */}
-                      <div className="os-print-box">
-                        <div className={`os-print-box-header ${themeHeaderBg}`}>
-                          CLIENTE
-                        </div>
-                        <div className="os-print-grid">
-                          {/* Linha 1 */}
-                          <div className="os-print-c8 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">RAZÃO SOCIAL: </span>
-                            <span className="os-print-val">
-                              {(matchedClient?.fullName || matchedClient?.name || selectedOrder.clientName || '').toUpperCase()}
-                            </span>
-                          </div>
-                          <div className="os-print-c4 os-print-cell os-print-bb">
-                            <span className="os-print-lbl">CNPJ: </span>
-                            <span className="os-print-val">{(matchedClient?.cnpj || selectedOrder.clientCnpj || '-').toUpperCase()}</span>
-                          </div>
-                          {/* Linha 2 */}
-                          <div className="os-print-c8 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">E-MAIL: </span>
-                            <span className="os-print-val">
-                              {(matchedClient?.email || selectedOrder.clientEmail || '-').toUpperCase()}
-                            </span>
-                          </div>
-                          <div className="os-print-c4 os-print-cell os-print-bb">
-                            <span className="os-print-lbl">TELEFONE: </span>
-                            <span className="os-print-val">{(matchedClient?.phone || selectedOrder.clientPhone || '-').toUpperCase()}</span>
-                          </div>
-                          {/* Linha 3 */}
-                          <div className="os-print-c12 os-print-cell">
-                            <span className="os-print-lbl">ENDEREÇO: </span>
-                            <span className="os-print-val">{formattedAddress}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* OS: [número] */}
-                      <div className="os-print-box">
-                        <div className={`os-print-box-header ${themeHeaderBg}`}>
-                          OS: {displayOsNumber}
-                        </div>
-                        <div className="os-print-grid">
-                          {/* Linha 1 */}
-                          <div className="os-print-c4 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">SITUAÇÃO: </span>
-                            <span className="os-print-val">{getStatusLabel(selectedOrder.status).toUpperCase()}</span>
-                          </div>
-                          <div className="os-print-c8 os-print-cell os-print-bb">
-                            <span className="os-print-lbl">TIPO: </span>
-                            <span className="os-print-val">{(selectedOrder.type || '').toUpperCase()}</span>
-                          </div>
-                          {/* Linha 2 */}
-                          <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">DATA ABERTURA: </span>
-                            <span className="os-print-val">
-                              {selectedOrder.openedAt ? new Date(selectedOrder.openedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
-                            </span>
-                          </div>
-                          <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">RESP. ABERTURA: </span>
-                            <span className="os-print-val">{(selectedOrder.openedBy || '-').toUpperCase()}</span>
-                          </div>
-                          <div className="os-print-c3 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">EXECUÇÃO: </span>
-                            <span className="os-print-val">
-                              {(selectedOrder.finishedAt || selectedOrder.updatedAt) ? new Date(selectedOrder.finishedAt || selectedOrder.updatedAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-'}
-                            </span>
-                          </div>
-                          <div className="os-print-c3 os-print-cell os-print-bb">
-                            <span className="os-print-lbl">OS EXTERNA: </span>
-                            <span className="os-print-val">{(selectedOrder.externalOs || '-').toUpperCase()}</span>
-                          </div>
-                          {/* Linha 3: Descrição do Problema */}
-                          <div className={`os-print-c12 os-print-cell ${(selectedOrder.diagnosis || selectedOrder.solution) ? 'os-print-bb' : ''}`}>
-                            <span className="os-print-lbl">DESCRIÇÃO DO PROBLEMA: </span>
-                            <span className="os-print-val">{(selectedOrder.description || '').toUpperCase()}</span>
-                          </div>
-                          {/* Linha 4: Diagnóstico */}
-                          {selectedOrder.diagnosis && (
-                            <div className={`os-print-c12 os-print-cell ${selectedOrder.solution ? 'os-print-bb' : ''}`}>
-                              <span className="os-print-lbl">DIAGNÓSTICO: </span>
-                              <span className="os-print-val">{(selectedOrder.diagnosis || '').toUpperCase()}</span>
-                            </div>
-                          )}
-                          {/* Linha 5: Solução */}
-                          {selectedOrder.solution && (
-                            <div className="os-print-c12 os-print-cell">
-                              <span className="os-print-lbl">SOLUÇÃO: </span>
-                              <span className="os-print-val">{(selectedOrder.solution || '').toUpperCase()}</span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* DETALHES (Equipamento) */}
-                      <div className="os-print-box">
-                        <div className={`os-print-box-header ${themeHeaderBg}`}>
-                          DETALHES
-                        </div>
-                        <div className="os-print-grid">
-                          {/* Linha 1 */}
-                          <div className="os-print-c6 os-print-cell os-print-br os-print-bb">
-                            <span className="os-print-lbl">EQUIPAMENTO: </span>
-                            <span className="os-print-val">{(selectedOrder.equipmentName || '-').toUpperCase()}</span>
-                          </div>
-                          <div className="os-print-c6 os-print-cell os-print-bb">
-                            <span className="os-print-lbl">MARCA: </span>
-                            <span className="os-print-val">{(selectedOrder.equipmentBrand || '-').toUpperCase()}</span>
-                          </div>
-                          {/* Linha 2 */}
-                          <div className="os-print-c4 os-print-cell os-print-br">
-                            <span className="os-print-lbl">SETOR: </span>
-                            <span className="os-print-val">{(selectedOrder.equipmentSector || '-').toUpperCase()}</span>
-                          </div>
-                          <div className="os-print-c4 os-print-cell os-print-br">
-                            <span className="os-print-lbl">BTUS: </span>
-                            <span className="os-print-val">{(selectedOrder.equipmentBtus || '-').toUpperCase()}</span>
-                          </div>
-                          <div className="os-print-c4 os-print-cell">
-                            <span className="os-print-lbl">PATRIMÔNIO / TOMBAMENTO: </span>
-                            <span className="os-print-val">{(selectedOrder.equipmentPatrimony || '-').toUpperCase()}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* TABELA DE PRODUTOS / SERVIÇOS E TOTAL */}
-                      {(((selectedOrder.services && selectedOrder.services.length > 0) || (selectedOrder.products && selectedOrder.products.length > 0)) || selectedOrder.totalValue > 0) && (
-                        <div className="os-print-box">
-                          {/* TABELA DE SERVIÇOS */}
-                          {selectedOrder.services && selectedOrder.services.length > 0 && (
-                            <div>
-                              <div className="os-print-subhead">
-                                DESCRIÇÃO DOS SERVIÇOS
-                              </div>
-                              <table className="os-print-table">
-                                <thead>
-                                  <tr className={themeHeaderBg}>
-                                    <th className="os-print-tc" style={{ width: '8%' }}>Código</th>
-                                    <th className="os-print-tl" style={{ width: '55%' }}>Descrição dos Serviços</th>
-                                    <th className="os-print-tc" style={{ width: '6%' }}>Un.</th>
-                                    <th className="os-print-tc" style={{ width: '6%' }}>Qtd.</th>
-                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Unit.</th>
-                                    <th className="os-print-tc" style={{ width: '7%' }}>Desc. (%)</th>
-                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Total</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {selectedOrder.services.map((srv, index) => (
-                                    <tr key={index}>
-                                      <td className="os-print-tc os-print-bold">{(srv.code || '').toUpperCase()}</td>
-                                      <td className="os-print-tl">{(srv.description || '').toUpperCase()}</td>
-                                      <td className="os-print-tc">{(srv.unit || '').toUpperCase()}</td>
-                                      <td className="os-print-tc">{srv.quantity}</td>
-                                      <td className="os-print-tr">R$ {srv.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                      <td className="os-print-tc">{srv.discountPercent}%</td>
-                                      <td className="os-print-tr os-print-bold">R$ {srv.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-
-                          {/* TABELA DE PRODUTOS */}
-                          {selectedOrder.products && selectedOrder.products.length > 0 && (
-                            <div className={selectedOrder.services && selectedOrder.services.length > 0 ? 'os-print-bt' : ''}>
-                              <div className="os-print-subhead">
-                                DESCRIÇÃO DOS PRODUTOS
-                              </div>
-                              <table className="os-print-table">
-                                <thead>
-                                  <tr className={themeHeaderBg}>
-                                    <th className="os-print-tc" style={{ width: '8%' }}>Código</th>
-                                    <th className="os-print-tl" style={{ width: '55%' }}>Descrição dos Produtos</th>
-                                    <th className="os-print-tc" style={{ width: '6%' }}>Un.</th>
-                                    <th className="os-print-tc" style={{ width: '6%' }}>Qtd.</th>
-                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Unit.</th>
-                                    <th className="os-print-tc" style={{ width: '7%' }}>Desc. (%)</th>
-                                    <th className="os-print-tr" style={{ width: '10%' }}>Valor Total</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {selectedOrder.products.map((prod, index) => (
-                                    <tr key={index}>
-                                      <td className="os-print-tc os-print-bold">{(prod.code || '').toUpperCase()}</td>
-                                      <td className="os-print-tl">{(prod.description || '').toUpperCase()}</td>
-                                      <td className="os-print-tc">{(prod.unit || '').toUpperCase()}</td>
-                                      <td className="os-print-tc">{prod.quantity.toFixed(2).replace('.', ',')}</td>
-                                      <td className="os-print-tr">R$ {prod.unitValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                      <td className="os-print-tc">{prod.discountPercent}%</td>
-                                      <td className="os-print-tr os-print-bold">R$ {prod.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          )}
-
-                          {/* LINHA FINAL: TOTAL DA OS */}
-                          <div className="os-print-total-row">
-                            Total da OS: R$ {selectedOrder.totalValue.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* ASSINATURAS E AUTENTICAÇÃO */}
-                      <div className="os-print-sigs">
-                        {/* Coluna Esquerda: Cliente */}
-                        <div className="os-print-sig-col">
-                          <div className="os-print-sig-box">
-                            {selectedOrder.clientSignature ? (
-                              <img src={selectedOrder.clientSignature} alt="Assinatura Cliente" className="os-print-sig-img" referrerPolicy="no-referrer" />
-                            ) : null}
-                          </div>
-                          <div className="os-print-sig-line"></div>
-                          <span className="os-print-sig-name">
-                            {selectedOrder.clientRepresentative || 'REPRESENTANTE DO CLIENTE'}
-                          </span>
-                          {selectedOrder.clientRepresentativeMatricula && (
-                            <span className="os-print-sig-sub">Matrícula/CPF: {selectedOrder.clientRepresentativeMatricula}</span>
-                          )}
-                          {selectedOrder.clientSignatureDate && (
-                            <span className="os-print-sig-date">
-                              Assinado às {new Date(selectedOrder.clientSignatureDate).toLocaleTimeString('pt-BR')} ({new Date(selectedOrder.clientSignatureDate).toLocaleDateString('pt-BR')})
-                            </span>
-                          )}
-                          <span className="os-print-sig-org">
-                            {selectedOrder.clientName}
-                          </span>
-                        </div>
-
-                        {/* Coluna Direita: Prestadora */}
-                        <div className="os-print-sig-col">
-                          <div className="os-print-sig-note">
-                            {(() => {
-                              const names = resolveOrderTechnicianDisplay(selectedOrder, '');
-                              const dateStr = selectedOrder.finishedAt ? new Date(selectedOrder.finishedAt).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR');
-                              return `Equipe autenticada no aplicativo JDSmartOS (APP: ${dateStr} ${names})`;
-                            })()}
-                          </div>
-                          <div className="os-print-sig-box">
-                            {selectedOrder.techSignature ? (
-                              <img src={selectedOrder.techSignature} alt="Assinatura Técnico" className="os-print-sig-img" referrerPolicy="no-referrer" />
-                            ) : null}
-                          </div>
-                          <div className="os-print-sig-line"></div>
-                          <span className="os-print-sig-name">
-                            {printCompany?.fullName}
-                          </span>
-                          <span className="os-print-sig-org">
-                            PRESTADORA AUTORIZADA
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Rodapé Página 1 */}
-                    {renderPageFooter(1, totalPages)}
-                  </div>
-
-                  {/* --- PÁGINA 2: ANEXOS FOTOGRÁFICOS --- */}
-                  {hasPhotos && (
-                    <div className="os-print-page">
-                      <div className="os-print-body">
-                        {/* Cabeçalho */}
-                        {renderPageHeader(2, 2)}
-
-                        {/* Título de Seção */}
-                        <div className="os-print-title-row">
-                          <span className="os-print-title-main">ORDEM DE SERVIÇO: {displayOsNumber}</span>
-                          <span className="os-print-title-sub">Anexos Fotográficos</span>
-                        </div>
-
-                        <div className="os-print-box">
-                          <div className={`os-print-box-header os-print-box-header-solo ${themeHeaderBg}`}>
-                            ANEXOS DO APP - OS: {displayOsNumber}
-                          </div>
-                        </div>
-
-                        {/* Grid de Fotos */}
-                        <div className="os-print-photos-grid">
-                          {(selectedOrder.photos || []).slice(0, 4).map((ph, idx) => (
-                            <div key={idx} className="os-print-photo-card">
-                              <img
-                                src={ph}
-                                alt={`Evidência ${idx + 1}`}
-                                className="os-print-photo-img"
-                                referrerPolicy="no-referrer"
-                              />
-                              <span className="os-print-photo-cap">
-                                Foto {idx + 1} - Evidência de Execução
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Rodapé Página 2 */}
-                      {renderPageFooter(2, 2)}
-                    </div>
-                  )}
-                </div>
+            {/* Conteúdo Imprimível do Documento */}
+            <div className="print-modal-scroll flex-1 overflow-y-auto p-8 bg-slate-100 flex flex-col items-center gap-6">
+              <div id="os-print-area" className="os-print-sheet">
+                {renderOrderPrintPages(selectedOrder)}
               </div>
             </div>
           </div>
-        );
-      })()}
+        </div>
+      )}
+
+      {/* MODAL: IMPRESSÃO EM LOTE DE ORDENS DE SERVIÇO (ARQUIVO ÚNICO) */}
+      {isBatchPrintModalOpen && (
+        <div className="print-modal-container fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full flex flex-col max-h-[92vh] overflow-hidden">
+            {/* Cabeçalho do Modal */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-6 py-4 bg-slate-50">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-sm shrink-0">
+                  <Printer className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-800 uppercase tracking-wider">
+                    {batchPrintMode === 'report'
+                      ? 'Impressão em Lote — O.S. do Relatório Ativo'
+                      : 'Impressão em Lote de Ordens de Serviço'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-semibold">
+                    {batchPrintMode === 'report'
+                      ? 'Marque ou desmarque as Ordens de Serviço abaixo para imprimir todas as selecionadas de uma só vez em um arquivo único.'
+                      : 'Digite o número da O.S. e pressione Enter para adicionar a próxima. Todas serão impressas de uma só vez em um arquivo único.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                {batchPrintViewMode === 'preview' ? (
+                  <button
+                    type="button"
+                    onClick={() => setBatchPrintViewMode('selection')}
+                    className="px-3.5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-black uppercase tracking-wider rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span>Voltar à Seleção</span>
+                  </button>
+                ) : (
+                  selectedBatchOrders.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleExecuteBatchPrint(true)}
+                      disabled={isBatchPrinting || isAnyBatchEntryLoading}
+                      className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 border border-slate-200 text-xs font-black uppercase tracking-wider rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                      title="Visualizar todas as folhas A4 antes de imprimir"
+                    >
+                      <Eye className="w-4 h-4" />
+                      <span className="hidden sm:inline">Pré-visualizar A4</span>
+                    </button>
+                  )
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => handleExecuteBatchPrint(false)}
+                  disabled={selectedBatchOrders.length === 0 || isBatchPrinting || isAnyBatchEntryLoading}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-md flex items-center gap-2 cursor-pointer"
+                >
+                  {isBatchPrinting ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Preparando Lote...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Printer className="w-4 h-4" />
+                      <span>Imprimir {selectedBatchOrders.length} O.S. (Arquivo Único)</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsBatchPrintModalOpen(false)}
+                  className="p-2 bg-white border border-slate-200 hover:bg-slate-100 text-slate-500 rounded-xl transition-all cursor-pointer"
+                  title="Fechar modal"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {batchPrintViewMode === 'selection' ? (
+              <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                {/* Caixa para digitar o número da O.S. e apertar Enter */}
+                <form onSubmit={handleAddBatchOsInput} className="bg-slate-50 border border-slate-200/90 rounded-2xl p-4 space-y-2">
+                  <label className="text-[11px] font-black uppercase tracking-wider text-slate-700 flex items-center justify-between">
+                    <span>
+                      {batchPrintMode === 'report'
+                        ? 'Adicionar outra O.S. avulsa ao lote (Digite o Nº e aperte Enter)'
+                        : 'Digite o Número da O.S. e pressione Enter para adicionar à fila'}
+                    </span>
+                    <span className="text-[10px] font-bold text-blue-600">
+                      Pressione ENTER após cada número
+                    </span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <input
+                        ref={batchInputRef}
+                        type="text"
+                        value={batchPrintInput}
+                        onChange={(e) => setBatchPrintInput(e.target.value.toUpperCase())}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddBatchOsInput();
+                          }
+                        }}
+                        placeholder="Ex: 65367 (aperte Enter para digitar a próxima O.S.)..."
+                        className="w-full pl-10 pr-4 py-3 bg-white border-2 border-blue-200 focus:border-blue-600 rounded-xl text-sm font-black text-slate-800 placeholder:text-slate-400 placeholder:font-semibold outline-none transition-all uppercase shadow-2xs"
+                        autoFocus={batchPrintMode === 'manual'}
+                      />
+                      <FileText className="w-4 h-4 text-blue-600 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={!batchPrintInput.trim()}
+                      className="px-5 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl text-xs font-black uppercase tracking-wider transition-all flex items-center gap-1.5 cursor-pointer shrink-0 shadow-sm"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Adicionar (Enter)</span>
+                    </button>
+                  </div>
+                </form>
+
+                {/* Barra de Resumo e Seleção em Massa */}
+                <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black uppercase tracking-wider text-slate-700">
+                      Ordens de Serviço na Fila:
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-blue-100 text-blue-800">
+                      {selectedBatchOrders.length} selecionada(s) de {batchPrintEntries.length}
+                    </span>
+                    {isAnyBatchEntryLoading && (
+                      <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-0.5 rounded-full">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Buscando O.S...
+                      </span>
+                    )}
+                  </div>
+
+                  {batchPrintEntries.length > 0 && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectAllBatchEntries(true)}
+                        className="px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-all cursor-pointer"
+                      >
+                        Marcar Todas
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSelectAllBatchEntries(false)}
+                        className="px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-slate-600 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg transition-all cursor-pointer"
+                      >
+                        Desmarcar Todas
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBatchPrintEntries([])}
+                        className="px-2.5 py-1 text-[10px] font-black uppercase tracking-wider text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-all cursor-pointer"
+                      >
+                        Limpar Lista
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Lista de O.S. Adicionadas / Preenchidas do Relatório */}
+                {batchPrintEntries.length === 0 ? (
+                  <div className="border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center space-y-2 bg-slate-50/50">
+                    <Printer className="w-8 h-8 text-slate-300 mx-auto" />
+                    <p className="text-xs font-black uppercase tracking-wider text-slate-500">
+                      Nenhuma Ordem de Serviço adicionada ao lote ainda
+                    </p>
+                    <p className="text-[11px] text-slate-400 font-medium max-w-md mx-auto">
+                      Digite o número da O.S. na caixa acima e aperte <strong>Enter</strong> para ir empilhando todas as ordens que deseja imprimir juntas em um único documento.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="border border-slate-200 rounded-2xl overflow-hidden bg-white divide-y divide-slate-100 max-h-[48vh] overflow-y-auto">
+                    {batchPrintEntries.map((entry, index) => {
+                      if (entry.status === 'loading') {
+                        return (
+                          <div key={entry.key} className="px-4 py-3 flex items-center justify-between bg-slate-50/60">
+                            <div className="flex items-center gap-3">
+                              <Loader2 className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
+                              <span className="text-xs font-black text-slate-700">
+                                Buscando O.S. #{entry.queriedNumber}...
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveBatchEntry(entry.key)}
+                              className="p-1 text-slate-400 hover:text-rose-600 rounded-lg cursor-pointer"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      if (entry.status === 'not_found' || !entry.order) {
+                        return (
+                          <div key={entry.key} className="px-4 py-3 flex items-center justify-between bg-rose-50/60">
+                            <div className="flex items-center gap-3">
+                              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                              <div>
+                                <span className="text-xs font-black text-rose-800">
+                                  O.S. #{entry.queriedNumber} não encontrada
+                                </span>
+                                <span className="text-[10px] font-semibold text-rose-600 block">
+                                  Verifique se o número foi digitado corretamente.
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveBatchEntry(entry.key)}
+                              className="px-2.5 py-1 bg-white hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-black uppercase cursor-pointer"
+                            >
+                              Remover
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      const ord = entry.order;
+                      const dispOs = ord.osNumber || (ord.id && !ord.id.startsWith('OS_') ? ord.id : entry.queriedNumber);
+                      const matchedAddr = addresses.find((a) => a.id === ord.addressId);
+                      const addrLabel = ord.addressStreet || matchedAddr?.street || ord.clientAddress || '---';
+
+                      return (
+                        <div
+                          key={entry.key}
+                          onClick={() => handleToggleBatchEntry(entry.key)}
+                          className={cn(
+                            "px-4 py-3 flex items-center justify-between gap-3 transition-colors cursor-pointer select-none",
+                            entry.selected ? "bg-blue-50/40 hover:bg-blue-50/80" : "bg-white hover:bg-slate-50 opacity-60"
+                          )}
+                        >
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            <input
+                              type="checkbox"
+                              checked={entry.selected}
+                              onChange={() => {}}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleBatchEntry(entry.key);
+                              }}
+                              className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 cursor-pointer shrink-0"
+                            />
+                            <span className="text-[11px] font-black text-slate-400 w-6 shrink-0">
+                              {index + 1}.
+                            </span>
+                            <span className="px-2.5 py-1 rounded-lg bg-slate-900 text-white text-xs font-black tracking-wider shrink-0">
+                              #{String(dispOs).replace(/^#+/, '')}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-black text-slate-800 truncate">
+                                  {ord.clientName || 'Cliente'}
+                                </span>
+                                {ord.isWorkshop && (
+                                  <span className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 text-[9px] font-black uppercase shrink-0">
+                                    Oficina
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-slate-500 font-semibold truncate">
+                                {addrLabel} • {ord.equipmentName || ord.type || '---'}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3 shrink-0">
+                            <span className={cn(
+                              "px-2 py-0.5 text-[9px] font-black uppercase tracking-wider rounded-full",
+                              ord.status === 'aberta' ? "bg-blue-50 text-blue-600 border border-blue-100" :
+                              ord.status === 'em_andamento' ? "bg-amber-50 text-amber-600 border border-amber-100" :
+                              ord.status === 'pre_finalizada' ? "bg-teal-50 text-teal-600 border border-teal-100" :
+                              ord.status === 'finalizada' ? "bg-emerald-50 text-emerald-600 border border-emerald-100" :
+                              "bg-rose-50 text-rose-600 border border-rose-100"
+                            )}>
+                              {getStatusLabel(ord.status)}
+                            </span>
+                            <span className="text-xs font-black text-slate-800 w-20 text-right">
+                              R$ {(ord.totalValue || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemoveBatchEntry(entry.key);
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                              title="Remover da fila de impressão"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              /* Modo de Pré-visualização das Folhas A4 Empilhadas */
+              <div className="flex-1 overflow-y-auto p-8 bg-slate-100 flex flex-col items-center gap-6">
+                <div className="os-print-sheet">
+                  {selectedBatchOrders.map((ord) => (
+                    <React.Fragment key={`preview_${ord.id}`}>
+                      {renderOrderPrintPages(ord)}
+                    </React.Fragment>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Container A4 oculto sempre pronto para envio imediato ao iframe de impressão em arquivo único */}
+            <div style={{ position: 'fixed', left: '-20000px', top: 0, width: '210mm', pointerEvents: 'none', opacity: 0 }} aria-hidden="true">
+              <div id="os-batch-print-area" className="os-print-sheet">
+                {selectedBatchOrders.map((ord) => (
+                  <React.Fragment key={`batch_print_${ord.id}`}>
+                    {renderOrderPrintPages(ord)}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: VISUALIZAÇÃO E IMPRESSÃO DE RELATÓRIO CONSOLIDADO */}
       {isReportPrintOpen && (

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,6 +20,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -29,6 +31,7 @@ import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
 import com.lefrio.atendimento.util.DateTimeUtils
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -166,7 +169,7 @@ fun ServiceOrdersScreen(
             // 2. BARRA DE BUSCA
             OutlinedTextField(
                 value = uiState.searchQuery,
-                onValueChange = { viewModel.setSearchQuery(it) },
+                onValueChange = { viewModel.setSearchQuery(it.uppercase(Locale.getDefault())) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 4.dp),
@@ -201,6 +204,7 @@ fun ServiceOrdersScreen(
                     }
                 },
                 shape = RoundedCornerShape(12.dp),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedContainerColor = Color.White,
                     unfocusedContainerColor = Color.White,

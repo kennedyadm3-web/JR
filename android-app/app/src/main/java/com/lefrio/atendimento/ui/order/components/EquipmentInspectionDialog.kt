@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -13,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -20,6 +22,7 @@ import com.lefrio.atendimento.data.local.entity.EquipmentChecklistEntity
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -136,10 +139,11 @@ fun EquipmentInspectionDialog(
 
                     OutlinedTextField(
                         value = notes,
-                        onValueChange = { notes = it },
+                        onValueChange = { notes = it.uppercase(Locale.getDefault()) },
                         label = { Text("Observações Técnicas (opcional)", fontSize = 11.sp) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                         maxLines = 3
                     )
                 } else {
@@ -154,10 +158,10 @@ fun EquipmentInspectionDialog(
                     Spacer(modifier = Modifier.height(6.dp))
 
                     val quickJustifications = listOf(
-                        "Sem acesso à sala/local",
-                        "Equipamento desativado",
-                        "Cliente solicitou adiar",
-                        "Defeito elétrico pré-existente"
+                        "SEM ACESSO À SALA/LOCAL",
+                        "EQUIPAMENTO DESATIVADO",
+                        "CLIENTE SOLICITOU ADIAR",
+                        "DEFEITO ELÉTRICO PRÉ-EXISTENTE"
                     )
 
                     quickJustifications.forEach { qj ->
@@ -169,7 +173,7 @@ fun EquipmentInspectionDialog(
                                 .padding(vertical = 4.dp)
                         ) {
                             RadioButton(
-                                selected = justification == qj,
+                                selected = justification.equals(qj, ignoreCase = true),
                                 onClick = { justification = qj }
                             )
                             Spacer(modifier = Modifier.width(4.dp))
@@ -181,10 +185,11 @@ fun EquipmentInspectionDialog(
 
                     OutlinedTextField(
                         value = justification,
-                        onValueChange = { justification = it },
+                        onValueChange = { justification = it.uppercase(Locale.getDefault()) },
                         placeholder = { Text("Ou digite o motivo detalhado...", fontSize = 11.sp) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp),
+                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                         maxLines = 3
                     )
                 }

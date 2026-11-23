@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -23,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -106,7 +108,7 @@ fun LoginScreen(
                     // Campo de Usuário ou E-mail (Compatível com PWA)
                     OutlinedTextField(
                         value = usernameOrEmail,
-                        onValueChange = { usernameOrEmail = it },
+                        onValueChange = { usernameOrEmail = it.uppercase(Locale.getDefault()) },
                         label = { Text("Usuário ou E-mail", fontSize = 12.sp) },
                         placeholder = { Text("Ex: atendimento", fontSize = 12.sp, color = Color.Gray) },
                         leadingIcon = {
@@ -118,7 +120,10 @@ fun LoginScreen(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Characters,
+                            keyboardType = KeyboardType.Text
+                        ),
                         singleLine = true
                     )
 

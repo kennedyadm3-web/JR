@@ -17,8 +17,6 @@ import com.lefrio.atendimento.ui.auth.TechnicianSelectScreen
 import com.lefrio.atendimento.ui.components.UpdateDialog
 import com.lefrio.atendimento.ui.dashboard.DashboardScreen
 import com.lefrio.atendimento.ui.dashboard.DashboardViewModel
-import com.lefrio.atendimento.ui.expenses.RouteExpensesScreen
-import com.lefrio.atendimento.ui.expenses.RouteExpensesViewModel
 import com.lefrio.atendimento.ui.notifications.NotificationsViewModel
 import com.lefrio.atendimento.ui.notifications.TechNotificationsScreen
 import com.lefrio.atendimento.ui.order.OrderDetailScreen
@@ -75,7 +73,6 @@ class MainActivity : ComponentActivity() {
                     var selectedOrderId by remember { mutableStateOf<String?>(null) }
                     var signatureOrderId by remember { mutableStateOf<String?>(null) }
                     var summaryOrderId by remember { mutableStateOf<String?>(null) }
-                    var showExpensesScreen by remember { mutableStateOf(false) }
                     var showNotificationsScreen by remember { mutableStateOf(false) }
                     var showProfileScreen by remember { mutableStateOf(false) }
                     var updateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
@@ -160,7 +157,6 @@ class MainActivity : ComponentActivity() {
                                                     showCreateOrderScreen = false
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
-                                                    showExpensesScreen = false
                                                     selectedOrderId = null
                                                     signatureOrderId = null
                                                     summaryOrderId = null
@@ -170,7 +166,6 @@ class MainActivity : ComponentActivity() {
                                                     showCreateOrderScreen = false
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
-                                                    showExpensesScreen = false
                                                     selectedOrderId = null
                                                     signatureOrderId = null
                                                     summaryOrderId = null
@@ -179,14 +174,10 @@ class MainActivity : ComponentActivity() {
                                                     currentDestination = DrawerDestination.SERVICE_ORDERS
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
-                                                    showExpensesScreen = false
                                                     selectedOrderId = null
                                                     signatureOrderId = null
                                                     summaryOrderId = null
                                                     showCreateOrderScreen = true
-                                                }
-                                                DrawerDestination.EXPENSES -> {
-                                                    showExpensesScreen = true
                                                 }
                                                 DrawerDestination.NOTIFICATIONS -> {
                                                     showNotificationsScreen = true
@@ -247,14 +238,6 @@ class MainActivity : ComponentActivity() {
                                     TechNotificationsScreen(
                                         viewModel = notificationsViewModel,
                                         onBackClick = { showNotificationsScreen = false }
-                                    )
-                                } else if (showExpensesScreen) {
-                                    val expensesViewModel = remember(state.user.uid) {
-                                        RouteExpensesViewModel(application, state.user)
-                                    }
-                                    RouteExpensesScreen(
-                                        viewModel = expensesViewModel,
-                                        onBackClick = { showExpensesScreen = false }
                                     )
                                 } else if (summaryOrderId != null) {
                                     val orderDetailViewModel = remember(summaryOrderId) {
@@ -340,9 +323,6 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onOrderClick = { orderId ->
                                             selectedOrderId = orderId
-                                        },
-                                        onExpensesClick = {
-                                            showExpensesScreen = true
                                         },
                                         onNotificationsClick = {
                                             showNotificationsScreen = true

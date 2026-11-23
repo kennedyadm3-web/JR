@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -18,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lefrio.atendimento.data.auth.TechnicianUser
@@ -57,6 +59,7 @@ fun CreateServiceOrderScreen(
     var selectedAddressStreet by remember { mutableStateOf("") }
     var selectedEquipmentId by remember { mutableStateOf("") }
     var selectedEquipmentName by remember { mutableStateOf("") }
+    var selectedEquipmentDisplay by remember { mutableStateOf("") }
 
     // Campos Técnicos do Atendimento
     var description by remember { mutableStateOf("") }
@@ -449,6 +452,7 @@ fun CreateServiceOrderScreen(
                                                 selectedAddressStreet = ""
                                                 selectedEquipmentId = ""
                                                 selectedEquipmentName = ""
+                                                selectedEquipmentDisplay = ""
                                                 clientExpanded = false
                                             }
                                         )
@@ -513,6 +517,7 @@ fun CreateServiceOrderScreen(
                                                     selectedAddressStreet = a.street
                                                     selectedEquipmentId = ""
                                                     selectedEquipmentName = ""
+                                                    selectedEquipmentDisplay = ""
                                                     viewModel.loadEquipmentsForAddress(a.id)
                                                     addressExpanded = false
                                                 }
@@ -531,10 +536,11 @@ fun CreateServiceOrderScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "MÁQUINA / EQUIPAMENTO DO ENDEREÇO *",
+                                    text = "MÁQUINA / EQUIPAMENTO *",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = TextSecondary
+                                    color = TextSecondary,
+                                    modifier = Modifier.weight(1f)
                                 )
                                 if (uiState.isLoadingEquipments) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -544,26 +550,31 @@ fun CreateServiceOrderScreen(
                                             color = BluePrimary
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Carregando máquinas...", fontSize = 10.sp, color = BluePrimary)
+                                        Text("Carregando...", fontSize = 10.sp, color = BluePrimary, maxLines = 1)
                                     }
                                 } else if (selectedAddressId.isNotBlank()) {
                                     Text(
-                                        text = "${uiState.equipments.size} máquina(s) encontrada(s)",
+                                        text = "${uiState.equipments.size} encontrada(s)",
                                         fontSize = 10.sp,
                                         color = Color(0xFF059669),
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        softWrap = false
                                     )
                                 }
                             }
                             Spacer(modifier = Modifier.height(4.dp))
                             Box(modifier = Modifier.fillMaxWidth()) {
                                 OutlinedTextField(
-                                    value = selectedEquipmentName.ifBlank {
-                                        if (selectedAddressId.isBlank()) "Selecione o Endereço primeiro..." else "Selecione a máquina deste endereço..."
+                                    value = selectedEquipmentDisplay.ifBlank {
+                                        selectedEquipmentName.ifBlank {
+                                            if (selectedAddressId.isBlank()) "Selecione o Endereço primeiro..." else "Selecione a máquina deste endereço..."
+                                        }
                                     },
                                     onValueChange = {},
                                     readOnly = true,
                                     enabled = selectedAddressId.isNotBlank(),
+                                    maxLines = 2,
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(12.dp),
                                     leadingIcon = {
@@ -592,24 +603,31 @@ fun CreateServiceOrderScreen(
                                     // Lista de máquinas reais daquele endereço
                                     if (uiState.equipments.isNotEmpty()) {
                                         uiState.equipments.forEach { eq ->
+                                            val sectorStr = eq.sector?.trim()?.takeIf { it.isNotBlank() }
+                                            val brandStr = eq.brand?.trim()?.takeIf { it.isNotBlank() }
+                                            val btuStr = eq.btu?.trim()?.takeIf { it.isNotBlank() }?.let { raw ->
+                                                if (raw.contains("BTU", ignoreCase = true)) raw else "$raw BTUs"
+                                            }
+                                            val primarySummary = listOfNotNull(sectorStr, brandStr, btuStr)
+                                                .joinToString(" • ")
+                                                .uppercase(Locale.getDefault())
+                                            val displayLabel = primarySummary.ifBlank {
+                                                eq.name.uppercase(Locale.getDefault())
+                                            }
+
                                             DropdownMenuItem(
                                                 text = {
                                                     Column {
                                                         Text(
-                                                            text = eq.name,
-                                                            fontSize = 13.sp,
+                                                            text = displayLabel,
+                                                            fontSize = 12.sp,
                                                             fontWeight = FontWeight.Bold,
                                                             color = TextPrimary
                                                         )
-                                                        val details = listOfNotNull(
-                                                            eq.brand?.takeIf { it.isNotBlank() },
-                                                            eq.btu?.takeIf { it.isNotBlank() }?.let { "$it BTUs" },
-                                                            eq.sector?.takeIf { it.isNotBlank() }
-                                                        ).joinToString(" • ")
-                                                        if (details.isNotBlank()) {
+                                                        if (primarySummary.isNotBlank() && eq.name.isNotBlank()) {
                                                             Text(
-                                                                text = details,
-                                                                fontSize = 11.sp,
+                                                                text = eq.name.uppercase(Locale.getDefault()),
+                                                                fontSize = 10.sp,
                                                                 color = TextSecondary
                                                             )
                                                         }
@@ -618,6 +636,7 @@ fun CreateServiceOrderScreen(
                                                 onClick = {
                                                     selectedEquipmentId = eq.id
                                                     selectedEquipmentName = eq.name
+                                                    selectedEquipmentDisplay = displayLabel
                                                     equipmentExpanded = false
                                                 }
                                             )
@@ -645,6 +664,7 @@ fun CreateServiceOrderScreen(
                                         onClick = {
                                             selectedEquipmentId = "OUTRO_EQUIPAMENTO"
                                             selectedEquipmentName = "OUTRO EQUIPAMENTO (Avulso)"
+                                            selectedEquipmentDisplay = "OUTRO EQUIPAMENTO (AVULSO)"
                                             equipmentExpanded = false
                                         }
                                     )
@@ -686,11 +706,12 @@ fun CreateServiceOrderScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
                             value = description,
-                            onValueChange = { description = it },
+                            onValueChange = { description = it.uppercase(Locale.getDefault()) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(85.dp),
                             shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                             placeholder = {
                                 Text(
                                     "Descreva o problema relatado pelo cliente ou motivo do chamado...",
@@ -711,11 +732,12 @@ fun CreateServiceOrderScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
                             value = diagnosis,
-                            onValueChange = { diagnosis = it },
+                            onValueChange = { diagnosis = it.uppercase(Locale.getDefault()) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(85.dp),
                             shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                             placeholder = {
                                 Text(
                                     "Diagnóstico técnico da máquina, testes realizados, defeito encontrado...",
@@ -736,11 +758,12 @@ fun CreateServiceOrderScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
                             value = solution,
-                            onValueChange = { solution = it },
+                            onValueChange = { solution = it.uppercase(Locale.getDefault()) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(85.dp),
                             shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                             placeholder = {
                                 Text(
                                     "Solução aplicada, peças trocadas, higienização, reparo e testes de rendimento...",
@@ -783,9 +806,10 @@ fun CreateServiceOrderScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
                             value = fiscalName,
-                            onValueChange = { fiscalName = it },
+                            onValueChange = { fiscalName = it.uppercase(Locale.getDefault()) },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                             leadingIcon = {
                                 Icon(Icons.Default.Person, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
                             },
@@ -807,9 +831,10 @@ fun CreateServiceOrderScreen(
                         Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
                             value = fiscalRegistration,
-                            onValueChange = { fiscalRegistration = it },
+                            onValueChange = { fiscalRegistration = it.uppercase(Locale.getDefault()) },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp),
+                            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                             leadingIcon = {
                                 Icon(Icons.Default.AccountBox, contentDescription = null, tint = BluePrimary, modifier = Modifier.size(18.dp))
                             },

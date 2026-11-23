@@ -35,13 +35,13 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
     if ('caches' in window) {
       caches.keys().then((names) => {
         names.forEach((name) => {
-          if (name !== 'lefrio-cache-v3') {
+          if (name !== 'lefrio-cache-v4') {
             caches.delete(name);
           }
         });
       }).catch(() => {});
     }
-    navigator.serviceWorker.register('/sw.js')
+    navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
       .then((reg) => {
         reg.update().catch(() => {});
         console.log('Service Worker registrado para suporte offline:', reg.scope);

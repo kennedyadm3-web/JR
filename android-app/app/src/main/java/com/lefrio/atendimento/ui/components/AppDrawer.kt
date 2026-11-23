@@ -26,7 +26,6 @@ enum class DrawerDestination {
     ROTEIRO,
     SERVICE_ORDERS,
     NEW_OS,
-    EXPENSES,
     NOTIFICATIONS,
     PROFILE
 }
@@ -184,15 +183,6 @@ fun AppDrawerContent(
                     iconTint = Color(0xFF581C87),
                     isSelected = false,
                     onClick = { onNavigate(DrawerDestination.NEW_OS) }
-                )
-
-                DrawerNavigationItem(
-                    title = "Despesas de Rota",
-                    subtitle = "Combustível, Refeição e Outros",
-                    icon = Icons.Default.ReceiptLong,
-                    iconTint = Color(0xFF059669),
-                    isSelected = currentDestination == DrawerDestination.EXPENSES,
-                    onClick = { onNavigate(DrawerDestination.EXPENSES) }
                 )
 
                 DrawerNavigationItem(

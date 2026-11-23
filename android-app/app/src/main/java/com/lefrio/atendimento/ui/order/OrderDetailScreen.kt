@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -28,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -41,6 +43,7 @@ import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
 import com.lefrio.atendimento.util.PhotoCaptureManager
 import java.io.File
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -538,11 +541,12 @@ fun OrderDetailScreen(
 
                                 OutlinedTextField(
                                     value = newEqSector,
-                                    onValueChange = { newEqSector = it },
+                                    onValueChange = { newEqSector = it.uppercase(Locale.getDefault()) },
                                     label = { Text("Nome Completo do Setor *", fontSize = 11.sp) },
                                     placeholder = { Text("Ex: Sala de Reunião 2º Andar", fontSize = 11.sp) },
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(10.dp),
+                                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                     singleLine = true,
                                     colors = OutlinedTextFieldDefaults.colors(
                                         focusedContainerColor = Color.White,
@@ -598,11 +602,12 @@ fun OrderDetailScreen(
                                 ) {
                                     OutlinedTextField(
                                         value = newEqBrand,
-                                        onValueChange = { newEqBrand = it },
+                                        onValueChange = { newEqBrand = it.uppercase(Locale.getDefault()) },
                                         label = { Text("Marca", fontSize = 11.sp) },
                                         placeholder = { Text("Ex: Carrier", fontSize = 11.sp) },
                                         modifier = Modifier.weight(1f),
                                         shape = RoundedCornerShape(10.dp),
+                                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                         singleLine = true,
                                         colors = OutlinedTextFieldDefaults.colors(
                                             focusedContainerColor = Color.White,
@@ -612,11 +617,12 @@ fun OrderDetailScreen(
 
                                     OutlinedTextField(
                                         value = newEqBtus,
-                                        onValueChange = { newEqBtus = it },
+                                        onValueChange = { newEqBtus = it.uppercase(Locale.getDefault()) },
                                         label = { Text("Capacidade (BTUs)", fontSize = 11.sp) },
                                         placeholder = { Text("12000", fontSize = 11.sp) },
                                         modifier = Modifier.weight(1f),
                                         shape = RoundedCornerShape(10.dp),
+                                        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                         singleLine = true,
                                         colors = OutlinedTextFieldDefaults.colors(
                                             focusedContainerColor = Color.White,
@@ -627,11 +633,12 @@ fun OrderDetailScreen(
 
                                 OutlinedTextField(
                                     value = newEqPatrimony,
-                                    onValueChange = { newEqPatrimony = it },
+                                    onValueChange = { newEqPatrimony = it.uppercase(Locale.getDefault()) },
                                     label = { Text("Patrimônio (Opcional)", fontSize = 11.sp) },
                                     placeholder = { Text("Em branco se não possuir", fontSize = 11.sp) },
                                     modifier = Modifier.fillMaxWidth(),
                                     shape = RoundedCornerShape(10.dp),
+                                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                     singleLine = true,
                                     colors = OutlinedTextFieldDefaults.colors(
                                         focusedContainerColor = Color.White,
@@ -767,7 +774,7 @@ fun OrderDetailScreen(
 
                             OutlinedTextField(
                                 value = uiState.routeNotes,
-                                onValueChange = { viewModel.updateRouteNotes(it) },
+                                onValueChange = { viewModel.updateRouteNotes(it.uppercase(Locale.getDefault())) },
                                 placeholder = {
                                     Text(
                                         "Descreva observações gerais desta visita, pendências, recomendações ao cliente...",
@@ -778,6 +785,7 @@ fun OrderDetailScreen(
                                     .fillMaxWidth()
                                     .heightIn(min = 96.dp),
                                 shape = RoundedCornerShape(12.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 enabled = order.status != "finalizada",
                                 minLines = 3,
                                 maxLines = 6,
@@ -975,11 +983,12 @@ fun OrderDetailScreen(
                             // Campo 1: Nome do Responsável / Fiscal
                             OutlinedTextField(
                                 value = uiState.fiscalName,
-                                onValueChange = { viewModel.updateFiscalName(it) },
+                                onValueChange = { viewModel.updateFiscalName(it.uppercase(Locale.getDefault())) },
                                 label = { Text("Nome Completo do Responsável / Fiscal", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: João Carlos Silva", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true,
                                 enabled = order.status != "finalizada",
                                 colors = OutlinedTextFieldDefaults.colors(
@@ -993,11 +1002,12 @@ fun OrderDetailScreen(
                             // Campo 2: Matrícula ou CPF do Responsável / Fiscal
                             OutlinedTextField(
                                 value = uiState.fiscalDoc,
-                                onValueChange = { viewModel.updateFiscalDoc(it) },
+                                onValueChange = { viewModel.updateFiscalDoc(it.uppercase(Locale.getDefault())) },
                                 label = { Text("Matrícula ou CPF do Responsável", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: 123456 ou 000.000.000-00", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true,
                                 enabled = order.status != "finalizada",
                                 colors = OutlinedTextFieldDefaults.colors(
