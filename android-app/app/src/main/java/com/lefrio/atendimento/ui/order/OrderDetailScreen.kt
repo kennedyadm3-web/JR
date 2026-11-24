@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.speech.RecognizerIntent
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -301,6 +302,16 @@ fun OrderDetailScreen(
         }
     }
 
+    DisposableEffect(isRecordingReportAudio) {
+        val window = (context as? Activity)?.window
+        if (isRecordingReportAudio) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     DisposableEffect(voiceTranscriber) {
         onDispose {
             voiceTranscriber.release()
@@ -331,20 +342,35 @@ fun OrderDetailScreen(
         bottomBar = {
             uiState.order?.let { order ->
                 val isFinalized = order.status == "finalizada" || order.status == "pre_finalizada"
-                val requiresChecklist = order.type.contains("PREVENTIVA", ignoreCase = true) ||
-                    order.id.startsWith("PREV_") ||
-                    uiState.totalCount > 0
-                val isFormValid = uiState.fiscalName.trim().isNotBlank() &&
-                                  uiState.fiscalDoc.trim().isNotBlank() &&
-                                  (signaturePaths.isNotEmpty() || !order.clientSignaturePath.isNullOrBlank()) &&
-                                  (!requiresChecklist || uiState.completedCount > 0)
+                val isPreventiveOrder = order.type.contains("PREVENTIVA", ignoreCase = true) ||
+                    order.id.startsWith("PREV_")
+                val requiresChecklist = isPreventiveOrder || uiState.totalCount > 0
+
+                val minFiscalChars = 4
+                val isFiscalNameValid = uiState.fiscalName.trim().length >= minFiscalChars
+                val isFiscalDocValid = uiState.fiscalDoc.trim().length >= minFiscalChars
+                val isFiscalRoleValid = !isPreventiveOrder || uiState.fiscalRole.trim().length >= minFiscalChars
+                val isFiscalContactValid = !isPreventiveOrder || uiState.fiscalContact.trim().length >= minFiscalChars
+                val isSignatureValid = signaturePaths.isNotEmpty() || !order.clientSignaturePath.isNullOrBlank()
+                val isChecklistValid = !requiresChecklist || uiState.completedCount > 0
+
+                val missingRequirements = buildList {
+                    if (!isChecklistValid) add("Ao menos 1 máquina")
+                    if (!isFiscalNameValid) add("Nome do fiscal (mín. 4)")
+                    if (!isFiscalDocValid) add("Matrícula/CPF (mín. 4)")
+                    if (!isFiscalRoleValid) add("Função (mín. 4)")
+                    if (!isFiscalContactValid) add("E-mail/Contato (mín. 4)")
+                    if (!isSignatureValid) add("Assinatura digital")
+                }
+
+                val isFormValid = missingRequirements.isEmpty()
 
                 Surface(
                     color = Color.White,
                     shadowElevation = 8.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
                         if (isFinalized) {
                             val isSynced = order.isSyncedWithServer
                             Box(
@@ -372,6 +398,15 @@ fun OrderDetailScreen(
                                 }
                             }
                         } else {
+                            if (missingRequirements.isNotEmpty()) {
+                                Text(
+                                    text = "Para finalizar, preencha: ${missingRequirements.joinToString(" • ")}",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFFB45309),
+                                    modifier = Modifier.padding(bottom = 8.dp)
+                                )
+                            }
                             Button(
                                 onClick = {
                                     if (isRecordingReportAudio) {
@@ -1146,7 +1181,7 @@ fun OrderDetailScreen(
                                 placeholder = {
                                     Text(
                                         if (isPreventiveOrder) {
-                                            "Digite ou grave um áudio para transcrever as observações gerais desta visita..."
+                                            "Digite ou grave um áudio para transcrever o relatório técnico completo desta visita (suporta textos longos)..."
                                         } else {
                                             "Descreva observações gerais desta visita, pendências, recomendações ao cliente..."
                                         },
@@ -1155,12 +1190,30 @@ fun OrderDetailScreen(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(min = 96.dp),
+                                    .heightIn(min = 140.dp),
                                 shape = RoundedCornerShape(12.dp),
                                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 enabled = order.status != "finalizada",
-                                minLines = 3,
-                                maxLines = 6,
+                                minLines = 5,
+                                maxLines = Int.MAX_VALUE,
+                                supportingText = {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "Campo expansível para relatórios extensos",
+                                            fontSize = 10.sp,
+                                            color = TextSecondary
+                                        )
+                                        Text(
+                                            text = "${uiState.routeNotes.length} caracteres",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = BluePrimary
+                                        )
+                                    }
+                                },
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedContainerColor = Color(0xFFF8FAFC),
                                     unfocusedContainerColor = Color(0xFFF8FAFC)
@@ -1172,6 +1225,14 @@ fun OrderDetailScreen(
 
                 // SEÇÃO DO RESPONSÁVEL DO CLIENTE E ASSINATURA DIGITAL (Fim da Folha de Atendimento)
                 item {
+                    val isPreventiveOrder = order.type.contains("PREVENTIVA", ignoreCase = true) ||
+                        order.id.startsWith("PREV_")
+                    val isReadOnly = order.status == "finalizada"
+                    val nameLen = uiState.fiscalName.trim().length
+                    val docLen = uiState.fiscalDoc.trim().length
+                    val roleLen = uiState.fiscalRole.trim().length
+                    val contactLen = uiState.fiscalContact.trim().length
+
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1205,7 +1266,7 @@ fun OrderDetailScreen(
                                         color = TextPrimary
                                     )
                                     Text(
-                                        text = "Dados obrigatórios no fim da folha para fechamento do serviço",
+                                        text = "Todos os campos abaixo são obrigatórios (mín. 4 caracteres cada) + assinatura",
                                         fontSize = 10.sp,
                                         color = TextSecondary
                                     )
@@ -1218,77 +1279,117 @@ fun OrderDetailScreen(
                             OutlinedTextField(
                                 value = uiState.fiscalName,
                                 onValueChange = { viewModel.updateFiscalName(it.uppercase(Locale.getDefault())) },
-                                label = { Text("Nome Completo do Responsável / Fiscal", fontSize = 11.sp) },
-                                placeholder = { Text("Ex: João Carlos Silva", fontSize = 11.sp) },
+                                label = { Text("Nome Completo do Responsável / Fiscal *", fontSize = 11.sp) },
+                                placeholder = { Text("Ex: JOÃO CARLOS SILVA", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
                                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true,
-                                enabled = order.status != "finalizada",
+                                enabled = !isReadOnly,
+                                isError = !isReadOnly && nameLen in 1..3,
+                                supportingText = if (!isReadOnly && nameLen < 4) {
+                                    {
+                                        Text(
+                                            text = if (nameLen == 0) "Obrigatório (mínimo de 4 caracteres)" else "Faltam ${4 - nameLen} caractere(s) (mínimo 4)",
+                                            fontSize = 10.sp,
+                                            color = if (nameLen == 0) Color(0xFFB45309) else Color(0xFFDC2626)
+                                        )
+                                    }
+                                } else null,
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedContainerColor = Color.White,
                                     unfocusedContainerColor = Color.White
                                 )
                             )
 
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // Campo 2: Matrícula ou CPF do Responsável / Fiscal
                             OutlinedTextField(
                                 value = uiState.fiscalDoc,
                                 onValueChange = { viewModel.updateFiscalDoc(it.uppercase(Locale.getDefault())) },
-                                label = { Text("Matrícula ou CPF do Responsável", fontSize = 11.sp) },
+                                label = { Text("Matrícula ou CPF do Responsável *", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: 123456 ou 000.000.000-00", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
                                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true,
-                                enabled = order.status != "finalizada",
+                                enabled = !isReadOnly,
+                                isError = !isReadOnly && docLen in 1..3,
+                                supportingText = if (!isReadOnly && docLen < 4) {
+                                    {
+                                        Text(
+                                            text = if (docLen == 0) "Obrigatório (mínimo de 4 caracteres)" else "Faltam ${4 - docLen} caractere(s) (mínimo 4)",
+                                            fontSize = 10.sp,
+                                            color = if (docLen == 0) Color(0xFFB45309) else Color(0xFFDC2626)
+                                        )
+                                    }
+                                } else null,
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedContainerColor = Color.White,
                                     unfocusedContainerColor = Color.White
                                 )
                             )
 
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // Campo 3: Função do Responsável / Fiscal
                             OutlinedTextField(
                                 value = uiState.fiscalRole,
                                 onValueChange = { viewModel.updateFiscalRole(it.uppercase(Locale.getDefault())) },
-                                label = { Text("Função", fontSize = 11.sp) },
+                                label = { Text(if (isPreventiveOrder) "Função *" else "Função", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: GERENTE / FISCAL DE CONTRATO", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
                                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true,
-                                enabled = order.status != "finalizada",
+                                enabled = !isReadOnly,
+                                isError = !isReadOnly && isPreventiveOrder && roleLen in 1..3,
+                                supportingText = if (!isReadOnly && isPreventiveOrder && roleLen < 4) {
+                                    {
+                                        Text(
+                                            text = if (roleLen == 0) "Obrigatório (mínimo de 4 caracteres)" else "Faltam ${4 - roleLen} caractere(s) (mínimo 4)",
+                                            fontSize = 10.sp,
+                                            color = if (roleLen == 0) Color(0xFFB45309) else Color(0xFFDC2626)
+                                        )
+                                    }
+                                } else null,
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedContainerColor = Color.White,
                                     unfocusedContainerColor = Color.White
                                 )
                             )
 
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Spacer(modifier = Modifier.height(8.dp))
 
                             // Campo 4: E-mail / Contato do Responsável / Fiscal
                             OutlinedTextField(
                                 value = uiState.fiscalContact,
                                 onValueChange = { viewModel.updateFiscalContact(it.uppercase(Locale.getDefault())) },
-                                label = { Text("E-mail / Contato", fontSize = 11.sp) },
+                                label = { Text(if (isPreventiveOrder) "E-mail / Contato *" else "E-mail / Contato", fontSize = 11.sp) },
                                 placeholder = { Text("Ex: FISCAL@EMPRESA.COM OU (82) 99999-9999", fontSize = 11.sp) },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(10.dp),
                                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                                 singleLine = true,
-                                enabled = order.status != "finalizada",
+                                enabled = !isReadOnly,
+                                isError = !isReadOnly && isPreventiveOrder && contactLen in 1..3,
+                                supportingText = if (!isReadOnly && isPreventiveOrder && contactLen < 4) {
+                                    {
+                                        Text(
+                                            text = if (contactLen == 0) "Obrigatório (mínimo de 4 caracteres)" else "Faltam ${4 - contactLen} caractere(s) (mínimo 4)",
+                                            fontSize = 10.sp,
+                                            color = if (contactLen == 0) Color(0xFFB45309) else Color(0xFFDC2626)
+                                        )
+                                    }
+                                } else null,
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedContainerColor = Color.White,
                                     unfocusedContainerColor = Color.White
                                 )
                             )
 
-                            Spacer(modifier = Modifier.height(16.dp))
+                            Spacer(modifier = Modifier.height(14.dp))
 
                             // Campo 3: Área de Assinatura Digital
                             Row(

@@ -57,6 +57,7 @@ class OrderDetailViewModel(
 
     companion object {
         private const val LEGACY_PMOC_DEFAULT_NOTE = "Manutenção Preventiva Periódica PMOC - Higienização, Testes e Revisão"
+        private const val MIN_FISCAL_FIELD_CHARS = 4
     }
 
     init {
@@ -272,23 +273,43 @@ class OrderDetailViewModel(
         signaturePaths: List<SignaturePath>
     ) {
         val currentState = _uiState.value
+        val isPreventive = currentState.order?.type?.contains("PREVENTIVA", ignoreCase = true) == true ||
+            currentState.order?.id?.startsWith("PREV_") == true
+
         val name = currentState.fiscalName.trim()
         val doc = currentState.fiscalDoc.trim()
+        val role = currentState.fiscalRole.trim()
+        val contact = currentState.fiscalContact.trim()
+        val hasDigitalSignature = signaturePaths.isNotEmpty() || !currentState.order?.clientSignaturePath.isNullOrBlank()
 
-        if (name.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Informe o Nome do Responsável / Fiscal do Cliente.") }
+        if (name.length < MIN_FISCAL_FIELD_CHARS) {
+            _uiState.update {
+                it.copy(errorMessage = "Informe o Nome Completo do Fiscal (mínimo de 4 caracteres).")
+            }
             return
         }
-        if (doc.isBlank()) {
-            _uiState.update { it.copy(errorMessage = "Informe a Matrícula ou CPF do Responsável / Fiscal.") }
+        if (doc.length < MIN_FISCAL_FIELD_CHARS) {
+            _uiState.update {
+                it.copy(errorMessage = "Informe a Matrícula ou CPF do Fiscal (mínimo de 4 caracteres).")
+            }
             return
         }
-        if (signaturePaths.isEmpty() && currentState.order?.clientSignaturePath == null) {
+        if (isPreventive && role.length < MIN_FISCAL_FIELD_CHARS) {
+            _uiState.update {
+                it.copy(errorMessage = "Informe a Função do Fiscal (mínimo de 4 caracteres).")
+            }
+            return
+        }
+        if (isPreventive && contact.length < MIN_FISCAL_FIELD_CHARS) {
+            _uiState.update {
+                it.copy(errorMessage = "Informe o E-mail / Contato do Fiscal (mínimo de 4 caracteres).")
+            }
+            return
+        }
+        if (!hasDigitalSignature) {
             _uiState.update { it.copy(errorMessage = "Colha a Assinatura Digital do Responsável na área de assinatura.") }
             return
         }
-        val isPreventive = currentState.order?.type?.contains("PREVENTIVA", ignoreCase = true) == true ||
-            currentState.order?.id?.startsWith("PREV_") == true
         if ((isPreventive || currentState.totalCount > 0) && currentState.completedCount == 0) {
             _uiState.update { it.copy(errorMessage = "Atenda ao menos 1 máquina do checklist antes de finalizar.") }
             return

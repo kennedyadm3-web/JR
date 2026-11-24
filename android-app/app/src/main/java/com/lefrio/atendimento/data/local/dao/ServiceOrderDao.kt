@@ -35,6 +35,7 @@ interface ServiceOrderDao {
         UPDATE service_orders SET 
             clientRepresentative = :fiscalName,
             clientSigneeDoc = :fiscalDoc,
+            isSyncedWithServer = 0,
             lastModifiedAt = :timestamp
         WHERE id = :orderId
     """)

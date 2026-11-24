@@ -11,12 +11,15 @@ import android.speech.SpeechRecognizer
 import java.util.Locale
 
 /**
- * Gerenciador dedicado à gravação e transcrição de áudio em Português (pt-BR)
+ * Gerenciador dedicado à gravação e transcrição contínua de áudio em Português (pt-BR)
  * exclusivamente para o campo de Relatório Técnico do atendimento preventivo.
  *
- * Mantém escuta contínua até o técnico tocar em "Parar", com visualização parcial
- * em tempo real, nível de áudio (RMS) e fallback seguro caso o serviço inline
- * não esteja disponível no aparelho.
+ * Adaptado para relatórios técnicos longos:
+ * - Janelas estendidas de silêncio para pausas naturais de raciocínio do técnico;
+ * - Reinício contínuo automático entre frases sem perder texto anterior;
+ * - Proteção contra duplicação de segmentos ao parar a gravação;
+ * - Confirmação imediata de parciais pendentes antes de encerrar ou reiniciar;
+ * - Fallback seguro para o diálogo nativo do Android quando necessário.
  */
 class VoiceReportTranscriber(
     private val context: Context,
@@ -31,6 +34,8 @@ class VoiceReportTranscriber(
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListeningRequested = false
     private var lastPartialText = ""
+    private var lastCommittedNormalized = ""
+    private var lastCommittedAtMs = 0L
     private var consecutiveErrorCount = 0
 
     private val restartRunnable = Runnable {
@@ -50,27 +55,47 @@ class VoiceReportTranscriber(
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Fale o relatório técnico do atendimento...")
+            // Janelas amplas para relatórios técnicos extensos com pausas entre frases
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 5000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Fale o relatório técnico completo do atendimento...")
         }
     }
 
+    private fun commitSegmentSafely(rawText: String) {
+        val clean = rawText.trim().uppercase(Locale("pt", "BR"))
+        if (clean.isBlank()) return
+
+        val now = System.currentTimeMillis()
+        // Evita duplicação caso onPartialResults + onResults disparem com o mesmo trecho no encerramento
+        if (clean == lastCommittedNormalized && (now - lastCommittedAtMs) < 1500L) {
+            return
+        }
+        lastCommittedNormalized = clean
+        lastCommittedAtMs = now
+        onFinalSegment(clean)
+    }
+
     fun start() {
-        mainHandler.post {
-            if (isListeningRequested) return@post
-
-            if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-                onFallbackToSystemIntent()
-                return@post
+        val action = {
+            if (!isListeningRequested) {
+                if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                    onFallbackToSystemIntent()
+                } else {
+                    isListeningRequested = true
+                    lastPartialText = ""
+                    consecutiveErrorCount = 0
+                    onListeningStateChanged(true)
+                    onPartialTranscript("")
+                    startSingleListeningCycle()
+                }
             }
-
-            isListeningRequested = true
-            lastPartialText = ""
-            consecutiveErrorCount = 0
-            onListeningStateChanged(true)
-            onPartialTranscript("")
-            startSingleListeningCycle()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
         }
     }
 
@@ -89,7 +114,7 @@ class VoiceReportTranscriber(
                 }
 
                 if (pendingPartial.isNotBlank()) {
-                    onFinalSegment(pendingPartial.uppercase(Locale("pt", "BR")))
+                    commitSegmentSafely(pendingPartial)
                 }
 
                 onPartialTranscript("")
@@ -106,12 +131,17 @@ class VoiceReportTranscriber(
     }
 
     fun release() {
-        mainHandler.post {
+        val action = {
             isListeningRequested = false
             lastPartialText = ""
             mainHandler.removeCallbacks(restartRunnable)
             onAudioLevelChanged(0f)
             destroyRecognizerInternal()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            action()
+        } else {
+            mainHandler.post(action)
         }
     }
 
@@ -127,7 +157,6 @@ class VoiceReportTranscriber(
                 override fun onBeginningOfSpeech() {}
 
                 override fun onRmsChanged(rmsdB: Float) {
-                    // Normaliza o nível de volume do microfone para 0f..1f
                     val normalized = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
                     onAudioLevelChanged(normalized)
                 }
@@ -142,24 +171,24 @@ class VoiceReportTranscriber(
                     onAudioLevelChanged(0f)
                     if (!isListeningRequested) return
 
-                    // Se houver texto parcial antes de expirar o silêncio, confirma no campo
+                    // Nunca perde o que já estava sendo reconhecido antes da pausa/erro
                     val pending = lastPartialText.trim()
                     if (pending.isNotBlank()) {
                         lastPartialText = ""
                         onPartialTranscript("")
-                        onFinalSegment(pending.uppercase(Locale("pt", "BR")))
+                        commitSegmentSafely(pending)
                     }
 
                     when (error) {
                         SpeechRecognizer.ERROR_NO_MATCH,
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> {
-                            // Continua gravando automaticamente após pequenas pausas do técnico
-                            scheduleRestart(250L)
+                            // Mantém gravação contínua para relatórios longos até o técnico tocar em "Parar"
+                            scheduleRestart(220L)
                         }
                         SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
                             consecutiveErrorCount++
-                            if (consecutiveErrorCount <= 2) {
-                                scheduleRestart(500L)
+                            if (consecutiveErrorCount <= 3) {
+                                scheduleRestart(450L)
                             } else {
                                 stopWithError("Microfone ocupado no momento. Tente novamente.")
                             }
@@ -173,10 +202,9 @@ class VoiceReportTranscriber(
                         SpeechRecognizer.ERROR_NETWORK,
                         SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
                         SpeechRecognizer.ERROR_SERVER -> {
-                            stopWithError("Sem conexão com o serviço de transcrição de voz. Verifique a internet ou o pacote offline de português no aparelho.")
+                            stopWithError("Aparelho offline ou sem pacote de voz offline (Português) instalado. Você pode digitar o relatório normalmente offline.")
                         }
                         else -> {
-                            // Fallback transparente para o diálogo nativo de voz do Android
                             isListeningRequested = false
                             mainHandler.removeCallbacks(restartRunnable)
                             onPartialTranscript("")
@@ -191,16 +219,18 @@ class VoiceReportTranscriber(
                     onAudioLevelChanged(0f)
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val bestText = matches?.firstOrNull()?.trim().orEmpty()
+                    val fallbackPartial = lastPartialText.trim()
                     lastPartialText = ""
                     onPartialTranscript("")
 
-                    if (bestText.isNotBlank()) {
-                        onFinalSegment(bestText.uppercase(Locale("pt", "BR")))
+                    val textToCommit = bestText.ifBlank { fallbackPartial }
+                    if (textToCommit.isNotBlank()) {
+                        commitSegmentSafely(textToCommit)
                     }
 
-                    // Mantém escuta ativa até o técnico clicar em "Parar"
+                    // Continua gravando automaticamente para relatórios extensos
                     if (isListeningRequested) {
-                        scheduleRestart(220L)
+                        scheduleRestart(200L)
                     }
                 }
 

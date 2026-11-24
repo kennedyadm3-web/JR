@@ -2,7 +2,9 @@ package com.lefrio.atendimento.data.sync
 
 import android.content.Context
 import android.util.Log
+import com.google.firebase.FirebaseNetworkException
 import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import com.lefrio.atendimento.data.FirebaseConfig
@@ -12,6 +14,7 @@ import com.lefrio.atendimento.data.local.entity.isRemovalRequested
 import com.lefrio.atendimento.util.NetworkMonitor
 import com.lefrio.atendimento.util.PhotoCaptureManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -22,6 +25,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 
 /**
  * Gerenciador de Sincronização Resiliente Android <-> Firestore.
@@ -71,12 +75,49 @@ class FirebaseSyncManager(private val context: Context) {
     private fun getBackoffDelayMs(retryCount: Int): Long {
         return when (retryCount) {
             0 -> 0L
-            1 -> 30_000L       // 30s
-            2 -> 120_000L      // 2 min
-            3 -> 300_000L      // 5 min
-            4 -> 900_000L      // 15 min
-            else -> 1_800_000L // 30 min
+            1 -> 20_000L       // 20s
+            2 -> 60_000L       // 1 min
+            3 -> 180_000L      // 3 min
+            4 -> 300_000L      // 5 min
+            else -> 600_000L   // 10 min (teto para recuperação rápida pós-sinal instável)
         }
+    }
+
+    /**
+     * Identifica falhas transitórias de rede/sinal instável para nunca isolar atendimentos válidos em quarentena.
+     */
+    private fun isTransientNetworkError(throwable: Throwable?, reason: String): Boolean {
+        var current: Throwable? = throwable
+        while (current != null) {
+            when (current) {
+                is TimeoutCancellationException,
+                is IOException,
+                is FirebaseNetworkException -> return true
+                is FirebaseFirestoreException -> {
+                    when (current.code) {
+                        FirebaseFirestoreException.Code.UNAVAILABLE,
+                        FirebaseFirestoreException.Code.DEADLINE_EXCEEDED,
+                        FirebaseFirestoreException.Code.ABORTED,
+                        FirebaseFirestoreException.Code.RESOURCE_EXHAUSTED,
+                        FirebaseFirestoreException.Code.INTERNAL,
+                        FirebaseFirestoreException.Code.UNKNOWN -> return true
+                        else -> {}
+                    }
+                }
+            }
+            current = current.cause
+        }
+
+        val normalized = reason.lowercase()
+        return normalized.contains("timeout") ||
+            normalized.contains("timed out") ||
+            normalized.contains("unavailable") ||
+            normalized.contains("network") ||
+            normalized.contains("conex") ||
+            normalized.contains("socket") ||
+            normalized.contains("unable to resolve host") ||
+            normalized.contains("failed to connect") ||
+            normalized.contains("aguardando confirmação")
     }
 
     /**
@@ -92,6 +133,13 @@ class FirebaseSyncManager(private val context: Context) {
         syncMutex.withLock {
             if (!NetworkMonitor.hasValidatedInternet(context)) {
                 return@withLock 0
+            }
+
+            // Em sincronização manual ou finalização ativa, recupera eventuais tarefas quarentenadas para nova tentativa
+            if (ignoreBackoff) {
+                try {
+                    db.syncQueueDao().retryAllQuarantinedTasks()
+                } catch (_: Exception) {}
             }
 
             // 1. Compacta pendências redundantes antes de iniciar o envio (economia massiva de 4G pós-offline)
@@ -149,11 +197,11 @@ class FirebaseSyncManager(private val context: Context) {
                             delay(CADENCE_HEAVY_TASK_DELAY_MS)
                         }
                     } else {
-                        handleTaskFailure(task, "Aguardando confirmação do servidor")
+                        handleTaskFailure(task, "Aguardando confirmação do servidor", null)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Erro ao sincronizar tarefa #${task.queueId} (${task.entityType}): ${e.message}")
-                    handleTaskFailure(task, e.message ?: "Conexão instável")
+                    handleTaskFailure(task, e.message ?: "Conexão instável", e)
                 }
             }
 
@@ -161,7 +209,13 @@ class FirebaseSyncManager(private val context: Context) {
         }
     }
 
-    private suspend fun handleTaskFailure(task: SyncQueueEntity, reason: String) {
+    private suspend fun handleTaskFailure(task: SyncQueueEntity, reason: String, throwable: Throwable? = null) {
+        if (isTransientNetworkError(throwable, reason)) {
+            Log.w(TAG, "Falha transitória de rede na tarefa #${task.queueId} (${task.entityType}). Mantendo em fila ativa para reenvio automático: $reason")
+            db.syncQueueDao().markTaskFailed(task.queueId, reason)
+            return
+        }
+
         val nextRetryCount = task.retryCount + 1
         if (nextRetryCount >= MAX_RETRY_COUNT) {
             Log.w(TAG, "Tarefa #${task.queueId} (${task.entityType}) movida para QUARENTENA após $nextRetryCount tentativas: $reason")
@@ -491,15 +545,22 @@ class FirebaseSyncManager(private val context: Context) {
                 val otherPhotoPaths = parseJsonStringArray(payload.optJSONArray("otherPhotoPaths"))
 
                 val checklistArr = payload.optJSONArray("checklist") ?: JSONArray()
-                // Calcula quantas fotos existem no total para ajustar compressão e nunca estourar o limite de 1MB do Firestore
+                // Calcula quantas fotos e volume textual existem para nunca estourar o limite de 1MB do Firestore
                 var totalPhotoCount = otherPhotoPaths.size
+                var checklistTextBytes = 0
                 for (i in 0 until checklistArr.length()) {
                     val obj = checklistArr.getJSONObject(i)
                     totalPhotoCount += (obj.optJSONArray("localPhotoPaths")?.length() ?: 0)
+                    checklistTextBytes += obj.optString("notes", "").toByteArray(Charsets.UTF_8).size +
+                        obj.optString("justification", "").toByteArray(Charsets.UTF_8).size + 240
                 }
                 val photoMaxDim = if (totalPhotoCount > 6) 560 else 720
                 val photoQuality = if (totalPhotoCount > 6) 45 else 55
-                var remainingPhotoBudgetBytes = 680_000 // Reserva margem segura abaixo de 1MB para assinatura + checklist
+                val routeNotesBytes = routeNotes.toByteArray(Charsets.UTF_8).size
+                val signatureBytes = clientSignature.toByteArray(Charsets.UTF_8).size
+                val metadataReserveBytes = routeNotesBytes + signatureBytes + checklistTextBytes + 32_000
+                // Garante prioridade total ao Relatório Técnico, assinatura e checklist sem estourar 1MB do Firestore
+                var remainingPhotoBudgetBytes = (820_000 - metadataReserveBytes).coerceAtLeast(120_000)
 
                 val encodedOtherPhotos = mutableListOf<String>()
                 for (p in encodePhotosToDataUrls(otherPhotoPaths, maxCount = 4, maxDimension = photoMaxDim, quality = photoQuality)) {

@@ -35,6 +35,15 @@ class PhotoCaptureManager(private val context: Context) {
         private const val RETENTION_MS = 7L * 24L * 60L * 60L * 1000L   // 7 dias
 
         /**
+         * Resolve o diretório seguro de imagens com fallback automático para armazenamento interno
+         * caso o armazenamento externo esteja temporariamente indisponível.
+         */
+        fun resolvePicturesBaseDir(context: Context): File {
+            return context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+                ?: File(context.filesDir, "Pictures")
+        }
+
+        /**
          * Remove fotos e assinaturas locais com mais de 7 dias pertencentes a atendimentos já sincronizados.
          * Nunca remove nenhum arquivo vinculado a ordens não sincronizadas, checklists pendentes ou itens na fila sync_queue.
          */
@@ -118,11 +127,16 @@ class PhotoCaptureManager(private val context: Context) {
                 }
 
                 val cutoffTime = now - RETENTION_MS
-                val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-                val targetDirs = listOfNotNull(
-                    baseDir?.let { File(it, "ServicePhotos") },
-                    baseDir?.let { File(it, "Signatures") }
-                )
+                val baseDirs = listOfNotNull(
+                    context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+                    File(context.filesDir, "Pictures")
+                ).distinctBy { it.absolutePath }
+                val targetDirs = baseDirs.flatMap { baseDir ->
+                    listOf(
+                        File(baseDir, "ServicePhotos"),
+                        File(baseDir, "Signatures")
+                    )
+                }
 
                 var deletedCount = 0
                 for (dir in targetDirs) {
@@ -158,7 +172,7 @@ class PhotoCaptureManager(private val context: Context) {
     fun createPhotoUri(orderId: String, equipmentId: String): Pair<Uri, File> {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
         val storageDir = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+            resolvePicturesBaseDir(context),
             "ServicePhotos"
         )
         if (!storageDir.exists()) {
@@ -236,7 +250,7 @@ class PhotoCaptureManager(private val context: Context) {
         return try {
             val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
             val storageDir = File(
-                context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+                resolvePicturesBaseDir(context),
                 "ServicePhotos"
             )
             if (!storageDir.exists()) {

@@ -230,16 +230,22 @@ fun saveSignatureToLocalFile(
         }
     }
 
-    val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), "Signatures")
+    val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+        ?: File(context.filesDir, "Pictures")
+    val dir = File(baseDir, "Signatures")
     if (!dir.exists()) dir.mkdirs()
 
     val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
     val file = File(dir, "SIG_OS_${orderId}_$timeStamp.png")
 
-    val fos = FileOutputStream(file)
-    bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-    fos.flush()
-    fos.close()
+    try {
+        FileOutputStream(file).use { fos ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+            fos.flush()
+        }
+    } finally {
+        bitmap.recycle()
+    }
 
     return file
 }
