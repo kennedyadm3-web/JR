@@ -1052,7 +1052,7 @@ class ServiceOrderRepository(private val context: Context) {
                     if (hasLocalUnsyncedWork) {
                         ordersToSave[i] = incoming.copy(
                             status = if (existing.status == "finalizada" || existing.status == "em_andamento") existing.status else incoming.status,
-                            generalNotes = if (existing.generalNotes.isNotBlank()) existing.generalNotes else incoming.generalNotes,
+                            generalNotes = if (!existing.generalNotes.isNullOrBlank()) existing.generalNotes else incoming.generalNotes,
                             clientRepresentative = if (!existing.clientRepresentative.isNullOrBlank()) existing.clientRepresentative else incoming.clientRepresentative,
                             clientSigneeDoc = if (!existing.clientSigneeDoc.isNullOrBlank()) existing.clientSigneeDoc else incoming.clientSigneeDoc,
                             clientSignatureDate = existing.clientSignatureDate ?: incoming.clientSignatureDate,
@@ -1068,7 +1068,7 @@ class ServiceOrderRepository(private val context: Context) {
                         val reopenedByAdmin = existing.status == "finalizada" && incoming.status == "aberta"
                         ordersToSave[i] = incoming.copy(
                             status = if (reopenedByAdmin) "aberta" else if (incoming.status == "finalizada") "finalizada" else if (existing.status == "em_andamento") "em_andamento" else incoming.status,
-                            generalNotes = if (reopenedByAdmin) incoming.generalNotes else if (existing.generalNotes.isNotBlank()) existing.generalNotes else incoming.generalNotes,
+                            generalNotes = if (reopenedByAdmin) incoming.generalNotes else if (!existing.generalNotes.isNullOrBlank()) existing.generalNotes else incoming.generalNotes,
                             clientRepresentative = incoming.clientRepresentative ?: if (reopenedByAdmin) null else existing.clientRepresentative,
                             clientSigneeDoc = incoming.clientSigneeDoc ?: if (reopenedByAdmin) null else existing.clientSigneeDoc,
                             clientSignatureDate = if (reopenedByAdmin) null else (incoming.clientSignatureDate ?: existing.clientSignatureDate),
