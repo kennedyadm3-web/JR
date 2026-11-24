@@ -35,6 +35,7 @@ import com.lefrio.atendimento.ui.serviceorders.CreateServiceOrderScreen
 import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersScreen
 import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersViewModel
 import com.lefrio.atendimento.ui.theme.LeFrioTheme
+import com.lefrio.atendimento.data.sync.ConnectionTelemetryManager
 import com.lefrio.atendimento.util.AppUpdateInfo
 import com.lefrio.atendimento.util.AppUpdateManager
 import kotlinx.coroutines.launch
@@ -49,12 +50,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        ConnectionTelemetryManager.onAppForegrounded(this)
         if (pendingInstallAfterPermission) {
             pendingInstallAfterPermission = false
             if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
                 updateManager.installDownloadedApk()
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        ConnectionTelemetryManager.onAppBackgrounded()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,6 +106,20 @@ class MainActivity : ComponentActivity() {
                     // Checagem automática silenciosa na inicialização
                     LaunchedEffect(Unit) {
                         triggerCheckUpdate(manual = false)
+                    }
+
+                    // Vincula ou encerra silenciosamente a telemetria de conexão conforme o técnico autenticado
+                    LaunchedEffect(authState) {
+                        when (val currentAuth = authState) {
+                            is AuthUiState.Success -> {
+                                ConnectionTelemetryManager.startForCurrentTechnician(this@MainActivity)
+                            }
+                            is AuthUiState.NeedsTechnicianSelect,
+                            is AuthUiState.Idle -> {
+                                ConnectionTelemetryManager.stop()
+                            }
+                            else -> {}
+                        }
                     }
 
                     // Diálogo de atualização in-app aprimorado

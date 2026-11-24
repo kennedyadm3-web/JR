@@ -97,6 +97,7 @@ class NetworkConnectivityMonitor(private val context: Context) {
                 return@launch
             }
 
+            ConnectionTelemetryManager.onNetworkRegained(context)
             triggerAutoSync()
         }
     }

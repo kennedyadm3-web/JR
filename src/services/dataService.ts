@@ -2124,18 +2124,19 @@ export const dataService = {
     }
   },
 
-  async requestTechnicianPing(technicianId: string, secondaryKeys?: string[]): Promise<void> {
-    if (!technicianId) return;
+  async requestTechnicianPing(technicianId: string, secondaryKeys?: string[]): Promise<string> {
+    const pingTime = new Date().toISOString();
+    if (!technicianId) return pingTime;
     try {
       const keysToPing = new Set<string>();
-      keysToPing.add(String(technicianId).trim().toUpperCase());
+      const primary = String(technicianId).trim().toUpperCase();
+      if (primary) keysToPing.add(primary);
       if (Array.isArray(secondaryKeys)) {
         secondaryKeys.forEach(k => {
           if (k && k.trim()) keysToPing.add(k.trim().toUpperCase());
         });
       }
 
-      const pingTime = new Date().toISOString();
       const promises = Array.from(keysToPing).map(key => {
         const docRef = doc(db, COLLECTIONS.TECHNICIAN_CONNECTIONS, key);
         return setDoc(docRef, {
@@ -2148,6 +2149,7 @@ export const dataService = {
     } catch (e) {
       console.error('Erro ao enviar solicitação de teste de ping para o técnico:', e);
     }
+    return pingTime;
   },
 
   // Logistics: Generate Monthly Schedule

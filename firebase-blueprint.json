@@ -292,6 +292,29 @@
         "techSignature": { "type": "string", "description": "Technician digital signature image." },
         "updatedAt": { "type": "string", "format": "date-time" }
       }
+    },
+    "TechnicianConnection": {
+      "title": "Technician Connection Telemetry",
+      "description": "Real-time connection quality and instant ping/pong telemetry for technician devices (Android & PWA).",
+      "type": "object",
+      "properties": {
+        "technicianId": { "type": "string", "maxLength": 128 },
+        "technicianName": { "type": "string", "maxLength": 128 },
+        "technicianPin": { "type": "string", "maxLength": 32 },
+        "isOnline": { "type": "boolean" },
+        "effectiveType": { "type": "string", "maxLength": 32 },
+        "rttMs": { "type": "number" },
+        "downlinkMbps": { "type": "number" },
+        "pingMs": { "type": "number" },
+        "lastSeenAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "pingRequestedAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "pingRespondedAt": { "type": "string", "format": "date-time", "maxLength": 64 },
+        "pendingOfflineCount": { "type": "integer" },
+        "deviceInfo": { "type": "string", "maxLength": 256 },
+        "appVersion": { "type": "string", "maxLength": 64 },
+        "platform": { "type": "string", "maxLength": 32 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
     }
   },
   "firestore": {
@@ -370,6 +393,10 @@
     "routeExpenses": {
         "schema": "RouteExpense",
         "description": "Collection of travel and route expenses submitted by technicians with receipts and approval workflows."
+    },
+    "technicianConnections": {
+        "schema": "TechnicianConnection",
+        "description": "Real-time connection telemetry and instant ping/pong checks between admin panel and technician devices."
     }
   }
 }

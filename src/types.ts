@@ -369,14 +369,17 @@ export interface TechnicianConnectionStatus {
   technicianId: string; // ID, PIN or short name
   technicianName: string;
   isOnline: boolean;
-  effectiveType?: string; // '4g' | '3g' | '2g' | 'wifi' | 'slow-2g' | 'unknown'
+  effectiveType?: string; // '5g' | '4g' | '3g' | '2g' | 'wifi' | 'slow-2g' | 'unknown'
   rttMs?: number;
   downlinkMbps?: number;
   pingMs?: number;
   lastSeenAt: string;
   pendingOfflineCount?: number;
   pingRequestedAt?: string;
+  pingRespondedAt?: string;
   deviceInfo?: string;
+  appVersion?: string;
+  platform?: string;
   updatedAt?: any;
 }
 

@@ -3,6 +3,7 @@ package com.lefrio.atendimento
 import android.app.Application
 import com.google.firebase.FirebaseApp
 import com.lefrio.atendimento.data.local.AppDatabase
+import com.lefrio.atendimento.data.sync.ConnectionTelemetryManager
 import com.lefrio.atendimento.data.sync.NetworkConnectivityMonitor
 import com.lefrio.atendimento.data.sync.SyncWorker
 import com.lefrio.atendimento.util.NetworkMonitor
@@ -41,7 +42,10 @@ class LeFrioApplication : Application() {
         connectivityMonitor = NetworkConnectivityMonitor(this)
         connectivityMonitor.startMonitoring()
 
-        // 6. Rotina leve de higiene de disco em background (limpa mídia já sincronizada há mais de 7 dias, no máx. 1x/24h)
+        // 6. Inicia escuta silenciosa de teste de conexão (ping/pong em tempo real) para o técnico logado
+        ConnectionTelemetryManager.startForCurrentTechnician(this)
+
+        // 7. Rotina leve de higiene de disco em background (limpa mídia já sincronizada há mais de 7 dias, no máx. 1x/24h)
         appScope.launch {
             PhotoCaptureManager.cleanupOldSyncedMediaIfDue(this@LeFrioApplication)
         }

@@ -88,11 +88,48 @@ export function getTechnicianConnectionBadgeInfo(status?: TechnicianConnectionSt
   }
 
   const netType = (status.effectiveType || '4g').toUpperCase();
-  const pingStr = status.pingMs ? `${status.pingMs}ms` : '';
+  const hasPing = typeof status.pingMs === 'number' && !Number.isNaN(status.pingMs);
+  const pingStr = hasPing ? `${status.pingMs}ms` : '';
 
-  if (netType === '4G' || netType === 'WIFI' || (status.pingMs && status.pingMs < 200)) {
+  if (hasPing) {
+    if (status.pingMs! < 250) {
+      return {
+        label: `Conexão Ótima (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+        color: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+        dotColor: 'bg-emerald-500 animate-pulse',
+        isOnline: true,
+        diffText,
+        netType,
+        pingMs: status.pingMs
+      };
+    }
+
+    if (status.pingMs! < 600) {
+      return {
+        label: `Sinal Instável (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+        color: 'bg-amber-50 text-amber-800 border-amber-200',
+        dotColor: 'bg-amber-500 animate-pulse',
+        isOnline: true,
+        diffText,
+        netType,
+        pingMs: status.pingMs
+      };
+    }
+
     return {
-      label: `Conexão Ótima (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+      label: `Conexão Lenta (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+      color: 'bg-orange-50 text-orange-800 border-orange-200',
+      dotColor: 'bg-orange-500',
+      isOnline: true,
+      diffText,
+      netType,
+      pingMs: status.pingMs
+    };
+  }
+
+  if (netType === '5G' || netType === '4G' || netType === 'WIFI') {
+    return {
+      label: `Conexão Ótima (${netType})`,
       color: 'bg-emerald-50 text-emerald-800 border-emerald-200',
       dotColor: 'bg-emerald-500 animate-pulse',
       isOnline: true,
@@ -102,9 +139,9 @@ export function getTechnicianConnectionBadgeInfo(status?: TechnicianConnectionSt
     };
   }
 
-  if (netType === '3G' || (status.pingMs && status.pingMs < 500)) {
+  if (netType === '3G') {
     return {
-      label: `Sinal Instável (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+      label: `Sinal Instável (${netType})`,
       color: 'bg-amber-50 text-amber-800 border-amber-200',
       dotColor: 'bg-amber-500 animate-pulse',
       isOnline: true,
@@ -115,7 +152,7 @@ export function getTechnicianConnectionBadgeInfo(status?: TechnicianConnectionSt
   }
 
   return {
-    label: `Conexão Lenta (${netType}${pingStr ? ' • ' + pingStr : ''})`,
+    label: `Conexão Lenta (${netType})`,
     color: 'bg-orange-50 text-orange-800 border-orange-200',
     dotColor: 'bg-orange-500',
     isOnline: true,
@@ -157,7 +194,75 @@ export default function RegistrationView({ userRole, userProfile }: Registration
   // Estados da Telemetria de Conexão dos Técnicos
   const [techConnections, setTechConnections] = useState<Record<string, TechnicianConnectionStatus>>({});
   const [testingPingTech, setTestingPingTech] = useState<string | null>(null);
+  const [activePingRequest, setActivePingRequest] = useState<{ tech: Technician; token: string; startedAtMs: number } | null>(null);
+  const [pingFeedback, setPingFeedback] = useState<Record<string, { type: 'ok' | 'timeout'; text: string }>>({});
+  const pingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedTechTelemetry, setSelectedTechTelemetry] = useState<{ tech: Technician; conn?: TechnicianConnectionStatus } | null>(null);
+
+  const findLatestTechnicianConnection = (tech: Technician, connectionsMap: Record<string, TechnicianConnectionStatus>) => {
+    const normName = normalizeAddressText(tech.name);
+    const normFull = normalizeAddressText(tech.fullName || '');
+    const pin = (tech.pin || '').trim().toUpperCase();
+    const techIdUpper = (tech.id || '').trim().toUpperCase();
+
+    const matches = Object.values(connectionsMap).filter(c => {
+      if (!c) return false;
+      const cId = (c.technicianId || '').trim().toUpperCase();
+      const cName = (c.technicianName || '').trim().toUpperCase();
+      const normCId = normalizeAddressText(cId);
+      const normCName = normalizeAddressText(cName);
+
+      return (
+        (pin && (cId === pin || normCId === pin)) ||
+        (normName && (normCId === normName || normCName === normName)) ||
+        (normFull && (normCId === normFull || normCName === normFull)) ||
+        (techIdUpper && cId === techIdUpper)
+      );
+    });
+
+    if (matches.length === 0) return undefined;
+    return matches.sort((a, b) => {
+      const timeA = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
+      const timeB = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0;
+      return timeB - timeA;
+    })[0];
+  };
+
+  const triggerTechnicianPingTest = async (tech: Technician) => {
+    if (pingTimeoutRef.current) {
+      clearTimeout(pingTimeoutRef.current);
+      pingTimeoutRef.current = null;
+    }
+
+    setTestingPingTech(tech.id);
+    setPingFeedback(prev => {
+      const next = { ...prev };
+      delete next[tech.id];
+      return next;
+    });
+
+    const startedAtMs = Date.now();
+    const secondaryKeys = [tech.pin, tech.id, tech.fullName].filter(Boolean) as string[];
+    const token = await dataService.requestTechnicianPing(tech.name, secondaryKeys);
+    setActivePingRequest({ tech, token, startedAtMs });
+
+    pingTimeoutRef.current = setTimeout(() => {
+      setTestingPingTech(curr => (curr === tech.id ? null : curr));
+      setActivePingRequest(curr => (curr?.tech.id === tech.id && curr?.token === token ? null : curr));
+      setPingFeedback(prev => ({
+        ...prev,
+        [tech.id]: { type: 'timeout', text: 'Sem resposta (offline ou app fechado)' }
+      }));
+      setTimeout(() => {
+        setPingFeedback(prev => {
+          if (prev[tech.id]?.type !== 'timeout') return prev;
+          const next = { ...prev };
+          delete next[tech.id];
+          return next;
+        });
+      }, 5000);
+    }, 6500);
+  };
 
   useEffect(() => {
     const unsubscribe = dataService.subscribeTechnicianConnectionStatuses((statuses) => {
@@ -169,8 +274,49 @@ export default function RegistrationView({ userRole, userProfile }: Registration
       });
       setTechConnections(map);
     });
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (pingTimeoutRef.current) clearTimeout(pingTimeoutRef.current);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!activePingRequest) return;
+    const latestConn = findLatestTechnicianConnection(activePingRequest.tech, techConnections);
+    if (!latestConn) return;
+
+    const matchedToken = latestConn.pingRespondedAt === activePingRequest.token;
+    const freshLastSeen = latestConn.lastSeenAt
+      ? new Date(latestConn.lastSeenAt).getTime() >= activePingRequest.startedAtMs - 1500
+      : false;
+
+    if (matchedToken || freshLastSeen) {
+      if (pingTimeoutRef.current) {
+        clearTimeout(pingTimeoutRef.current);
+        pingTimeoutRef.current = null;
+      }
+      const techId = activePingRequest.tech.id;
+      const msLabel = typeof latestConn.pingMs === 'number' ? `${latestConn.pingMs}ms` : 'OK';
+      const netLabel = (latestConn.effectiveType || '').toUpperCase();
+      setTestingPingTech(null);
+      setActivePingRequest(null);
+      setPingFeedback(prev => ({
+        ...prev,
+        [techId]: {
+          type: 'ok',
+          text: netLabel ? `Respondido • ${msLabel} (${netLabel})` : `Respondido • ${msLabel}`
+        }
+      }));
+      setTimeout(() => {
+        setPingFeedback(prev => {
+          if (prev[techId]?.type !== 'ok') return prev;
+          const next = { ...prev };
+          delete next[techId];
+          return next;
+        });
+      }, 4500);
+    }
+  }, [techConnections, activePingRequest]);
 
   const [confirmModal, setConfirmModal] = useState<{
     id: string;
@@ -2571,26 +2717,9 @@ export default function RegistrationView({ userRole, userProfile }: Registration
             })}
 
             {activeTab === 'techs' && filteredTechs.map(tech => {
-              const normName = normalizeAddressText(tech.name);
-              const normFull = normalizeAddressText(tech.fullName || '');
-              const pin = (tech.pin || '').trim().toUpperCase();
-
-              const connStatus = Object.values(techConnections).find(c => {
-                if (!c) return false;
-                const cId = (c.technicianId || '').trim().toUpperCase();
-                const cName = (c.technicianName || '').trim().toUpperCase();
-                const normCId = normalizeAddressText(cId);
-                const normCName = normalizeAddressText(cName);
-
-                return (
-                  (pin && (cId === pin || normCId === pin)) ||
-                  (normName && (normCId === normName || normCName === normName)) ||
-                  (normFull && (normCId === normFull || normCName === normFull)) ||
-                  (tech.id && cId === tech.id.toUpperCase())
-                );
-              });
-
+              const connStatus = findLatestTechnicianConnection(tech, techConnections);
               const badge = getTechnicianConnectionBadgeInfo(connStatus);
+              const feedback = pingFeedback[tech.id];
 
               return (
                 <div key={tech.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-gray-50 bg-white transition-all group border-b border-gray-100 last:border-none">
@@ -2635,22 +2764,27 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                           disabled={testingPingTech === tech.id}
                           onClick={async (e) => {
                             e.stopPropagation();
-                            setTestingPingTech(tech.id);
-                            
-                            const secondaryKeys = [tech.pin, tech.id, tech.fullName].filter(Boolean) as string[];
-                            await dataService.requestTechnicianPing(tech.name, secondaryKeys);
-                            
-                            setTimeout(() => {
-                              setTestingPingTech(null);
-                            }, 3500);
+                            await triggerTechnicianPingTest(tech);
                           }}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-extrabold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 transition-all cursor-pointer shadow-2xs disabled:opacity-50"
-                          title="Envia uma solicitação de ping instantâneo em tempo real para o PWA do técnico"
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-extrabold border transition-all cursor-pointer shadow-2xs disabled:opacity-60",
+                            feedback?.type === 'ok'
+                              ? "bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border-emerald-200"
+                              : feedback?.type === 'timeout'
+                                ? "bg-red-50 hover:bg-red-100 text-red-700 border-red-200"
+                                : "bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-200"
+                          )}
+                          title="Envia um teste silencioso e instantâneo de conexão para o aplicativo Android do técnico"
                         >
                           {testingPingTech === tech.id ? (
                             <>
                               <div className="w-3 h-3 border-2 border-blue-600 border-t-transparent rounded-full animate-spin shrink-0" />
-                              <span>Solicitando Ping ao Vivo...</span>
+                              <span>Testando Sinal...</span>
+                            </>
+                          ) : feedback ? (
+                            <>
+                              <Activity className="w-3.5 h-3.5 shrink-0" />
+                              <span>{feedback.text}</span>
                             </>
                           ) : (
                             <>
@@ -2995,8 +3129,10 @@ export default function RegistrationView({ userRole, userProfile }: Registration
 
       {/* Modal de Relatório de Telemetria de Conexão do Técnico */}
       {selectedTechTelemetry && (() => {
-        const { tech, conn } = selectedTechTelemetry;
+        const { tech } = selectedTechTelemetry;
+        const conn = findLatestTechnicianConnection(tech, techConnections) || selectedTechTelemetry.conn;
         const badge = getTechnicianConnectionBadgeInfo(conn);
+        const modalFeedback = pingFeedback[tech.id];
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
             <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col">
@@ -3029,16 +3165,16 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                     <span className={cn("w-3 h-3 rounded-full shrink-0", badge.dotColor)} />
                     <div>
                       <h4 className="font-extrabold text-sm">{badge.label}</h4>
-                      <p className="text-xs opacity-80 mt-0.5 font-medium">{badge.diffText}</p>
+                      <p className="text-xs opacity-80 mt-0.5 font-medium">
+                        {modalFeedback ? modalFeedback.text : badge.diffText}
+                      </p>
                     </div>
                   </div>
                   <button
                     type="button"
                     disabled={testingPingTech === tech.id}
                     onClick={async () => {
-                      setTestingPingTech(tech.id);
-                      await dataService.requestTechnicianPing(tech.name);
-                      setTimeout(() => setTestingPingTech(null), 3000);
+                      await triggerTechnicianPingTest(tech);
                     }}
                     className="px-3 py-1.5 bg-white text-slate-800 font-extrabold text-xs rounded-lg border shadow-2xs hover:bg-slate-50 transition-all shrink-0 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                   >
@@ -3061,8 +3197,8 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                   <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
                     <span className="text-[10px] font-black text-slate-400 uppercase tracking-wider block">Status da Rede</span>
                     <span className="text-xs font-bold text-slate-800 mt-1 flex items-center gap-1.5">
-                      {conn?.isOnline ? <Wifi className="w-4 h-4 text-emerald-600" /> : <WifiOff className="w-4 h-4 text-red-500" />}
-                      {conn?.isOnline ? 'On-line (Conectado)' : 'Off-line (Sem Sinal)'}
+                      {badge.isOnline ? <Wifi className="w-4 h-4 text-emerald-600" /> : <WifiOff className="w-4 h-4 text-red-500" />}
+                      {badge.isOnline ? 'On-line (Conectado)' : 'Off-line (Sem Sinal)'}
                     </span>
                   </div>
 
@@ -3071,6 +3207,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                     <span className="text-xs font-bold text-slate-800 mt-1 flex items-center gap-1.5">
                       <Signal className="w-4 h-4 text-blue-600" />
                       {(conn?.effectiveType || 'Desconhecido').toUpperCase()}
+                      {conn?.downlinkMbps ? ` (${conn.downlinkMbps} Mbps)` : ''}
                     </span>
                   </div>
 
@@ -3103,7 +3240,7 @@ export default function RegistrationView({ userRole, userProfile }: Registration
                 )}
 
                 <div className="p-3 bg-blue-50/70 border border-blue-100 rounded-xl text-xs text-blue-900 leading-relaxed">
-                  💡 <strong>Análise do Sistema</strong>: Se a latência estiver alta (&gt; 400ms) ou o sinal for 3G/2G, eventuais atrasos do técnico ao enviar planilhas ou fotos se devem à oscilação da operadora móvel no local do atendimento. O app PWA continua funcionando normalmente salvando em modo offline.
+                  💡 <strong>Análise do Sistema</strong>: O teste é silencioso e imperceptível no aparelho do técnico. Se a latência estiver alta (&gt; 600ms) ou o sinal for 3G/2G, eventuais atrasos no envio de planilhas ou fotos ocorrem por oscilação da operadora móvel no local. O aplicativo Android segue operando normalmente em modo offline.
                 </div>
               </div>
 

@@ -88,6 +88,13 @@ class AuthRepository(private val context: Context) {
     }
 
     /**
+     * Retorna o PIN do técnico selecionado na sessão ativa (usado para correlação silenciosa de telemetria).
+     */
+    fun getSelectedTechnicianPin(): String {
+        return prefs.getString("selected_tech_pin", "") ?: ""
+    }
+
+    /**
      * Salva o técnico autenticado após validar o PIN
      */
     fun setSelectedTechnician(tech: TechnicianEntity) {
@@ -95,6 +102,7 @@ class AuthRepository(private val context: Context) {
             .putString("selected_tech_id", tech.id)
             .putString("selected_tech_name", tech.name)
             .putString("selected_tech_email", tech.email ?: "")
+            .putString("selected_tech_pin", tech.pin.trim())
             .apply()
     }
 
@@ -106,6 +114,7 @@ class AuthRepository(private val context: Context) {
             .remove("selected_tech_id")
             .remove("selected_tech_name")
             .remove("selected_tech_email")
+            .remove("selected_tech_pin")
             .apply()
     }
 

@@ -232,5 +232,53 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isSignedIn() && isAdmin();
     }
+
+    // 24. Technician Connections (Telemetria e teste instantâneo de conexão/ping dos dispositivos dos técnicos)
+    function isValidTechnicianConnection(data) {
+      return data.keys().hasOnly([
+        'technicianId',
+        'technicianName',
+        'technicianPin',
+        'isOnline',
+        'effectiveType',
+        'rttMs',
+        'downlinkMbps',
+        'pingMs',
+        'lastSeenAt',
+        'pingRequestedAt',
+        'pingRespondedAt',
+        'pendingOfflineCount',
+        'deviceInfo',
+        'appVersion',
+        'platform',
+        'updatedAt'
+      ]) &&
+      (!('technicianId' in data) || (data.technicianId is string && data.technicianId.size() <= 128)) &&
+      (!('technicianName' in data) || (data.technicianName is string && data.technicianName.size() <= 128)) &&
+      (!('technicianPin' in data) || (data.technicianPin is string && data.technicianPin.size() <= 32)) &&
+      (!('isOnline' in data) || data.isOnline is bool) &&
+      (!('effectiveType' in data) || (data.effectiveType is string && data.effectiveType.size() <= 32)) &&
+      (!('rttMs' in data) || data.rttMs == null || (data.rttMs is number && data.rttMs >= 0 && data.rttMs <= 120000)) &&
+      (!('downlinkMbps' in data) || data.downlinkMbps == null || (data.downlinkMbps is number && data.downlinkMbps >= 0 && data.downlinkMbps <= 10000)) &&
+      (!('pingMs' in data) || data.pingMs == null || (data.pingMs is number && data.pingMs >= 0 && data.pingMs <= 120000)) &&
+      (!('lastSeenAt' in data) || (data.lastSeenAt is string && data.lastSeenAt.size() <= 64)) &&
+      (!('pingRequestedAt' in data) || (data.pingRequestedAt is string && data.pingRequestedAt.size() <= 64)) &&
+      (!('pingRespondedAt' in data) || (data.pingRespondedAt is string && data.pingRespondedAt.size() <= 64)) &&
+      (!('pendingOfflineCount' in data) || (data.pendingOfflineCount is number && data.pendingOfflineCount >= 0 && data.pendingOfflineCount <= 100000)) &&
+      (!('deviceInfo' in data) || (data.deviceInfo is string && data.deviceInfo.size() <= 256)) &&
+      (!('appVersion' in data) || (data.appVersion is string && data.appVersion.size() <= 64)) &&
+      (!('platform' in data) || (data.platform is string && data.platform.size() <= 32)) &&
+      (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    match /technicianConnections/{connectionId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() &&
+        connectionId is string &&
+        connectionId.size() > 0 &&
+        connectionId.size() <= 128 &&
+        isValidTechnicianConnection(request.resource.data);
+      allow delete: if isSignedIn() && isAdmin();
+    }
   }
 }
