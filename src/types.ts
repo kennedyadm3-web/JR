@@ -566,8 +566,9 @@ export interface ServiceOrder {
   description: string; // Descrição do problema
   diagnosis?: string; // Diagnóstico
   solution?: string; // Solução
-  technicalReport?: string; // Relatório Técnico / Observações Gerais
-  routeNotes?: string; // Observações Gerais (compatibilidade com atendimento em campo)
+  internalNotes?: string; // Observação interna entre setores (não exibida na folha de impressão da O.S.)
+  technicalReport?: string; // Legado / compatibilidade
+  routeNotes?: string; // Legado / compatibilidade com atendimento em campo
   
   services: ServiceOrderItem[];
   products: ServiceOrderItem[];
@@ -634,6 +635,7 @@ export interface TechOSDraft {
   description: string;
   diagnosis?: string;
   solution?: string;
+  internalNotes?: string;
   technicalReport?: string;
   services: ServiceOrderItem[];
   products: ServiceOrderItem[];

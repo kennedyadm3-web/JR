@@ -24,13 +24,17 @@
     <!-- Permissão de Microfone para Gravação e Transcrição do Relatório Técnico -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- Visibilidade de serviços de reconhecimento de voz no Android 11+ (API 30+) -->
+    <!-- Visibilidade de serviços de reconhecimento de voz e instalador de APK no Android 11+ (API 30+) -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
         <intent>
             <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
         </intent>
     </queries>
 

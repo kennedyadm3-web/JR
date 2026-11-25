@@ -24,13 +24,19 @@ export default function DeviceSettingsView() {
   const [technicians, setTechnicians] = useState<Technician[]>([]);
 
   // Estados de Controle do App Android
-  const [androidVersionCode, setAndroidVersionCode] = useState<number>(15);
-  const [androidVersionName, setAndroidVersionName] = useState<string>('1.3.1');
-  const [androidDownloadUrl, setAndroidDownloadUrl] = useState<string>('https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk');
-  const [androidReleaseNotes, setAndroidReleaseNotes] = useState<string>('Versão 1.3.1: Módulo completo de Ordens de Serviço estilo PWA, menu lateral recolhível, cabeçalho dinâmico com 3 métricas e assinatura digital otimizada.');
+  const LATEST_PROJECT_VERSION_CODE = 22;
+  const LATEST_PROJECT_VERSION_NAME = '1.3.8';
+  const DEFAULT_APK_DOWNLOAD_URL = 'https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk';
+
+  const [androidVersionCode, setAndroidVersionCode] = useState<number>(LATEST_PROJECT_VERSION_CODE);
+  const [androidVersionName, setAndroidVersionName] = useState<string>(LATEST_PROJECT_VERSION_NAME);
+  const [androidDownloadUrl, setAndroidDownloadUrl] = useState<string>(DEFAULT_APK_DOWNLOAD_URL);
+  const [androidReleaseNotes, setAndroidReleaseNotes] = useState<string>('Versão 1.3.8: Anexo de até 4 fotos do equipamento na abertura de nova O.S. e atualização automática direto pelo aplicativo otimizada.');
   const [androidIsMandatory, setAndroidIsMandatory] = useState<boolean>(false);
   const [savingAndroid, setSavingAndroid] = useState<boolean>(false);
   const [androidSuccess, setAndroidSuccess] = useState<string | null>(null);
+  const [verifyingApkUrl, setVerifyingApkUrl] = useState<boolean>(false);
+  const [apkVerifyResult, setApkVerifyResult] = useState<{ valid: boolean; message: string } | null>(null);
 
   useEffect(() => {
     async function loadSettingsAndTechs() {
@@ -108,6 +114,30 @@ export default function DeviceSettingsView() {
       alert('Erro ao atualizar versão: ' + e.message);
     } finally {
       setSavingAndroid(false);
+    }
+  };
+
+  const handleVerifyApkUrl = async () => {
+    setVerifyingApkUrl(true);
+    setApkVerifyResult(null);
+    try {
+      const resp = await fetch('/api/android-version/verify-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadUrl: androidDownloadUrl })
+      });
+      const data = await resp.json();
+      setApkVerifyResult({
+        valid: Boolean(data.valid),
+        message: data.message || (data.valid ? 'Link do APK válido!' : 'Não foi possível validar o link.')
+      });
+    } catch (e: any) {
+      setApkVerifyResult({
+        valid: false,
+        message: 'Erro ao testar link do APK: ' + (e?.message || 'falha de rede')
+      });
+    } finally {
+      setVerifyingApkUrl(false);
     }
   };
 
@@ -454,7 +484,22 @@ export default function DeviceSettingsView() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setAndroidVersionCode(LATEST_PROJECT_VERSION_CODE);
+                  setAndroidVersionName(LATEST_PROJECT_VERSION_NAME);
+                  setAndroidDownloadUrl(DEFAULT_APK_DOWNLOAD_URL);
+                  setApkVerifyResult(null);
+                }}
+                disabled={savingAndroid}
+                className="px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg text-xs font-bold flex items-center gap-1.5 transition"
+                title="Preenche automaticamente com a versão atual compilada do projeto"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Usar v{LATEST_PROJECT_VERSION_NAME} (Build {LATEST_PROJECT_VERSION_CODE})</span>
+              </button>
               <button
                 type="button"
                 onClick={() => handleSaveAndroidVersion(androidVersionCode + 1)}
@@ -463,7 +508,7 @@ export default function DeviceSettingsView() {
                 title="Incrementa a versão em +1 no servidor para fazer o celular detectar atualização na hora!"
               >
                 <Rocket className="w-3.5 h-3.5" />
-                <span>Simular Nova Versão (+1)</span>
+                <span>Liberar Próxima (+1)</span>
               </button>
             </div>
           </div>
@@ -486,10 +531,10 @@ export default function DeviceSettingsView() {
                   value={androidVersionCode}
                   onChange={(e) => setAndroidVersionCode(parseInt(e.target.value) || 1)}
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-semibold focus:border-blue-500 outline-none"
-                  placeholder="Ex: 2"
+                  placeholder="Ex: 22"
                 />
                 <p className="text-[10px] text-gray-400 mt-1">
-                  O celular só atualiza se este número for <strong>maior</strong> do que o instalado no aparelho.
+                  O celular atualiza automaticamente quando este número é <strong>maior</strong> do que o instalado (atual do projeto: <strong>{LATEST_PROJECT_VERSION_CODE}</strong>).
                 </p>
               </div>
 
@@ -502,10 +547,10 @@ export default function DeviceSettingsView() {
                   value={androidVersionName}
                   onChange={(e) => setAndroidVersionName(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-semibold focus:border-blue-500 outline-none"
-                  placeholder="Ex: 1.0.1"
+                  placeholder="Ex: 1.3.8"
                 />
                 <p className="text-[10px] text-gray-400 mt-1">
-                  Nome legível exibido para o técnico no aplicativo.
+                  Nome legível exibido para o técnico no aviso de atualização.
                 </p>
               </div>
             </div>
@@ -514,23 +559,60 @@ export default function DeviceSettingsView() {
               <label className="block text-xs font-bold text-gray-700 mb-1">
                 Link Direto de Download do APK (downloadUrl)
               </label>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <input
                   type="text"
                   value={androidDownloadUrl}
-                  onChange={(e) => setAndroidDownloadUrl(e.target.value)}
-                  className="flex-1 px-3 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:border-blue-500 outline-none"
+                  onChange={(e) => {
+                    setAndroidDownloadUrl(e.target.value);
+                    setApkVerifyResult(null);
+                  }}
+                  className="flex-1 min-w-[220px] px-3 py-2 border border-gray-200 rounded-lg text-xs font-mono focus:border-blue-500 outline-none"
                   placeholder="https://github.com/SEU-USER/JR/releases/latest/download/lefrio-atendimento.apk"
                 />
                 <button
                   type="button"
-                  onClick={() => setAndroidDownloadUrl('https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk')}
+                  onClick={() => {
+                    setAndroidDownloadUrl(DEFAULT_APK_DOWNLOAD_URL);
+                    setApkVerifyResult(null);
+                  }}
                   className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-xs font-bold"
-                  title="Usar link padrão do GitHub Releases"
+                  title="Usar link padrão do GitHub Releases (latest)"
                 >
                   GitHub Padrão
                 </button>
+                <button
+                  type="button"
+                  onClick={handleVerifyApkUrl}
+                  disabled={verifyingApkUrl || !androidDownloadUrl.trim()}
+                  className="px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-xs font-bold flex items-center gap-1.5 disabled:opacity-50"
+                  title="Verifica se o link já está no ar entregando um arquivo APK válido"
+                >
+                  {verifyingApkUrl ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )}
+                  <span>{verifyingApkUrl ? 'Testando...' : 'Testar Link APK'}</span>
+                </button>
               </div>
+              {apkVerifyResult && (
+                <div
+                  className={cn(
+                    'mt-2 p-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 border',
+                    apkVerifyResult.valid
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-red-50 border-red-200 text-red-700'
+                  )}
+                >
+                  {apkVerifyResult.valid ? (
+                    <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                  )}
+                  <span>{apkVerifyResult.message}</span>
+                </div>
+              )}
             </div>
 
             <div>

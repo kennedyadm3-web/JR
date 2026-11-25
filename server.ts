@@ -364,17 +364,17 @@ async function startServer() {
       const snap = await clientGetDoc(docRef);
       if (snap.exists()) {
         const data = snap.data() as any;
-        if (data && Number(data.versionCode) >= 14) {
+        if (data && Number(data.versionCode) >= 1 && data.downloadUrl) {
           return res.json(data);
         }
       }
 
-      // Configuração atualizada v1.3.0 (Build 14)
+      // Configuração padrão alinhada à versão mais recente compilada (v1.3.8 • Build 22)
       const currentConfig = {
-        versionCode: 14,
-        versionName: "1.3.0",
-        downloadUrl: "https://github.com/kennedyadm3-web/JR/releases/download/latest/lefrio-atendimento.apk",
-        releaseNotes: "Versão 1.3.0: Barrinha visual de máquinas atendidas na tela inicial, salvamento offline permanente de checklist/fotos e sincronização direta em tempo real.",
+        versionCode: 22,
+        versionName: "1.3.8",
+        downloadUrl: "https://github.com/kennedyadm3-web/JR/releases/latest/download/lefrio-atendimento.apk",
+        releaseNotes: "Versão 1.3.8: Anexo de até 4 fotos do equipamento na abertura de nova O.S. e processo de atualização automática direto no aplicativo otimizado.",
         isMandatory: false,
         updatedAt: new Date().toISOString()
       };
@@ -390,9 +390,9 @@ async function startServer() {
       const { versionCode, versionName, downloadUrl, releaseNotes, isMandatory } = req.body;
       const updatePayload = {
         versionCode: Number(versionCode) || 1,
-        versionName: String(versionName || "1.0.0"),
-        downloadUrl: String(downloadUrl || ""),
-        releaseNotes: String(releaseNotes || "Melhorias de estabilidade e novas telas."),
+        versionName: String(versionName || "1.0.0").trim(),
+        downloadUrl: String(downloadUrl || "").trim(),
+        releaseNotes: String(releaseNotes || "Melhorias de estabilidade e novas telas.").trim(),
         isMandatory: Boolean(isMandatory),
         updatedAt: new Date().toISOString()
       };
@@ -408,6 +408,88 @@ async function startServer() {
       res.json({ success: true, message: "Versão do aplicativo Android atualizada com sucesso!", config: updatePayload });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Valida se o link do APK está acessível e realmente entrega um arquivo APK binário (cabeçalho PK)
+  app.post("/api/android-version/verify-url", async (req, res) => {
+    try {
+      const rawUrl = String(req.body?.downloadUrl || "").trim();
+      if (!rawUrl) {
+        return res.status(400).json({ valid: false, message: "Informe o link de download do APK." });
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(rawUrl);
+      } catch {
+        return res.status(400).json({ valid: false, message: "Formato de URL inválido." });
+      }
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        return res.status(400).json({ valid: false, message: "O link deve começar com https://." });
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        const resp = await fetch(rawUrl, {
+          method: "GET",
+          redirect: "follow",
+          headers: {
+            "Range": "bytes=0-3",
+            "User-Agent": "LeFrio-Android-Updater-Check/2.0",
+            "Cache-Control": "no-cache"
+          },
+          signal: controller.signal
+        });
+
+        if (!resp.ok && resp.status !== 206) {
+          return res.json({
+            valid: false,
+            status: resp.status,
+            message: `Link indisponível (HTTP ${resp.status}). Verifique se o APK já foi publicado na Release.`
+          });
+        }
+
+        const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+        const contentRange = resp.headers.get("content-range") || "";
+        const contentLength = resp.headers.get("content-length") || "";
+        let totalBytes = 0;
+        if (contentRange.includes("/")) {
+          totalBytes = Number(contentRange.split("/")[1]) || 0;
+        } else if (contentLength) {
+          totalBytes = Number(contentLength) || 0;
+        }
+
+        const buf = new Uint8Array(await resp.arrayBuffer());
+        const isZipApk = buf.length >= 2 && buf[0] === 0x50 && buf[1] === 0x4b; // 'P' 'K'
+
+        if (contentType.includes("text/html") || !isZipApk) {
+          return res.json({
+            valid: false,
+            status: resp.status,
+            message: "O link respondeu, mas não retornou um arquivo APK válido (retornou página HTML ou outro formato)."
+          });
+        }
+
+        const sizeMb = totalBytes > 0 ? Number((totalBytes / (1024 * 1024)).toFixed(1)) : null;
+        return res.json({
+          valid: true,
+          status: resp.status,
+          sizeMb,
+          message: sizeMb
+            ? `APK válido e acessível (${sizeMb} MB). Pronto para liberar aos técnicos!`
+            : "APK válido e acessível! Pronto para liberar aos técnicos."
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (e: any) {
+      return res.json({
+        valid: false,
+        message: e?.name === "AbortError"
+          ? "Tempo esgotado ao testar o link do APK."
+          : `Não foi possível acessar o link: ${e?.message || "Erro de conexão"}`
+      });
     }
   });
 

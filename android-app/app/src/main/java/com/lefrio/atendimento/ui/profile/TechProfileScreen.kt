@@ -35,6 +35,7 @@ fun TechProfileScreen(
     user: TechnicianUser,
     appVersion: String,
     pendingSyncCount: Int,
+    availableUpdateVersion: String? = null,
     onBackClick: () -> Unit,
     onCheckUpdateClick: () -> Unit,
     onForceSyncClick: () -> Unit,
@@ -296,13 +297,23 @@ fun TechProfileScreen(
 
                     Button(
                         onClick = onCheckUpdateClick,
-                        modifier = Modifier.fillMaxWidth().height(42.dp),
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = BluePrimary)
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (!availableUpdateVersion.isNullOrBlank()) Color(0xFF059669) else BluePrimary
+                        )
                     ) {
                         Icon(imageVector = Icons.Default.SystemUpdate, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(text = "VERIFICAR ATUALIZAÇÕES DO APP", fontSize = 11.sp, fontWeight = FontWeight.Black)
+                        Text(
+                            text = if (!availableUpdateVersion.isNullOrBlank()) {
+                                "ATUALIZAR PARA v$availableUpdateVersion"
+                            } else {
+                                "VERIFICAR ATUALIZAÇÕES DO APP"
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))

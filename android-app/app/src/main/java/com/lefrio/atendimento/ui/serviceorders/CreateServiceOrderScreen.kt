@@ -1,11 +1,21 @@
 package com.lefrio.atendimento.ui.serviceorders
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.util.Base64
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -17,11 +27,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
 import com.lefrio.atendimento.data.auth.TechnicianUser
 import com.lefrio.atendimento.ui.signature.components.SignaturePad
 import com.lefrio.atendimento.ui.signature.components.SignaturePath
@@ -29,6 +43,10 @@ import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
+import com.lefrio.atendimento.util.PhotoCaptureManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.*
 
@@ -78,12 +96,132 @@ fun CreateServiceOrderScreen(
     val signaturePaths = remember { mutableStateListOf<SignaturePath>() }
     var hasSignature by remember { mutableStateOf(false) }
 
+    // Fotos do Equipamento / Atendimento (até 4 imagens por O.S.)
+    val maxPhotos = 4
+    val attachedPhotoPaths = remember { mutableStateListOf<String>() }
+    var isProcessingPhoto by remember { mutableStateOf(false) }
+    var pendingCameraFile by remember { mutableStateOf<File?>(null) }
+    var previewPhotoPath by remember { mutableStateOf<String?>(null) }
+    val photoSessionId = remember { "NEWOS_${System.currentTimeMillis()}" }
+    val photoCaptureManager = remember(context) { PhotoCaptureManager(context) }
+    val coroutineScope = rememberCoroutineScope()
+
     // Estados de UI e Validação
     var isSubmitting by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
     var clientExpanded by remember { mutableStateOf(false) }
     var addressExpanded by remember { mutableStateOf(false) }
     var equipmentExpanded by remember { mutableStateOf(false) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val capturedFile = pendingCameraFile
+        pendingCameraFile = null
+        if (success && capturedFile != null && attachedPhotoPaths.size < maxPhotos) {
+            isProcessingPhoto = true
+            coroutineScope.launch {
+                val compressed = withContext(Dispatchers.IO) {
+                    photoCaptureManager.compressPhoto(capturedFile)
+                }
+                isProcessingPhoto = false
+                if (compressed.exists() && compressed.length() > 0L && attachedPhotoPaths.size < maxPhotos) {
+                    attachedPhotoPaths.add(compressed.absolutePath)
+                    Toast.makeText(
+                        context,
+                        "Foto anexada (${attachedPhotoPaths.size}/$maxPhotos)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Toast.makeText(context, "Não foi possível processar a foto capturada.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null && attachedPhotoPaths.size < maxPhotos) {
+            isProcessingPhoto = true
+            coroutineScope.launch {
+                val savedFile = withContext(Dispatchers.IO) {
+                    photoCaptureManager.saveGalleryImageUri(
+                        sourceUri = uri,
+                        orderId = photoSessionId,
+                        equipmentId = "FOTO_${System.currentTimeMillis()}"
+                    )
+                }
+                isProcessingPhoto = false
+                if (savedFile != null && savedFile.exists() && attachedPhotoPaths.size < maxPhotos) {
+                    attachedPhotoPaths.add(savedFile.absolutePath)
+                    Toast.makeText(
+                        context,
+                        "Imagem anexada (${attachedPhotoPaths.size}/$maxPhotos)",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Toast.makeText(context, "Não foi possível carregar a imagem selecionada.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    fun startCameraCapture() {
+        try {
+            if (attachedPhotoPaths.size >= maxPhotos) {
+                Toast.makeText(context, "Limite máximo de $maxPhotos fotos por O.S. atingido.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val (uri, file) = photoCaptureManager.createPhotoUri(
+                orderId = photoSessionId,
+                equipmentId = "FOTO_${System.currentTimeMillis()}"
+            )
+            pendingCameraFile = file
+            cameraLauncher.launch(uri)
+        } catch (t: Throwable) {
+            Toast.makeText(context, "Erro ao abrir câmera: ${t.message ?: "Câmera indisponível"}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            startCameraCapture()
+        } else {
+            Toast.makeText(
+                context,
+                "Permissão de câmera negada. Você pode selecionar imagens pela Galeria.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    fun launchCameraSafely() {
+        if (attachedPhotoPaths.size >= maxPhotos) {
+            Toast.makeText(context, "Limite máximo de $maxPhotos fotos por O.S. atingido.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val permissionCheck = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+        if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
+            startCameraCapture()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    fun launchGallerySafely() {
+        if (attachedPhotoPaths.size >= maxPhotos) {
+            Toast.makeText(context, "Limite máximo de $maxPhotos fotos por O.S. atingido.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            galleryLauncher.launch("image/*")
+        } catch (t: Throwable) {
+            Toast.makeText(context, "Não foi possível abrir a galeria.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     val filteredAddresses = remember(selectedClientId, uiState.addresses) {
         if (selectedClientId.isBlank()) {
@@ -253,6 +391,7 @@ fun CreateServiceOrderScreen(
                                 fiscalContact = fiscalContact.trim().ifBlank { null },
                                 signaturePath = sigFile?.absolutePath,
                                 signatureBase64 = sigBase64,
+                                photoPaths = attachedPhotoPaths.toList(),
                                 isFinalized = true,
                                 onSuccess = { createdId ->
                                     isSubmitting = false
@@ -793,7 +932,215 @@ fun CreateServiceOrderScreen(
                 }
             }
 
-            // SEÇÃO DE RELATÓRIO TÉCNICO (OBSERVAÇÃO GERAL — LOGO ACIMA DA ÁREA DO FISCAL)
+            // SEÇÃO DE FOTOS DO EQUIPAMENTO / ATENDIMENTO (ATÉ 4 IMAGENS POR O.S.)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(BluePrimary.copy(alpha = 0.12f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoCamera,
+                                    contentDescription = null,
+                                    tint = BluePrimary,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "FOTOS DO EQUIPAMENTO",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Anexe fotos da máquina ou do serviço realizado (até $maxPhotos fotos)",
+                                    fontSize = 10.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (attachedPhotoPaths.size >= maxPhotos) Color(0xFFDCFCE7) else Color(0xFFEFF6FF)
+                        ) {
+                            Text(
+                                text = "${attachedPhotoPaths.size}/$maxPhotos",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                color = if (attachedPhotoPaths.size >= maxPhotos) Color(0xFF15803D) else BluePrimary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    if (attachedPhotoPaths.isNotEmpty()) {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            items(attachedPhotoPaths) { photoPath ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(84.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(Color(0xFFE2E8F0))
+                                        .border(1.dp, Color(0xFFCBD5E1), RoundedCornerShape(10.dp))
+                                        .clickable { previewPhotoPath = photoPath }
+                                ) {
+                                    AsyncImage(
+                                        model = File(photoPath),
+                                        contentDescription = "Foto do equipamento",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(4.dp)
+                                            .size(22.dp)
+                                            .clip(CircleShape)
+                                            .background(Color.Black.copy(alpha = 0.72f))
+                                            .clickable { attachedPhotoPaths.remove(photoPath) },
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Remover foto",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (isProcessingPhoto) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = BluePrimary
+                            )
+                            Text(
+                                text = "Otimizando e anexando imagem...",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = BluePrimary
+                            )
+                        }
+                    }
+
+                    if (attachedPhotoPaths.size < maxPhotos) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = { launchCameraSafely() },
+                                enabled = !isSubmitting && !isProcessingPhoto,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = BluePrimary)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoCamera,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "TIRAR FOTO",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Black
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = { launchGallerySafely() },
+                                enabled = !isSubmitting && !isProcessingPhoto,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, BluePrimary.copy(alpha = 0.4f))
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoLibrary,
+                                    contentDescription = null,
+                                    tint = BluePrimary,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "GALERIA",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = BluePrimary
+                                )
+                            }
+                        }
+                    } else {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFFECFDF5),
+                            border = BorderStroke(1.dp, Color(0xFFA7F3D0))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = Color(0xFF059669),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Limite de $maxPhotos fotos atingido. Toque no X de uma imagem para trocar.",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF065F46)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // SEÇÃO DE OBSERVAÇÃO INTERNA (COMUNICAÇÃO ENTRE SETORES — NÃO EXIBIDA NA IMPRESSÃO DA O.S.)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
@@ -811,26 +1158,26 @@ fun CreateServiceOrderScreen(
                             modifier = Modifier
                                 .size(30.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(BluePrimary.copy(alpha = 0.12f)),
+                                .background(Color(0xFFF59E0B).copy(alpha = 0.14f)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Description,
                                 contentDescription = null,
-                                tint = BluePrimary,
+                                tint = Color(0xFFB45309),
                                 modifier = Modifier.size(17.dp)
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "RELATÓRIO TÉCNICO",
+                                text = "OBSERVAÇÃO INTERNA",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Black,
                                 color = TextPrimary
                             )
                             Text(
-                                text = "Observação geral exibida na folha de impressão e na aprovação",
+                                text = "Comunicação interna entre setores (não exibida na folha de impressão da O.S.)",
                                 fontSize = 10.sp,
                                 color = TextSecondary
                             )
@@ -849,7 +1196,7 @@ fun CreateServiceOrderScreen(
                         maxLines = 6,
                         placeholder = {
                             Text(
-                                "Descreva observações gerais, recomendações técnicas ou detalhes adicionais do atendimento...",
+                                "Anote observações internas para o administrativo ou outros setores sobre esta O.S. (não sai na impressão)...",
                                 fontSize = 11.sp
                             )
                         }
@@ -1055,6 +1402,43 @@ fun CreateServiceOrderScreen(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+
+    // Visualização ampliada ao tocar em uma miniatura
+    previewPhotoPath?.let { photoPath ->
+        Dialog(onDismissRequest = { previewPhotoPath = null }) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.Black)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                ) {
+                    AsyncImage(
+                        model = File(photoPath),
+                        contentDescription = "Visualização da foto",
+                        modifier = Modifier.fillMaxWidth(),
+                        contentScale = ContentScale.Fit
+                    )
+                    IconButton(
+                        onClick = { previewPhotoPath = null },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.65f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Fechar",
+                            tint = Color.White
+                        )
+                    }
+                }
+            }
         }
     }
 }

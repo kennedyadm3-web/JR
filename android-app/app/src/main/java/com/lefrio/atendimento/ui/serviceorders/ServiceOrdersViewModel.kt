@@ -193,6 +193,7 @@ class ServiceOrdersViewModel(
         fiscalContact: String? = null,
         signaturePath: String? = null,
         signatureBase64: String? = null,
+        photoPaths: List<String> = emptyList(),
         isFinalized: Boolean = false,
         onSuccess: (orderId: String) -> Unit,
         onError: (message: String) -> Unit
@@ -226,6 +227,7 @@ class ServiceOrdersViewModel(
                     fiscalContact = fiscalContact,
                     signaturePath = signaturePath,
                     signatureBase64 = signatureBase64,
+                    photoPaths = photoPaths,
                     isFinalized = isFinalized
                 )
 

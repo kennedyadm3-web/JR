@@ -1041,26 +1041,33 @@ fun OrderDetailScreen(
                                     modifier = Modifier
                                         .size(30.dp)
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(BluePrimary.copy(alpha = 0.12f)),
+                                        .background(
+                                            if (isPreventiveOrder) BluePrimary.copy(alpha = 0.12f)
+                                            else Color(0xFFF59E0B).copy(alpha = 0.14f)
+                                        ),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Description,
                                         contentDescription = null,
-                                        tint = BluePrimary,
+                                        tint = if (isPreventiveOrder) BluePrimary else Color(0xFFB45309),
                                         modifier = Modifier.size(17.dp)
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "RELATÓRIO TÉCNICO",
+                                        text = if (isPreventiveOrder) "RELATÓRIO TÉCNICO" else "OBSERVAÇÃO INTERNA",
                                         fontWeight = FontWeight.Black,
                                         fontSize = 13.sp,
                                         color = TextPrimary
                                     )
                                     Text(
-                                        text = "Observação geral exibida na folha de impressão e na tela de aprovação",
+                                        text = if (isPreventiveOrder) {
+                                            "Observação geral exibida na folha de impressão e na tela de aprovação"
+                                        } else {
+                                            "Comunicação interna entre setores (não exibida na folha de impressão da O.S.)"
+                                        },
                                         fontSize = 10.sp,
                                         color = TextSecondary
                                     )
@@ -1183,7 +1190,7 @@ fun OrderDetailScreen(
                                         if (isPreventiveOrder) {
                                             "Digite ou grave um áudio para transcrever o relatório técnico completo desta visita (suporta textos longos)..."
                                         } else {
-                                            "Descreva observações gerais desta visita, pendências, recomendações ao cliente..."
+                                            "Anote observações internas entre os setores sobre esta O.S. (não sai na folha de impressão)..."
                                         },
                                         fontSize = 11.sp
                                     )

@@ -1658,6 +1658,8 @@ class ServiceOrderRepository(private val context: Context) {
         val cleanTechnicalReport = params.technicalReport?.trim()?.uppercase(Locale.getDefault()).orEmpty()
         val cleanFiscalRole = params.fiscalRole?.trim()?.uppercase(Locale.getDefault()).orEmpty()
         val cleanFiscalContact = params.fiscalContact?.trim()?.uppercase(Locale.getDefault()).orEmpty()
+        val cleanPhotoPaths = params.photoPaths.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(4)
+        val photoPathsJson = JSONArray(cleanPhotoPaths).toString()
 
         val fullNotes = buildString {
             append("MOTIVO / DESCRIÇÃO: ${params.description.ifBlank { "Atendimento técnico no local" }}")
@@ -1668,7 +1670,7 @@ class ServiceOrderRepository(private val context: Context) {
                 append("\nSOLUÇÃO APLICADA: ${params.solution}")
             }
             if (cleanTechnicalReport.isNotBlank()) {
-                append("\nRELATÓRIO TÉCNICO: $cleanTechnicalReport")
+                append("\nOBSERVAÇÃO INTERNA: $cleanTechnicalReport")
             }
         }
 
@@ -1699,8 +1701,11 @@ class ServiceOrderRepository(private val context: Context) {
         // 1. Grava no banco local Room imediatamente (offline-first garantido!)
         orderDao.insertOrUpdate(entity)
         saveFiscalExtraDraft(orderId, cleanFiscalRole, cleanFiscalContact)
+        if (cleanPhotoPaths.isNotEmpty()) {
+            extrasPrefs.edit().putString("other_photos_$orderId", photoPathsJson).apply()
+        }
 
-        // 2. Se informou equipamento, cria item no checklist inicial
+        // 2. Se informou equipamento, cria item no checklist inicial com as fotos anexadas
         if (!params.equipmentId.isNullOrBlank()) {
             val checkId = "CHK_${orderId}_${params.equipmentId}"
             val checkItem = EquipmentChecklistEntity(
@@ -1713,13 +1718,14 @@ class ServiceOrderRepository(private val context: Context) {
                 equipmentSector = params.equipmentSector?.takeIf { it.isNotBlank() } ?: "Geral",
                 isChecked = isFinal,
                 isSkipped = false,
+                localPhotoPathsJson = photoPathsJson,
                 isSynced = false,
                 updatedAt = timestamp
             )
             checklistDao.insertOrUpdate(checkItem)
         }
 
-        // 3. Enfileira na fila de sincronização com todos os dados técnicos e fiscal
+        // 3. Enfileira na fila de sincronização com todos os dados técnicos, fotos (até 4) e fiscal
         val payload = JSONObject().apply {
             put("id", orderId)
             put("osNumber", osNumber)
@@ -1743,6 +1749,7 @@ class ServiceOrderRepository(private val context: Context) {
             put("solution", params.solution ?: "")
             put("technicalReport", cleanTechnicalReport)
             put("routeNotes", cleanTechnicalReport)
+            put("localPhotoPaths", JSONArray(cleanPhotoPaths))
             put("clientRepresentative", params.fiscalName ?: "")
             put("clientSigneeName", params.fiscalName ?: "")
             put("clientSigneeRegistration", params.fiscalRegistration ?: "")
@@ -2116,6 +2123,7 @@ data class CreateServiceOrderParams(
     val fiscalContact: String? = null,
     val signaturePath: String? = null,
     val signatureBase64: String? = null,
+    val photoPaths: List<String> = emptyList(),
     val isFinalized: Boolean = false
 )
 

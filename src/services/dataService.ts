@@ -2744,31 +2744,61 @@ export const dataService = {
 
   async sendOSAttendedNotification(order: ServiceOrder) {
     try {
+      const orderAny = order as any;
+      const looksLikeFirestoreId = (val?: string): boolean => {
+        if (!val) return false;
+        const t = val.trim();
+        return /^[a-zA-Z0-9]{16,28}$/.test(t) && /[a-zA-Z]/.test(t) && /[0-9]/.test(t);
+      };
+
       let techName = '';
       let isOpenedByAdmin = false;
 
-      // 1. Tenta obter do técnico titular da O.S.
-      if (order.technicianId && !isStaffName(order.technicianId)) {
-        techName = order.technicianId.trim().toUpperCase();
+      // 1. Prioriza campos explícitos com o nome real do técnico (enviados pelo app Android e sistema web)
+      const explicitName = (orderAny.technicianName || orderAny.technician1 || '').toString().trim();
+      if (explicitName && !isStaffName(explicitName) && !looksLikeFirestoreId(explicitName)) {
+        techName = explicitName.toUpperCase();
       }
 
-      // 2. Se não tem técnico titular, tenta da equipe autenticada no app do técnico
-      if (!techName && order.authenticatedTeam) {
-        const match = order.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
-        if (match && match[1] && !isStaffName(match[1])) {
-          techName = match[1].trim().toUpperCase();
+      // 2. Se não veio nome explícito, verifica technicianId (resolvendo no cadastro se for ID do Firestore)
+      if (!techName && order.technicianId) {
+        const rawTechId = order.technicianId.trim();
+        if (looksLikeFirestoreId(rawTechId)) {
+          try {
+            const techSnap = await getDoc(doc(db, COLLECTIONS.TECHNICIANS, rawTechId));
+            if (techSnap.exists()) {
+              const resolvedName = (techSnap.data()?.name || '').toString().trim();
+              if (resolvedName && !isStaffName(resolvedName)) {
+                techName = resolvedName.toUpperCase();
+              }
+            }
+          } catch {
+            // fallback para próximas etapas abaixo
+          }
+        } else if (!isStaffName(rawTechId)) {
+          techName = rawTechId.toUpperCase();
         }
       }
 
-      // 3. Se não tem técnico titular e openedBy não for staff/admin, usa openedBy
-      if (!techName && order.openedBy && !isStaffName(order.openedBy)) {
+      // 3. Tenta extrair da equipe autenticada (formato PWA ou App Android)
+      if (!techName && order.authenticatedTeam) {
+        const pwaMatch = order.authenticatedTeam.match(/Técnico:\s*([^/]+)/i);
+        const appMatch = order.authenticatedTeam.match(/APP:\s*\d{2}\/\d{2}\/\d{4},?\s*\d{2}:\d{2}(?::\d{2})?\s+([^)]+)\)/i);
+        const extracted = (pwaMatch?.[1] || appMatch?.[1] || '').trim();
+        if (extracted && !isStaffName(extracted) && !looksLikeFirestoreId(extracted)) {
+          techName = extracted.toUpperCase();
+        }
+      }
+
+      // 4. Se openedBy não for staff/admin nem ID, usa openedBy
+      if (!techName && order.openedBy && !isStaffName(order.openedBy) && !looksLikeFirestoreId(order.openedBy)) {
         techName = order.openedBy.trim().toUpperCase();
       }
 
-      // 4. Se foi gerado pelo administrativo / escritório
+      // 5. Se foi gerado pelo administrativo / escritório
       if (!techName) {
         isOpenedByAdmin = true;
-        techName = (order.openedBy && order.openedBy.toUpperCase() !== 'ADMIN' && order.openedBy.toUpperCase() !== 'ADMINISTRATIVO') 
+        techName = (order.openedBy && order.openedBy.toUpperCase() !== 'ADMIN' && order.openedBy.toUpperCase() !== 'ADMINISTRATIVO' && !looksLikeFirestoreId(order.openedBy)) 
           ? order.openedBy.trim().toUpperCase() 
           : 'Escritório';
       }
@@ -4727,7 +4757,7 @@ export const dataService = {
         status: normalizedInput.status || 'aberta',
         isWorkshop: normalizedInput.isWorkshop ? 'Sim (Oficina)' : 'Não',
         totalValue: typeof normalizedInput.totalValue === 'number' ? `R$ ${normalizedInput.totalValue.toFixed(2)}` : 'R$ 0,00',
-        technician: normalizedInput.technicianId || 'Não atribuído',
+        technician: (normalizedInput as any).technicianName || (normalizedInput as any).technician1 || normalizedInput.technicianId || 'Não atribuído',
         type: normalizedInput.type || 'Manutenção Corretiva'
       };
 

@@ -2576,7 +2576,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormRepresentativeMatricula(order.clientRepresentativeMatricula || order.clientSigneeRegistration || '');
     setFormRepresentativeRole(order.clientRepresentativeRole || order.clientSigneeRole || '');
     setFormRepresentativeContact(order.clientRepresentativeContact || order.clientSigneeContact || '');
-    setFormTechnicalReport(order.technicalReport || order.routeNotes || '');
+    setFormTechnicalReport(order.internalNotes || order.technicalReport || order.routeNotes || '');
     setFormServiceCompany(order.serviceCompany || 'lefrio');
     setFormPhotos(order.photos || []);
     setFormTechSignature(order.techSignature || '');
@@ -2787,11 +2787,27 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (!finalFormId || finalFormId.startsWith('draft_')) {
       finalFormId = 'OS_' + Date.now() + '_' + Math.floor(1000 + Math.random() * 9000);
     }
-    const finalOsNumber = customOsNumber || formOsNumber.trim() || generateInitialOsNumber();
-    const isNewlyGenerated = !formOsNumber.trim() || !originalFormOsNumber;
-    const isNumberBeingChangedNow = !isNewlyGenerated && finalOsNumber !== originalFormOsNumber;
+    const trimmedCustomInput = (customOsNumber || formOsNumber).trim();
+    const isAdminCreatingWithCustomNumber =
+      selectedOrder === null &&
+      userRole !== UserRole.TECHNICIAN &&
+      Boolean(trimmedCustomInput);
+    const generatedOriginNumber = generateInitialOsNumber();
+    const finalOsNumber = trimmedCustomInput || generatedOriginNumber;
+    const isNewlyGenerated = !trimmedCustomInput || !originalFormOsNumber;
+    const isNumberBeingChangedNow =
+      isAdminCreatingWithCustomNumber ||
+      (!isNewlyGenerated && finalOsNumber !== originalFormOsNumber);
     const finalOsNumberChanged = formOsNumberChanged || isNumberBeingChangedNow;
-    const resolvedInitialNumber = selectedOrder?.initialOsNumber || formInitialOsNumber || (isNumberBeingChangedNow ? originalFormOsNumber : finalOsNumber) || generateInitialOsNumber();
+    const resolvedInitialNumber =
+      selectedOrder?.initialOsNumber ||
+      formInitialOsNumber ||
+      (isAdminCreatingWithCustomNumber
+        ? generatedOriginNumber
+        : isNumberBeingChangedNow
+          ? originalFormOsNumber
+          : finalOsNumber) ||
+      generatedOriginNumber;
     const resolvedChangedAt = finalOsNumberChanged
       ? (selectedOrder?.osNumberChangedAt && selectedOrder.osNumber === finalOsNumber ? selectedOrder.osNumberChangedAt : (selectedOrder?.osNumberChangedAt || new Date().toISOString()))
       : selectedOrder?.osNumberChangedAt;
@@ -2854,6 +2870,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         ? (selectedOrder?.diagnosis || (formDiagnosis ? formDiagnosis.trim().toUpperCase() : undefined))
         : (formDiagnosis ? formDiagnosis.trim().toUpperCase() : undefined),
       solution: formSolution ? formSolution.trim().toUpperCase() : undefined,
+      internalNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       technicalReport: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       routeNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       
@@ -3056,6 +3073,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       description: formDescription ? formDescription.trim().toUpperCase() : '',
       diagnosis: formDiagnosis ? formDiagnosis.trim().toUpperCase() : undefined,
       solution: formSolution ? formSolution.trim().toUpperCase() : undefined,
+      internalNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       technicalReport: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : undefined,
       services: formServices,
       products: formProducts,
@@ -3135,7 +3153,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setFormDescription(draft.description || '');
     setFormDiagnosis(draft.diagnosis || '');
     setFormSolution(draft.solution || '');
-    setFormTechnicalReport(draft.technicalReport || '');
+    setFormTechnicalReport(draft.internalNotes || draft.technicalReport || '');
     setFormServices(draft.services || []);
     setFormProducts(draft.products || []);
     setFormTechnicianId(draft.technicianId || '');
@@ -3863,6 +3881,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       description: formDescription ? formDescription.trim().toUpperCase() : selectedOrder.description,
       diagnosis: formDiagnosis ? formDiagnosis.trim().toUpperCase() : selectedOrder.diagnosis,
       solution: formSolution ? formSolution.trim().toUpperCase() : selectedOrder.solution,
+      internalNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : (selectedOrder.internalNotes || selectedOrder.technicalReport || selectedOrder.routeNotes),
       technicalReport: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : (selectedOrder.technicalReport || selectedOrder.routeNotes),
       routeNotes: formTechnicalReport ? formTechnicalReport.trim().toUpperCase() : (selectedOrder.routeNotes || selectedOrder.technicalReport),
       services: formServices,
@@ -5920,31 +5939,22 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <span className="os-print-val">{(orderToRender.externalOs || '-').toUpperCase()}</span>
                 </div>
                 {/* Linha 3: Descrição do Problema */}
-                <div className={`os-print-c12 os-print-cell ${(orderToRender.diagnosis || orderToRender.solution || orderToRender.technicalReport || orderToRender.routeNotes) ? 'os-print-bb' : ''}`}>
+                <div className={`os-print-c12 os-print-cell ${(orderToRender.diagnosis || orderToRender.solution) ? 'os-print-bb' : ''}`}>
                   <span className="os-print-lbl">DESCRIÇÃO DO PROBLEMA: </span>
                   <span className="os-print-val">{(orderToRender.description || '').toUpperCase()}</span>
                 </div>
                 {/* Linha 4: Diagnóstico */}
                 {orderToRender.diagnosis && (
-                  <div className={`os-print-c12 os-print-cell ${(orderToRender.solution || orderToRender.technicalReport || orderToRender.routeNotes) ? 'os-print-bb' : ''}`}>
+                  <div className={`os-print-c12 os-print-cell ${orderToRender.solution ? 'os-print-bb' : ''}`}>
                     <span className="os-print-lbl">DIAGNÓSTICO: </span>
                     <span className="os-print-val">{(orderToRender.diagnosis || '').toUpperCase()}</span>
                   </div>
                 )}
                 {/* Linha 5: Solução */}
                 {orderToRender.solution && (
-                  <div className={`os-print-c12 os-print-cell ${(orderToRender.technicalReport || orderToRender.routeNotes) ? 'os-print-bb' : ''}`}>
+                  <div className="os-print-c12 os-print-cell">
                     <span className="os-print-lbl">SOLUÇÃO: </span>
                     <span className="os-print-val">{(orderToRender.solution || '').toUpperCase()}</span>
-                  </div>
-                )}
-                {/* Linha 6: Relatório Técnico / Observações Gerais */}
-                {(orderToRender.technicalReport || orderToRender.routeNotes) && (
-                  <div className="os-print-c12 os-print-cell">
-                    <span className="os-print-lbl">OBSERVAÇÕES GERAIS / RELATÓRIO TÉCNICO: </span>
-                    <span className="os-print-val" style={{ whiteSpace: 'pre-line' }}>
-                      {(orderToRender.technicalReport || orderToRender.routeNotes || '').toUpperCase()}
-                    </span>
                   </div>
                 )}
               </div>
@@ -8789,20 +8799,27 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     <div>
                       <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block mb-0.5">Número da O.S.</label>
                       <div className="relative flex items-center">
-                        <input
-                          type="text"
-                          value={formOsNumber}
-                          onChange={(e) => setFormOsNumber(e.target.value)}
-                          disabled={selectedOrder === null || formOsNumberChanged}
-                          className={cn(
-                            "w-full border rounded-lg py-1.5 px-2.5 text-xs font-bold outline-none transition-all",
-                            selectedOrder !== null && formOsNumberChanged ? "pr-8" : "",
-                            (selectedOrder !== null && !formOsNumberChanged)
-                              ? "bg-white border-blue-200 text-blue-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10"
-                              : "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
-                          )}
-                          required
-                        />
+                        {(() => {
+                          const isAdminNewOrder = selectedOrder === null;
+                          const isOsNumDisabled = !isAdminNewOrder && formOsNumberChanged;
+                          return (
+                            <input
+                              type="text"
+                              value={formOsNumber}
+                              onChange={(e) => setFormOsNumber(e.target.value)}
+                              disabled={isOsNumDisabled}
+                              placeholder={isAdminNewOrder ? "Digite o nº (ou vazio p/ gerar)" : undefined}
+                              className={cn(
+                                "w-full border rounded-lg py-1.5 px-2.5 text-xs font-bold outline-none transition-all",
+                                selectedOrder !== null && formOsNumberChanged ? "pr-8" : "",
+                                !isOsNumDisabled
+                                  ? "bg-white border-blue-200 text-blue-700 placeholder:font-normal placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/10"
+                                  : "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                              )}
+                              required={selectedOrder !== null}
+                            />
+                          );
+                        })()}
                         {/* Ícone de Cadeado de Desbloqueio/Redefinição */}
                         {selectedOrder !== null && formOsNumberChanged && (
                           <div className="absolute right-1 flex items-center">
@@ -9524,22 +9541,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   />
                 </div>
                 <div className="md:col-span-2">
-                  <label className="text-[10px] font-black uppercase text-slate-500 tracking-wider block mb-1">
-                    Relatório Técnico / Observações Gerais
-                  </label>
+                  <div className="flex flex-wrap items-center gap-2 mb-1">
+                    <label className="text-[10px] font-black uppercase text-slate-600 tracking-wider">
+                      Observação Interna
+                    </label>
+                    <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-50 text-amber-700 border border-amber-200">
+                      Uso interno • Não exibida na impressão
+                    </span>
+                  </div>
                   <textarea
                     value={formTechnicalReport}
                     onChange={(e) => setFormTechnicalReport(e.target.value)}
                     disabled={isLockedForTech || isSaving}
                     rows={3}
-                    placeholder="OBSERVAÇÕES GERAIS DO ATENDIMENTO (EXIBIDAS NA FOLHA DE IMPRESSÃO E APROVAÇÃO)..."
+                    placeholder="COMUNICAÇÃO INTERNA ENTRE SETORES SOBRE ESTA O.S. (NÃO APARECE NA FOLHA DE IMPRESSÃO)..."
                     className={cn(
                       "w-full rounded-xl py-2 px-3 text-xs font-semibold outline-none uppercase",
                       (isLockedForTech || isSaving)
                         ? "bg-slate-100 border border-slate-200 text-slate-500 cursor-not-allowed"
-                        : "bg-white border border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                        : "bg-amber-50/40 border border-amber-200/80 text-slate-700 focus:ring-2 focus:ring-amber-500/15 focus:border-amber-400"
                     )}
                   />
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    Uso exclusivo para comunicação interna entre os setores sobre esta O.S. — este campo não é exibido na folha de impressão.
+                  </p>
                 </div>
               </div>
 

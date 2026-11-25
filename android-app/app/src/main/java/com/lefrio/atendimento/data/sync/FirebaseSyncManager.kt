@@ -822,6 +822,33 @@ class FirebaseSyncManager(private val context: Context) {
                 val techReport = payload.optString("technicalReport", "").trim()
                     .ifBlank { payload.optString("routeNotes", "").trim() }
 
+                val rawPhotoPaths = parseJsonStringArray(payload.optJSONArray("localPhotoPaths"))
+                val encodedPhotos = encodePhotosToDataUrls(
+                    rawPaths = rawPhotoPaths,
+                    maxCount = 4,
+                    maxDimension = 720,
+                    quality = 55
+                )
+
+                val hasExternalMedia = encodedPhotos.isNotEmpty() || clientSig.isNotBlank()
+                var mediaExternalized = false
+                if (hasExternalMedia) {
+                    val mediaMap = hashMapOf<String, Any>(
+                        "photos" to encodedPhotos,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                    if (clientSig.isNotBlank()) {
+                        mediaMap["clientSignature"] = clientSig
+                    }
+                    withTimeout(25_000L) {
+                        firestore.collection("serviceOrders").document(orderId)
+                            .collection("media").document("attachments")
+                            .set(mediaMap, SetOptions.merge())
+                            .await()
+                    }
+                    mediaExternalized = true
+                }
+
                 val osMap = hashMapOf<String, Any>(
                     "id" to orderId,
                     "osNumber" to osNumber,
@@ -847,6 +874,7 @@ class FirebaseSyncManager(private val context: Context) {
                     "description" to payload.optString("description", "").trim().uppercase(),
                     "diagnosis" to payload.optString("diagnosis", "").trim().uppercase(),
                     "solution" to payload.optString("solution", "").trim().uppercase(),
+                    "internalNotes" to techReport.uppercase(),
                     "technicalReport" to techReport.uppercase(),
                     "routeNotes" to techReport.uppercase(),
                     "services" to emptyList<Map<String, Any>>(),
@@ -868,16 +896,18 @@ class FirebaseSyncManager(private val context: Context) {
                     "techFinalized" to isTechFinalized,
                     "adminFinalized" to false,
                     "isLockedForTech" to isTechFinalized,
-                    "clientSignature" to clientSig,
                     "hasClientSignature" to clientSig.isNotBlank(),
                     "hasTechSignature" to false,
-                    "photoCount" to 0,
-                    "mediaExternalized" to false,
+                    "photoCount" to encodedPhotos.size,
+                    "mediaExternalized" to mediaExternalized,
                     "generalNotes" to payload.optString("generalNotes", ""),
                     "openedAt" to openedAtIso,
                     "createdAt" to createdAtIso,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
+                if (!mediaExternalized && clientSig.isNotBlank()) {
+                    osMap["clientSignature"] = clientSig
+                }
 
                 withTimeout(15_000L) {
                     firestore.collection("serviceOrders").document(orderId)

@@ -37,8 +37,10 @@ fun AppDrawerContent(
     appVersion: String,
     unreadNotificationsCount: Int = 0,
     pendingSyncCount: Int = 0,
+    availableUpdateVersion: String? = null,
     onNavigate: (DrawerDestination) -> Unit,
     onForceSyncClick: () -> Unit,
+    onUpdateAppClick: (() -> Unit)? = null,
     onLogoutClick: () -> Unit
 ) {
     ModalDrawerSheet(
@@ -214,6 +216,19 @@ fun AppDrawerContent(
                     isSelected = false,
                     onClick = onForceSyncClick
                 )
+
+                if (!availableUpdateVersion.isNullOrBlank() && onUpdateAppClick != null) {
+                    DrawerNavigationItem(
+                        title = "Atualizar Aplicativo",
+                        subtitle = "Nova versão v$availableUpdateVersion pronta",
+                        icon = Icons.Default.SystemUpdate,
+                        iconTint = Color(0xFF059669),
+                        badgeCount = 1,
+                        badgeColor = Color(0xFF059669),
+                        isSelected = false,
+                        onClick = onUpdateAppClick
+                    )
+                }
             }
 
             // 3. RODAPÉ DO MENU

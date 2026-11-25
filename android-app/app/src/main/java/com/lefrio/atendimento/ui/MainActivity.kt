@@ -38,6 +38,8 @@ import com.lefrio.atendimento.ui.theme.LeFrioTheme
 import com.lefrio.atendimento.data.sync.ConnectionTelemetryManager
 import com.lefrio.atendimento.util.AppUpdateInfo
 import com.lefrio.atendimento.util.AppUpdateManager
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -47,15 +49,20 @@ class MainActivity : ComponentActivity() {
     private val notificationsViewModel: NotificationsViewModel by viewModels()
     private lateinit var updateManager: AppUpdateManager
     private var pendingInstallAfterPermission = false
+    private val foregroundResumeTick = mutableIntStateOf(0)
+    private val installPermissionGrantedTick = mutableIntStateOf(0)
 
     override fun onResume() {
         super.onResume()
         ConnectionTelemetryManager.onAppForegrounded(this)
+        installPermissionGrantedTick.intValue += 1
         if (pendingInstallAfterPermission) {
             pendingInstallAfterPermission = false
-            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+            if (updateManager.canInstallPackages()) {
                 updateManager.installDownloadedApk()
             }
+        } else if (::updateManager.isInitialized && updateManager.shouldAutoCheckNow()) {
+            foregroundResumeTick.intValue += 1
         }
     }
 
@@ -82,7 +89,12 @@ class MainActivity : ComponentActivity() {
                     var summaryOrderId by remember { mutableStateOf<String?>(null) }
                     var showNotificationsScreen by remember { mutableStateOf(false) }
                     var showProfileScreen by remember { mutableStateOf(false) }
-                    var updateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
+                    var availableUpdateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
+                    var showUpdateDialog by remember { mutableStateOf(false) }
+                    var activeDownloadJob by remember { mutableStateOf<Job?>(null) }
+                    val resumeTick by foregroundResumeTick
+                    val permTick by installPermissionGrantedTick
+                    val canInstallNow = remember(permTick) { updateManager.canInstallPackages() }
                     val scope = rememberCoroutineScope()
 
                     fun triggerCheckUpdate(manual: Boolean = false) {
@@ -92,20 +104,33 @@ class MainActivity : ComponentActivity() {
                             }
                             val info = updateManager.checkForUpdates(isManualCheck = manual)
                             if (info.isAvailable) {
-                                updateInfo = info
-                            } else if (manual) {
-                                Toast.makeText(
-                                    this@MainActivity,
-                                    "Você já está na versão mais recente (${updateManager.getCurrentVersionName()})",
-                                    Toast.LENGTH_LONG
-                                ).show()
+                                availableUpdateInfo = info
+                                val shouldShowPopup = manual || info.isMandatory || !updateManager.isUpdateDismissed(info.latestVersionCode)
+                                if (shouldShowPopup) {
+                                    showUpdateDialog = true
+                                }
+                            } else {
+                                availableUpdateInfo = null
+                                if (manual) {
+                                    Toast.makeText(
+                                        this@MainActivity,
+                                        "Você já está na versão mais recente (v${updateManager.getCurrentVersionName()})",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
                             }
                         }
                     }
 
-                    // Checagem automática silenciosa na inicialização
+                    // Checagem automática silenciosa na inicialização e ao voltar ao app (a cada 30 min)
                     LaunchedEffect(Unit) {
                         triggerCheckUpdate(manual = false)
+                    }
+
+                    LaunchedEffect(resumeTick) {
+                        if (resumeTick > 0 && !showUpdateDialog) {
+                            triggerCheckUpdate(manual = false)
+                        }
                     }
 
                     // Vincula ou encerra silenciosamente a telemetria de conexão conforme o técnico autenticado
@@ -122,30 +147,50 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    // Diálogo de atualização in-app aprimorado
-                    updateInfo?.let { info ->
+                    // Diálogo de atualização in-app otimizado
+                    val dialogUpdateInfo = availableUpdateInfo
+                    if (showUpdateDialog && dialogUpdateInfo != null) {
                         UpdateDialog(
-                            updateInfo = info,
+                            updateInfo = dialogUpdateInfo,
+                            currentVersionName = updateManager.getCurrentVersionName(),
+                            canInstallPackages = canInstallNow,
                             onStartDownload = { onProgress, onCompleted, onError ->
-                                scope.launch {
-                                    val result = updateManager.downloadApkDirectly(
-                                        downloadUrl = info.downloadUrl,
-                                        onProgress = onProgress
-                                    )
-                                    result.onSuccess {
-                                        onCompleted()
-                                        updateManager.installDownloadedApk(onNeedPermission = { pendingInstallAfterPermission = true })
-                                    }.onFailure { ex ->
-                                        onError(ex.message ?: "Falha no download da atualização.")
+                                activeDownloadJob?.cancel()
+                                activeDownloadJob = scope.launch {
+                                    try {
+                                        val result = updateManager.downloadApkDirectly(
+                                            downloadUrl = dialogUpdateInfo.downloadUrl,
+                                            expectedVersionCode = dialogUpdateInfo.latestVersionCode,
+                                            onProgress = onProgress
+                                        )
+                                        result.onSuccess {
+                                            availableUpdateInfo = dialogUpdateInfo.copy(isAlreadyDownloaded = true)
+                                            onCompleted()
+                                            updateManager.installDownloadedApk(
+                                                onNeedPermission = { pendingInstallAfterPermission = true }
+                                            )
+                                        }.onFailure { ex ->
+                                            onError(ex.message ?: "Falha no download da atualização.")
+                                        }
+                                    } catch (_: CancellationException) {
+                                        // Download cancelado voluntariamente pelo técnico
                                     }
                                 }
                             },
+                            onCancelDownload = {
+                                activeDownloadJob?.cancel()
+                                activeDownloadJob = null
+                            },
                             onInstallNowClick = {
-                                updateManager.installDownloadedApk(onNeedPermission = { pendingInstallAfterPermission = true })
+                                updateManager.installDownloadedApk(
+                                    onNeedPermission = { pendingInstallAfterPermission = true }
+                                )
                             },
                             onDismissRequest = {
-                                updateManager.markUpdateDismissed(info.latestVersionCode)
-                                updateInfo = null
+                                activeDownloadJob?.cancel()
+                                activeDownloadJob = null
+                                updateManager.markUpdateDismissed(dialogUpdateInfo.latestVersionCode)
+                                showUpdateDialog = false
                             }
                         )
                     }
@@ -170,6 +215,7 @@ class MainActivity : ComponentActivity() {
                                         user = state.user,
                                         appVersion = updateManager.getCurrentVersionName(),
                                         pendingSyncCount = dashboardUiState.pendingSyncCount,
+                                        availableUpdateVersion = availableUpdateInfo?.takeIf { it.isAvailable }?.latestVersionName,
                                         onNavigate = { dest ->
                                             scope.launch { drawerState.close() }
                                             when (dest) {
@@ -214,6 +260,14 @@ class MainActivity : ComponentActivity() {
                                             serviceOrdersViewModel.triggerSync()
                                             Toast.makeText(this@MainActivity, "Sincronização iniciada com a nuvem!", Toast.LENGTH_SHORT).show()
                                         },
+                                        onUpdateAppClick = {
+                                            scope.launch { drawerState.close() }
+                                            if (availableUpdateInfo?.isAvailable == true) {
+                                                showUpdateDialog = true
+                                            } else {
+                                                triggerCheckUpdate(manual = true)
+                                            }
+                                        },
                                         onLogoutClick = {
                                             scope.launch { drawerState.close() }
                                             showProfileScreen = false
@@ -231,8 +285,15 @@ class MainActivity : ComponentActivity() {
                                         user = state.user,
                                         appVersion = updateManager.getCurrentVersionName(),
                                         pendingSyncCount = dashboardUiState.pendingSyncCount,
+                                        availableUpdateVersion = availableUpdateInfo?.takeIf { it.isAvailable }?.latestVersionName,
                                         onBackClick = { showProfileScreen = false },
-                                        onCheckUpdateClick = { triggerCheckUpdate(manual = true) },
+                                        onCheckUpdateClick = {
+                                            if (availableUpdateInfo?.isAvailable == true) {
+                                                showUpdateDialog = true
+                                            } else {
+                                                triggerCheckUpdate(manual = true)
+                                            }
+                                        },
                                         onForceSyncClick = {
                                             dashboardViewModel.forceSync()
                                             serviceOrdersViewModel.triggerSync()
