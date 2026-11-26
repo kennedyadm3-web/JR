@@ -28,6 +28,7 @@ import com.lefrio.atendimento.ui.signature.SignatureViewModel
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
+import com.lefrio.atendimento.data.local.LocalServiceOrderDraft
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.ui.components.AppDrawerContent
 import com.lefrio.atendimento.ui.components.DrawerDestination
@@ -200,6 +201,7 @@ class MainActivity : ComponentActivity() {
                             val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
                             var currentDestination by remember { mutableStateOf(DrawerDestination.ROTEIRO) }
                             var showCreateOrderScreen by remember { mutableStateOf(false) }
+                            var editingDraft by remember { mutableStateOf<LocalServiceOrderDraft?>(null) }
                             val serviceOrdersViewModel = remember(state.user.uid) {
                                 ServiceOrdersViewModel(
                                     application,
@@ -222,6 +224,7 @@ class MainActivity : ComponentActivity() {
                                                 DrawerDestination.ROTEIRO -> {
                                                     currentDestination = DrawerDestination.ROTEIRO
                                                     showCreateOrderScreen = false
+                                                    editingDraft = null
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
                                                     selectedOrderId = null
@@ -231,6 +234,7 @@ class MainActivity : ComponentActivity() {
                                                 DrawerDestination.SERVICE_ORDERS -> {
                                                     currentDestination = DrawerDestination.SERVICE_ORDERS
                                                     showCreateOrderScreen = false
+                                                    editingDraft = null
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
                                                     selectedOrderId = null
@@ -244,6 +248,7 @@ class MainActivity : ComponentActivity() {
                                                     selectedOrderId = null
                                                     signatureOrderId = null
                                                     summaryOrderId = null
+                                                    editingDraft = null
                                                     showCreateOrderScreen = true
                                                 }
                                                 DrawerDestination.NOTIFICATIONS -> {
@@ -272,6 +277,7 @@ class MainActivity : ComponentActivity() {
                                             scope.launch { drawerState.close() }
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
+                                            editingDraft = null
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -302,6 +308,7 @@ class MainActivity : ComponentActivity() {
                                         onSwitchTechClick = {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
+                                            editingDraft = null
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -310,6 +317,7 @@ class MainActivity : ComponentActivity() {
                                         onLogoutClick = {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
+                                            editingDraft = null
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -373,9 +381,18 @@ class MainActivity : ComponentActivity() {
                                     CreateServiceOrderScreen(
                                         user = state.user,
                                         viewModel = serviceOrdersViewModel,
-                                        onBackClick = { showCreateOrderScreen = false },
+                                        initialDraft = editingDraft,
+                                        onBackClick = {
+                                            showCreateOrderScreen = false
+                                            editingDraft = null
+                                        },
+                                        onDraftSaved = {
+                                            showCreateOrderScreen = false
+                                            editingDraft = null
+                                        },
                                         onOrderCreated = { createdId ->
                                             showCreateOrderScreen = false
+                                            editingDraft = null
                                             selectedOrderId = createdId
                                         }
                                     )
@@ -389,7 +406,12 @@ class MainActivity : ComponentActivity() {
                                         onOrderClick = { orderId ->
                                             selectedOrderId = orderId
                                         },
+                                        onDraftClick = { draft ->
+                                            editingDraft = draft
+                                            showCreateOrderScreen = true
+                                        },
                                         onNewOrderClick = {
+                                            editingDraft = null
                                             showCreateOrderScreen = true
                                         },
                                         onProfileClick = {

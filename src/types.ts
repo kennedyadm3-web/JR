@@ -56,6 +56,8 @@ export interface ServiceCall {
   forecastDate?: string;
   comments?: ServiceCallComment[];
   isWorkshop?: boolean; // Indica se o equipamento/máquina se encontra na oficina da empresa
+  linkedServiceOrderId?: string; // ID da O.S. vinculada que originou este chamado de oficina
+  linkedOsNumber?: string; // Número da O.S. vinculada (para identificação rápida)
   // Denormalized for reports
   clientName?: string;
   addressLabel?: string;
@@ -603,6 +605,7 @@ export interface ServiceOrder {
   shareSignatureToken?: string; // Token único do link temporário de assinatura
   shareSignatureCreatedAt?: string; // Data/hora em que o link de assinatura foi gerado
   shareSignatureExpiresAt?: string; // Data/hora de expiração do link (48h de validade)
+  linkedWorkshopCallId?: string; // ID do chamado de oficina gerado automaticamente ao ativar isWorkshop
   createdAt: any;
   updatedAt?: any;
 }

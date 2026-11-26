@@ -123,9 +123,9 @@ const getDoc = async (docRef: any, timeoutMs: number = 15000): Promise<any> => {
     }
   }
 };
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { handleFirestoreError } from '../lib/firestore-utils';
-import { Client, Address, MaintenanceRecord, MaintenanceStatus, OperationType, Technician, ServiceCall, ServiceCallStatus, RouteConfiguration, RouteType, Adjustment, UserProfile, NotificationItem, Task, TaskStatus, TaskPriority, MuralPost, Inspection, TravelCard, ContractPerformance, Equipment, DeviceSettings, UserRole, JettingControl, RouteMonthlyPlanning, ServiceOrder, ServiceOrderItem, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, RouteExpense, RouteExpenseStatus, isOSRecord } from '../types';
+import { Client, Address, MaintenanceRecord, MaintenanceStatus, OperationType, Technician, ServiceCall, ServiceCallStatus, ServiceCallPriority, RouteConfiguration, RouteType, Adjustment, UserProfile, NotificationItem, Task, TaskStatus, TaskPriority, MuralPost, Inspection, TravelCard, ContractPerformance, Equipment, DeviceSettings, UserRole, JettingControl, RouteMonthlyPlanning, ServiceOrder, ServiceOrderItem, ServiceOrderSettings, ServiceCompanyConfig, ServiceCatalogItem, ClientPriceOverride, RouteExpense, RouteExpenseStatus, isOSRecord } from '../types';
 import { historyService } from './historyService';
 import { format } from 'date-fns';
 import { sortOrdersByCreationDateDesc } from '../lib/utils';
@@ -2528,10 +2528,12 @@ export const dataService = {
 
   async addServiceCall(call: Omit<ServiceCall, 'id'>) {
     try {
-      if (call.addressId) {
+      if (call.addressId && !call.linkedServiceOrderId) {
         const existingCalls = await dataService.getServiceCalls(call.clientId);
         const hasActiveOpenCall = existingCalls.some(c => {
           if (!c || !c.addressId) return false;
+          // Chamados de oficina gerados automaticamente por uma O.S. não bloqueiam abertura de chamados comuns no mesmo endereço
+          if (c.linkedServiceOrderId && c.isWorkshop) return false;
           if (String(c.addressId).trim() !== String(call.addressId).trim()) return false;
           const st = String(c.status || '').toLowerCase();
           const isResolved = st === 'resolved' || st === 'cancelled' || st === 'resolvido' || st === 'cancelado' || st === ServiceCallStatus.RESOLVED || st === ServiceCallStatus.CANCELLED;
@@ -2554,15 +2556,54 @@ export const dataService = {
     }
   },
 
-  async updateServiceCall(id: string, data: Partial<ServiceCall>) {
+  async updateServiceCall(id: string, data: Partial<ServiceCall>, options?: { skipWorkshopOrderSync?: boolean }) {
     try {
-      const updateData = { ...data };
+      const updateData: any = { ...data };
       if (data.status === 'resolved' && !data.resolvedAt) {
         updateData.resolvedAt = Timestamp.now();
       }
       await updateDoc(doc(db, COLLECTIONS.SERVICE_CALLS, id), updateData);
       await historyService.log(id, 'ServiceCall', 'Update', data);
       clearCache('service_calls_');
+
+      // Sincronização em via dupla (Chamado -> O.S.):
+      // Ao concluir/cancelar ou desmarcar OFICINA no chamado vinculado, desmarca OFICINA na O.S. correspondente.
+      // Ao reabrir o chamado vinculado com OFICINA ativo, reativa OFICINA na O.S. correspondente.
+      if (!options?.skipWorkshopOrderSync && (data.status !== undefined || data.isWorkshop !== undefined)) {
+        try {
+          const callSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_CALLS, id));
+          if (callSnap.exists()) {
+            const callData = callSnap.data() as ServiceCall;
+            if (callData?.linkedServiceOrderId) {
+              const effStatus = String(data.status ?? callData.status ?? '').toLowerCase();
+              const effIsWorkshop = data.isWorkshop !== undefined ? Boolean(data.isWorkshop) : Boolean(callData.isWorkshop);
+              const isClosed =
+                effStatus === 'resolved' ||
+                effStatus === 'cancelled' ||
+                effStatus === 'resolvido' ||
+                effStatus === 'cancelado' ||
+                effStatus === ServiceCallStatus.RESOLVED ||
+                effStatus === ServiceCallStatus.CANCELLED;
+
+              if (isClosed || !effIsWorkshop) {
+                await this.updateServiceOrder(
+                  callData.linkedServiceOrderId,
+                  { isWorkshop: false },
+                  { skipWorkshopSync: true }
+                );
+              } else {
+                await this.updateServiceOrder(
+                  callData.linkedServiceOrderId,
+                  { isWorkshop: true },
+                  { skipWorkshopSync: true }
+                );
+              }
+            }
+          }
+        } catch (syncErr) {
+          console.warn(`[updateServiceCall] Falha ao sincronizar status OFICINA na O.S. vinculada ao chamado ${id}:`, syncErr);
+        }
+      }
     } catch (e) {
       handleFirestoreError(e, OperationType.UPDATE, `${COLLECTIONS.SERVICE_CALLS}/${id}`);
     }
@@ -2570,11 +2611,106 @@ export const dataService = {
 
   async deleteServiceCall(id: string) {
     try {
+      // Se o chamado excluído estava vinculado a uma O.S. de oficina, limpa o vínculo e desmarca isWorkshop na O.S.
+      try {
+        const callSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_CALLS, id));
+        if (callSnap.exists()) {
+          const callData = callSnap.data() as ServiceCall;
+          if (callData?.linkedServiceOrderId) {
+            await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, callData.linkedServiceOrderId), {
+              isWorkshop: false,
+              linkedWorkshopCallId: deleteField(),
+              updatedAt: serverTimestamp()
+            });
+            clearCache('service_orders_');
+          }
+        }
+      } catch (unlinkErr) {
+        console.warn(`[deleteServiceCall] Não foi possível desvincular O.S. do chamado ${id}:`, unlinkErr);
+      }
+
       await deleteDoc(doc(db, COLLECTIONS.SERVICE_CALLS, id));
       await historyService.log(id, 'ServiceCall', 'Delete', { message: 'Chamado removido' });
       clearCache('service_calls_');
     } catch (e) {
       handleFirestoreError(e, OperationType.DELETE, `${COLLECTIONS.SERVICE_CALLS}/${id}`);
+    }
+  },
+
+  // Vincula ou desvincula manualmente um Chamado a uma O.S. existente (sincronizando os dois lados)
+  async linkServiceCallToOrder(
+    callId: string,
+    targetOrder: { id: string; osNumber?: string } | null,
+    options?: { previousOrderId?: string; isWorkshop?: boolean; callStatus?: ServiceCallStatus }
+  ) {
+    try {
+      const prevOrderId = options?.previousOrderId;
+
+      // 1. Se havia outra O.S. vinculada anteriormente, remove o vínculo antigo nela
+      if (prevOrderId && prevOrderId !== targetOrder?.id) {
+        try {
+          await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, prevOrderId), {
+            linkedWorkshopCallId: deleteField(),
+            updatedAt: serverTimestamp()
+          });
+        } catch (err) {
+          console.warn(`[linkServiceCallToOrder] Não foi possível desvincular a O.S. anterior ${prevOrderId}:`, err);
+        }
+      }
+
+      if (targetOrder && targetOrder.id) {
+        const displayOsNumber =
+          targetOrder.osNumber && targetOrder.osNumber !== '00000'
+            ? targetOrder.osNumber
+            : targetOrder.id;
+
+        // 2. Grava vínculo no Chamado
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_CALLS, callId), {
+          linkedServiceOrderId: targetOrder.id,
+          linkedOsNumber: displayOsNumber
+        });
+
+        // 3. Grava vínculo reverso na O.S. (e mantém isWorkshop alinhado se for um chamado de oficina ativo)
+        const st = String(options?.callStatus || '').toLowerCase();
+        const isCallActive =
+          st !== 'resolved' &&
+          st !== 'cancelled' &&
+          st !== 'resolvido' &&
+          st !== 'cancelado' &&
+          st !== ServiceCallStatus.RESOLVED &&
+          st !== ServiceCallStatus.CANCELLED;
+
+        const osPatch: Record<string, any> = {
+          linkedWorkshopCallId: callId,
+          updatedAt: serverTimestamp()
+        };
+        if (options?.isWorkshop && isCallActive) {
+          osPatch.isWorkshop = true;
+        }
+
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, targetOrder.id), osPatch);
+
+        await historyService.log(callId, 'ServiceCall', 'Update', {
+          linkedServiceOrderId: targetOrder.id,
+          linkedOsNumber: displayOsNumber,
+          actionDetails: `Chamado vinculado manualmente à O.S. #${displayOsNumber}`
+        });
+      } else {
+        // Desvincular completamente do Chamado
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_CALLS, callId), {
+          linkedServiceOrderId: deleteField(),
+          linkedOsNumber: deleteField()
+        });
+        await historyService.log(callId, 'ServiceCall', 'Update', {
+          actionDetails: 'Vínculo com Ordem de Serviço removido manualmente'
+        });
+      }
+
+      clearCache('service_calls_');
+      clearCache('service_orders_');
+    } catch (e) {
+      handleFirestoreError(e, OperationType.UPDATE, `${COLLECTIONS.SERVICE_CALLS}/${callId}`);
+      throw e;
     }
   },
 
@@ -4337,20 +4473,26 @@ export const dataService = {
 
     const upper = withoutHash.toUpperCase();
     const withoutOsPrefix = upper.replace(/^OS[-_\s]*/i, '').trim();
+    const isPureNumeric = /^\d+$/.test(withoutOsPrefix);
+    const unpaddedNum = isPureNumeric ? String(Number(withoutOsPrefix)) : '';
+    const padded5Num = isPureNumeric && withoutOsPrefix.length < 5 ? withoutOsPrefix.padStart(5, '0') : '';
+
     const candidates = Array.from(
       new Set([
         upper,
         withoutHash,
+        withoutOsPrefix,
+        unpaddedNum,
+        padded5Num,
         `#${upper}`,
         `#${withoutHash}`,
-        withoutOsPrefix,
         withoutOsPrefix ? `OS-${withoutOsPrefix}` : '',
         withoutOsPrefix ? `#OS-${withoutOsPrefix}` : ''
       ].filter(Boolean))
     ).slice(0, 10);
 
     const baseRef = collection(db, COLLECTIONS.SERVICE_ORDERS);
-    const idCandidates = Array.from(new Set([upper, withoutHash, withoutOsPrefix].filter(Boolean)));
+    const idCandidates = Array.from(new Set([upper, withoutHash, withoutOsPrefix, unpaddedNum, padded5Num].filter(Boolean)));
 
     try {
       const queries: Promise<any>[] = [
@@ -4402,6 +4544,7 @@ export const dataService = {
   // Consulta sob demanda para o Relatório Avançado de O.S. (busca apenas o recorte definido pelos filtros)
   async queryServiceOrdersForReport(filters: {
     clientId?: string;
+    addressId?: string;
     status?: string;
     serviceCompany?: string;
     type?: string;
@@ -4414,7 +4557,9 @@ export const dataService = {
     try {
       // Seleciona o filtro mais restritivo para executar no servidor sem depender de índices compostos
       let serverQuery: any = null;
-      if (filters.clientId && filters.clientId !== 'all') {
+      if (filters.addressId && filters.addressId !== 'all') {
+        serverQuery = query(baseRef, where('addressId', '==', filters.addressId));
+      } else if (filters.clientId && filters.clientId !== 'all') {
         serverQuery = query(baseRef, where('clientId', '==', filters.clientId));
       } else if (filters.workshopFilter === 'workshop_only') {
         serverQuery = query(baseRef, where('isWorkshop', '==', true));
@@ -4586,15 +4731,23 @@ export const dataService = {
 
   async getServiceOrderByShareToken(token: string): Promise<ServiceOrder | null> {
     try {
-      if (!token) return null;
+      const cleanToken = String(token || '').trim();
+      if (!cleanToken) return null;
 
-      // 1. Tenta buscar via backend endpoint seguro (utiliza Admin SDK no servidor e funciona para clientes deslogados)
+      // 1. Tenta buscar via backend endpoint seguro (utiliza Admin SDK no servidor e já hidrata fotos/assinatura sem preços)
       try {
-        const apiRes = await fetch(`/api/public/os-by-token?token=${encodeURIComponent(token)}`);
+        const apiRes = await fetch(`/api/public/os-by-token?token=${encodeURIComponent(cleanToken)}`);
         if (apiRes.ok) {
           const osData = await apiRes.json();
           if (osData && osData.id) {
-            return await this.hydrateServiceOrderMedia(normalizeServiceOrderStatus(osData as ServiceOrder));
+            const normalized = normalizeServiceOrderStatus(osData as ServiceOrder);
+            // Se o servidor já trouxe as fotos ou não há mídia externa faltante, evita consulta extra redundante
+            const hasPhotosAlready = Array.isArray(normalized.photos) && normalized.photos.length > 0;
+            const hasSigAlready = Boolean(normalized.clientSignature && normalized.clientSignature.length > 10);
+            if ((!normalized.photoCount || hasPhotosAlready) && (!normalized.hasClientSignature || hasSigAlready)) {
+              return normalized;
+            }
+            return await this.hydrateServiceOrderMedia(normalized);
           }
         }
       } catch (apiErr) {
@@ -4602,40 +4755,38 @@ export const dataService = {
       }
 
       // 2. Extração direta de ID caso o token esteja no formato codificado com o ID da O.S.
-      const tokenParts = token.split('_');
-      if (token.startsWith('sign_os_OS_') && tokenParts.length >= 5) {
-        const extractedId = `OS_${tokenParts[2]}_${tokenParts[3]}`;
-        try {
-          const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, extractedId));
-          if (directSnap.exists()) {
-            return await this.hydrateServiceOrderMedia(
-              normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder)
-            );
-          }
-        } catch {}
+      const tokenParts = cleanToken.split('_');
+      if (cleanToken.startsWith('sign_os_OS_') && tokenParts.length >= 5) {
+        const candidateIds = [
+          `OS_${tokenParts[3]}_${tokenParts[4]}`,
+          `OS_${tokenParts[2]}_${tokenParts[3]}`
+        ];
+        for (const extractedId of candidateIds) {
+          try {
+            const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, extractedId));
+            if (directSnap.exists()) {
+              const rawData = directSnap.data();
+              if (rawData?.shareSignatureToken === cleanToken) {
+                return await this.hydrateServiceOrderMedia(
+                  normalizeServiceOrderStatus({ id: directSnap.id, ...rawData } as ServiceOrder)
+                );
+              }
+            }
+          } catch {}
+        }
       }
 
       // 3. Consulta no Firestore por shareSignatureToken
       try {
         const q = query(
           collection(db, COLLECTIONS.SERVICE_ORDERS),
-          where('shareSignatureToken', '==', token)
+          where('shareSignatureToken', '==', cleanToken)
         );
         const snap = await getDocs(q);
         if (!snap.empty) {
           const d = snap.docs[0];
           return await this.hydrateServiceOrderMedia(
             normalizeServiceOrderStatus({ id: d.id, ...d.data() } as ServiceOrder)
-          );
-        }
-      } catch {}
-
-      // 4. Fallback: se o token for o próprio ID da O.S.
-      try {
-        const directSnap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, token));
-        if (directSnap.exists()) {
-          return await this.hydrateServiceOrderMedia(
-            normalizeServiceOrderStatus({ id: directSnap.id, ...directSnap.data() } as ServiceOrder)
           );
         }
       } catch {}
@@ -4726,9 +4877,11 @@ export const dataService = {
         }
       }
 
+      const preservedWorkshopCallId = normalizedInput.linkedWorkshopCallId || existingDocData?.linkedWorkshopCallId;
       const { photos: _p, clientSignature: _cs, techSignature: _ts, ...lightOrderFields } = normalizedInput;
       const cleanOrder: any = clean({
         ...(mediaStoredExternally ? lightOrderFields : normalizedInput),
+        ...(preservedWorkshopCallId ? { linkedWorkshopCallId: preservedWorkshopCallId } : {}),
         hasClientSignature: hasClientSig,
         hasTechSignature: hasTechSig,
         photoCount: hasPhotos ? normalizedInput.photos!.length : 0,
@@ -4744,6 +4897,21 @@ export const dataService = {
       }
 
       await setDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), cleanOrder, { merge: true });
+
+      // Sincronização automática do Chamado de Oficina vinculado à O.S.
+      // Regra confirmada: finalizar a O.S. com OFICINA ativo mantém o chamado ABERTO; só conclui ao desmarcar OFICINA.
+      let syncedWorkshopCallId = preservedWorkshopCallId;
+      try {
+        syncedWorkshopCallId = await this.syncWorkshopCallForServiceOrder(
+          {
+            ...normalizedInput,
+            linkedWorkshopCallId: preservedWorkshopCallId
+          },
+          existingDocData
+        );
+      } catch (wsSyncErr) {
+        console.warn(`[addServiceOrder] Falha na sincronização do chamado de oficina da O.S. ${order.id}:`, wsSyncErr);
+      }
 
       // Registro detalhado e legível no histórico de auditoria
       const isFinalizeAction = normalizedInput.adminFinalized || normalizedInput.status === 'finalizada' || normalizedInput.status === 'pre_finalizada';
@@ -4782,12 +4950,245 @@ export const dataService = {
       if ((isTechFinalizedNow && !wasTechFinalizedBefore) || (isNewTechOrder && isTechFinalizedNow)) {
         this.sendOSAttendedNotification(normalizedInput).catch(console.error);
       }
+
+      return { linkedWorkshopCallId: syncedWorkshopCallId };
     } catch (e) {
       handleFirestoreError(e, OperationType.CREATE, COLLECTIONS.SERVICE_ORDERS);
     }
   },
 
-  async updateServiceOrder(id: string, data: Partial<ServiceOrder>) {
+  // Unificação automática: O.S. marcada como OFICINA <-> Chamado vinculado em serviceCalls
+  async syncWorkshopCallForServiceOrder(
+    order: ServiceOrder,
+    existingOrderData?: any
+  ): Promise<string | undefined> {
+    if (!order || !order.id) return existingOrderData?.linkedWorkshopCallId;
+
+    const isWorkshopNow = Boolean(order.isWorkshop);
+    const isCancelledNow = order.status === 'cancelada';
+    let linkedCallId: string | undefined = order.linkedWorkshopCallId || existingOrderData?.linkedWorkshopCallId;
+    let existingCallSnap: any = null;
+
+    // 1. Localiza chamado vinculado pelo ID salvo na O.S.
+    if (linkedCallId) {
+      try {
+        const snap = await getDoc(doc(db, COLLECTIONS.SERVICE_CALLS, linkedCallId));
+        if (snap.exists()) {
+          existingCallSnap = snap;
+        } else {
+          linkedCallId = undefined;
+        }
+      } catch {
+        // segue para consulta por linkedServiceOrderId
+      }
+    }
+
+    // 2. Fallback de deduplicação: procura por linkedServiceOrderId == order.id
+    if (!existingCallSnap) {
+      try {
+        const q = query(
+          collection(db, COLLECTIONS.SERVICE_CALLS),
+          where('linkedServiceOrderId', '==', order.id),
+          limit(1)
+        );
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+          existingCallSnap = snap.docs[0];
+          linkedCallId = existingCallSnap.id;
+        }
+      } catch {}
+    }
+
+    const osLabel = order.osNumber && order.osNumber !== '00000' ? `#${order.osNumber}` : `#${order.id}`;
+    const actorName = (
+      auth.currentUser?.displayName ||
+      auth.currentUser?.email?.split('@')[0] ||
+      order.openedBy ||
+      'SISTEMA'
+    ).toUpperCase();
+
+    // Caso A: O.S. cancelada -> cancela o chamado de oficina vinculado se ainda estiver aberto
+    if (isCancelledNow) {
+      if (existingCallSnap && linkedCallId) {
+        const callData = existingCallSnap.data() as ServiceCall;
+        const st = String(callData.status || '').toLowerCase();
+        const isClosed = st === 'resolved' || st === 'cancelled' || st === ServiceCallStatus.RESOLVED || st === ServiceCallStatus.CANCELLED;
+        if (!isClosed) {
+          const existingComments = Array.isArray(callData.comments) ? callData.comments : [];
+          await updateDoc(doc(db, COLLECTIONS.SERVICE_CALLS, linkedCallId), {
+            status: ServiceCallStatus.CANCELLED,
+            resolvedAt: Timestamp.now(),
+            resolvedBy: actorName,
+            resolutionNotes: `ORDEM DE SERVIÇO ${osLabel} CANCELADA.`,
+            comments: [
+              ...existingComments,
+              {
+                id: `comm_ws_cancel_${Date.now()}`,
+                authorId: auth.currentUser?.uid || 'system',
+                authorName: actorName,
+                authorRole: 'system',
+                content: `Chamado cancelado automaticamente pois a O.S. ${osLabel} foi cancelada.`,
+                createdAt: new Date()
+              }
+            ]
+          });
+          await historyService.log(linkedCallId, 'ServiceCall', 'Update', {
+            status: ServiceCallStatus.CANCELLED,
+            linkedServiceOrderId: order.id,
+            actionDetails: `Cancelamento automático pela O.S. ${osLabel}`
+          });
+          clearCache('service_calls_');
+        }
+      }
+      return linkedCallId;
+    }
+
+    // Caso B: OFICINA ATIVO na O.S. -> cria chamado automático (se não existir) ou reabre (se estava fechado)
+    // Obs.: se a O.S. for finalizada com isWorkshop = true, o chamado continua ABERTO até desmarcar OFICINA.
+    if (isWorkshopNow) {
+      const equipParts = [
+        order.equipmentName,
+        order.equipmentBrand,
+        order.equipmentBtus,
+        order.equipmentSector ? `SETOR: ${order.equipmentSector}` : '',
+        order.equipmentPatrimony ? `PATRIMÔNIO: ${order.equipmentPatrimony}` : ''
+      ].filter(Boolean);
+
+      const problemText = (order.description || '').trim();
+      const diagnosisText = (order.diagnosis || '').trim();
+      const descLines: string[] = [`[OFICINA • O.S. ${osLabel}]`];
+      if (equipParts.length > 0) descLines.push(`EQUIPAMENTO: ${equipParts.join(' • ')}`);
+      if (problemText) descLines.push(`PROBLEMA: ${problemText}`);
+      if (diagnosisText && diagnosisText.toUpperCase() !== problemText.toUpperCase()) {
+        descLines.push(`DIAGNÓSTICO: ${diagnosisText}`);
+      }
+      const autoDescription = descLines.join('\n');
+
+      const forecastDate =
+        typeof order.plannedDate === 'string' && order.plannedDate.trim().length >= 10
+          ? order.plannedDate.trim().substring(0, 10)
+          : '';
+
+      if (!existingCallSnap || !linkedCallId) {
+        if (!order.clientId || !order.addressId) {
+          return undefined;
+        }
+        const newCallPayload: any = clean({
+          clientId: order.clientId,
+          addressId: order.addressId,
+          clientName: order.clientName || 'Cliente',
+          addressLabel: order.addressStreet || order.clientAddress || '',
+          description: autoDescription,
+          status: ServiceCallStatus.OPEN,
+          priority: ServiceCallPriority.MEDIUM,
+          isWorkshop: true,
+          linkedServiceOrderId: order.id,
+          linkedOsNumber: order.osNumber && order.osNumber !== '00000' ? order.osNumber : order.id,
+          forecastDate,
+          comments: [
+            {
+              id: `comm_ws_open_${Date.now()}`,
+              authorId: auth.currentUser?.uid || 'system',
+              authorName: actorName,
+              authorRole: 'system',
+              content: `Chamado de OFICINA gerado automaticamente a partir da O.S. ${osLabel}.`,
+              createdAt: new Date()
+            }
+          ],
+          createdAt: serverTimestamp()
+        });
+
+        const createdRef = await addDoc(collection(db, COLLECTIONS.SERVICE_CALLS), newCallPayload);
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), {
+          linkedWorkshopCallId: createdRef.id
+        });
+        await historyService.log(createdRef.id, 'ServiceCall', 'Create', {
+          ...newCallPayload,
+          actionDetails: `Gerado automaticamente pela O.S. ${osLabel} (OFICINA)`
+        });
+        clearCache('service_calls_');
+        clearCache('service_orders_');
+        return createdRef.id;
+      }
+
+      // Já existe chamado vinculado: nunca duplica!
+      const callData = existingCallSnap.data() as ServiceCall;
+      const st = String(callData.status || '').toLowerCase();
+      const isClosed = st === 'resolved' || st === 'cancelled' || st === ServiceCallStatus.RESOLVED || st === ServiceCallStatus.CANCELLED;
+      const desiredOsNumber = order.osNumber && order.osNumber !== '00000' ? order.osNumber : order.id;
+
+      const patch: Record<string, any> = {};
+      if (callData.linkedOsNumber !== desiredOsNumber) patch.linkedOsNumber = desiredOsNumber;
+      if (!callData.isWorkshop) patch.isWorkshop = true;
+
+      if (isClosed) {
+        const existingComments = Array.isArray(callData.comments) ? callData.comments : [];
+        patch.status = ServiceCallStatus.OPEN;
+        patch.resolvedAt = null;
+        patch.comments = [
+          ...existingComments,
+          {
+            id: `comm_ws_reopen_${Date.now()}`,
+            authorId: auth.currentUser?.uid || 'system',
+            authorName: actorName,
+            authorRole: 'system',
+            content: `Status OFICINA reativado na O.S. ${osLabel} — chamado reaberto automaticamente.`,
+            createdAt: new Date()
+          }
+        ];
+      }
+
+      if (Object.keys(patch).length > 0) {
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_CALLS, linkedCallId), patch);
+        clearCache('service_calls_');
+      }
+
+      if (existingOrderData?.linkedWorkshopCallId !== linkedCallId) {
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, order.id), {
+          linkedWorkshopCallId: linkedCallId
+        });
+      }
+
+      return linkedCallId;
+    }
+
+    // Caso C: OFICINA DESATIVADO na O.S. -> conclui (RESOLVIDO) automaticamente o chamado vinculado
+    if (existingCallSnap && linkedCallId) {
+      const callData = existingCallSnap.data() as ServiceCall;
+      const st = String(callData.status || '').toLowerCase();
+      const isAlreadyClosed = st === 'resolved' || st === 'cancelled' || st === ServiceCallStatus.RESOLVED || st === ServiceCallStatus.CANCELLED;
+      if (!isAlreadyClosed) {
+        const existingComments = Array.isArray(callData.comments) ? callData.comments : [];
+        await updateDoc(doc(db, COLLECTIONS.SERVICE_CALLS, linkedCallId), {
+          status: ServiceCallStatus.RESOLVED,
+          resolvedAt: Timestamp.now(),
+          resolvedBy: actorName,
+          resolutionNotes: `STATUS OFICINA DESATIVADO NA O.S. ${osLabel}.`,
+          comments: [
+            ...existingComments,
+            {
+              id: `comm_ws_resolve_${Date.now()}`,
+              authorId: auth.currentUser?.uid || 'system',
+              authorName: actorName,
+              authorRole: 'system',
+              content: `Chamado concluído automaticamente pois o status OFICINA foi desativado na O.S. ${osLabel}.`,
+              createdAt: new Date()
+            }
+          ]
+        });
+        await historyService.log(linkedCallId, 'ServiceCall', 'Update', {
+          status: ServiceCallStatus.RESOLVED,
+          linkedServiceOrderId: order.id,
+          actionDetails: `Concluído automaticamente ao desativar OFICINA na O.S. ${osLabel}`
+        });
+        clearCache('service_calls_');
+      }
+    }
+
+    return linkedCallId;
+  },
+
+  async updateServiceOrder(id: string, data: Partial<ServiceOrder>, options?: { skipWorkshopSync?: boolean }) {
     try {
       // NUNCA sobrescreve createdAt ao atualizar/editar a O.S.
       const { createdAt: _ignoredCreatedAt, photos, clientSignature, techSignature, ...restData } = data;
@@ -4833,6 +5234,19 @@ export const dataService = {
 
       await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id), cleanData);
 
+      // Sincroniza chamado de oficina quando isWorkshop ou cancelamento for alterado via updateServiceOrder
+      if (!options?.skipWorkshopSync && (data.isWorkshop !== undefined || data.status === 'cancelada')) {
+        try {
+          const snap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id));
+          if (snap.exists()) {
+            const fullOrder = { id, ...snap.data(), ...data } as ServiceOrder;
+            await this.syncWorkshopCallForServiceOrder(fullOrder, snap.data());
+          }
+        } catch (wsErr) {
+          console.warn(`[updateServiceOrder] Falha ao sincronizar chamado de oficina da O.S. ${id}:`, wsErr);
+        }
+      }
+
       const isFinalize = data.status === 'finalizada' || data.adminFinalized || data.status === 'pre_finalizada';
       const actionName = isFinalize ? 'Finalize' : 'Update';
 
@@ -4855,11 +5269,29 @@ export const dataService = {
 
   async cancelServiceOrder(id: string) {
     try {
+      let existingData: any = null;
+      try {
+        const snap = await getDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id));
+        if (snap.exists()) existingData = snap.data();
+      } catch {}
+
       const cleanData = clean({
         status: 'cancelada',
+        isWorkshop: false,
         updatedAt: serverTimestamp()
       });
       await updateDoc(doc(db, COLLECTIONS.SERVICE_ORDERS, id), cleanData);
+
+      // Cancela também eventual chamado de oficina vinculado a esta O.S.
+      try {
+        await this.syncWorkshopCallForServiceOrder(
+          { ...(existingData || {}), id, status: 'cancelada', isWorkshop: false } as ServiceOrder,
+          existingData
+        );
+      } catch (wsErr) {
+        console.warn(`[cancelServiceOrder] Falha ao cancelar chamado de oficina da O.S. ${id}:`, wsErr);
+      }
+
       await historyService.log(id, 'ServiceOrder', 'Cancel', { message: 'Ordem de serviço cancelada' });
       clearCache('service_orders_');
     } catch (e) {

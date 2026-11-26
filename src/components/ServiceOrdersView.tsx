@@ -616,6 +616,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [reportStartDate, setReportStartDate] = useState('');
   const [reportEndDate, setReportEndDate] = useState('');
   const [reportClientId, setReportClientId] = useState('all');
+  const [reportAddressId, setReportAddressId] = useState('all');
+  const [reportAddressQuery, setReportAddressQuery] = useState('');
+  const [isReportAddressDropdownOpen, setIsReportAddressDropdownOpen] = useState(false);
+  const reportAddressDropdownRef = useRef<HTMLDivElement>(null);
   const [reportTechnicianId, setReportTechnicianId] = useState('all');
   const [reportStatus, setReportStatus] = useState('all');
   const [reportCompany, setReportCompany] = useState('all');
@@ -632,6 +636,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     startDate: string;
     endDate: string;
     clientId: string;
+    addressId: string;
+    addressQuery: string;
     technicianId: string;
     status: string;
     company: string;
@@ -641,6 +647,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     startDate: '',
     endDate: '',
     clientId: 'all',
+    addressId: 'all',
+    addressQuery: '',
     technicianId: 'all',
     status: 'all',
     company: 'all',
@@ -917,11 +925,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [isAddressDropdownOpen, setIsAddressDropdownOpen] = useState(false);
   const addressDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Fecha dropdown de busca de endereço ao clicar fora
+  // Fecha dropdowns de busca de endereço ao clicar fora
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (addressDropdownRef.current && !addressDropdownRef.current.contains(event.target as Node)) {
         setIsAddressDropdownOpen(false);
+      }
+      if (reportAddressDropdownRef.current && !reportAddressDropdownRef.current.contains(event.target as Node)) {
+        setIsReportAddressDropdownOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -1209,6 +1220,34 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       return queryTerms.every(term => fullCombined.includes(term));
     });
   }, [formClientAddresses, addressSearchTerm, formClientId]);
+
+  // Lista de endereços disponíveis para o filtro do Relatório Avançado (vinculada ao cliente selecionado ou geral)
+  const reportAvailableAddresses = useMemo(() => {
+    const effectiveClient = managerClientId || (reportClientId !== 'all' ? reportClientId : '');
+    const baseList = effectiveClient
+      ? addresses.filter(a => a.clientId === effectiveClient)
+      : addresses;
+    return [...baseList].sort((a, b) => (a.street || '').localeCompare(b.street || ''));
+  }, [addresses, reportClientId, managerClientId]);
+
+  const filteredReportAddressOptions = useMemo(() => {
+    const rawQuery = reportAddressQuery.trim();
+    if (!rawQuery) return reportAvailableAddresses.slice(0, 60);
+
+    const normalizeStr = (str: string) =>
+      (str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+    const queryTerms = normalizeStr(rawQuery).split(/\s+/).filter(Boolean);
+    return reportAvailableAddresses
+      .filter(a => {
+        const clientName = clients.find(c => c.id === a.clientId)?.name || '';
+        const combined = normalizeStr(
+          `${a.street || ''} ${a.name || ''} ${a.neighborhood || ''} ${a.complement || ''} ${a.route || ''} ${a.number || ''} ${clientName}`
+        );
+        return queryTerms.every(term => combined.includes(term));
+      })
+      .slice(0, 60);
+  }, [reportAvailableAddresses, reportAddressQuery, clients]);
 
   // Estados para busca e abertura rápida de O.S. por ID da Máquina
   const [machineIdSearchInput, setMachineIdSearchInput] = useState('');
@@ -1642,6 +1681,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     reportStartDate ||
     reportEndDate ||
     reportClientId !== 'all' ||
+    reportAddressId !== 'all' ||
+    reportAddressQuery.trim() ||
     reportTechnicianId !== 'all' ||
     reportStatus !== 'all' ||
     reportCompany !== 'all' ||
@@ -1657,6 +1698,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       startDate: string;
       endDate: string;
       clientId: string;
+      addressId: string;
+      addressQuery: string;
       technicianId: string;
       status: string;
       company: string;
@@ -1670,6 +1713,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       startDate: overrideFilters?.startDate !== undefined ? overrideFilters.startDate : reportStartDate,
       endDate: overrideFilters?.endDate !== undefined ? overrideFilters.endDate : reportEndDate,
       clientId: overrideFilters?.clientId !== undefined ? overrideFilters.clientId : reportClientId,
+      addressId: overrideFilters?.addressId !== undefined ? overrideFilters.addressId : reportAddressId,
+      addressQuery: overrideFilters?.addressQuery !== undefined ? overrideFilters.addressQuery : reportAddressQuery.trim(),
       technicianId: overrideFilters?.technicianId !== undefined ? overrideFilters.technicianId : reportTechnicianId,
       status: overrideFilters?.status !== undefined ? overrideFilters.status : reportStatus,
       company: overrideFilters?.company !== undefined ? overrideFilters.company : reportCompany,
@@ -1681,6 +1726,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       nextFilters.startDate ||
       nextFilters.endDate ||
       nextFilters.clientId !== 'all' ||
+      nextFilters.addressId !== 'all' ||
+      nextFilters.addressQuery ||
       nextFilters.technicianId !== 'all' ||
       nextFilters.status !== 'all' ||
       nextFilters.company !== 'all' ||
@@ -1690,16 +1737,18 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     );
 
     if (!hasAny) {
-      setReportError('Selecione pelo menos um filtro acima (Período, Cliente, Técnico, Status, Prestadora, Tipo ou Oficina) e pressione Enter para buscar.');
+      setReportError('Selecione pelo menos um filtro acima (Período, Cliente, Endereço, Técnico, Status, Prestadora, Tipo ou Oficina) e pressione Enter para buscar.');
       return;
     }
 
     setReportLoading(true);
     setReportError(null);
+    setIsReportAddressDropdownOpen(false);
     try {
       const effectiveClientId = managerClientId || (nextFilters.clientId !== 'all' ? nextFilters.clientId : undefined);
       const rawResults = await dataService.queryServiceOrdersForReport({
         clientId: effectiveClientId,
+        addressId: nextFilters.addressId !== 'all' ? nextFilters.addressId : undefined,
         status: nextFilters.status,
         serviceCompany: nextFilters.company,
         type: nextFilters.type,
@@ -1726,6 +1775,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     setReportStartDate('');
     setReportEndDate('');
     setReportClientId('all');
+    setReportAddressId('all');
+    setReportAddressQuery('');
+    setIsReportAddressDropdownOpen(false);
     setReportTechnicianId('all');
     setReportStatus('all');
     setReportCompany('all');
@@ -2380,8 +2432,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     }
   };
 
-  // Função de busca rápida de chamados em aberto para um endereço
-  const getOpenCallsForAddress = (addressId?: string, clientId?: string): ServiceCall[] => {
+  // Função de busca rápida de chamados em aberto para um endereço (ignorando o chamado de oficina da própria O.S., se informado)
+  const getOpenCallsForAddress = (addressId?: string, clientId?: string, excludeOrder?: ServiceOrder | null): ServiceCall[] => {
     if (!addressId && !clientId) return [];
     if (!Array.isArray(serviceCalls)) return [];
 
@@ -2390,6 +2442,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
 
     return serviceCalls.filter(call => {
       if (!call) return false;
+      if (excludeOrder && (call.id === excludeOrder.linkedWorkshopCallId || call.linkedServiceOrderId === excludeOrder.id)) {
+        return false;
+      }
       const statusStr = String(call.status || '').toLowerCase();
       const isResolved = statusStr === 'resolved' || statusStr === 'cancelled' || statusStr === 'resolvido' || statusStr === 'cancelado' || statusStr === ServiceCallStatus.RESOLVED || statusStr === ServiceCallStatus.CANCELLED;
       if (isResolved) return false;
@@ -2428,6 +2483,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       const openCalls = Array.isArray(currentCalls)
         ? currentCalls.filter(call => {
             if (!call) return false;
+            // Não dispara alerta de chamado aberto para o próprio chamado de oficina vinculado a esta O.S.
+            if (call.id === order.linkedWorkshopCallId || call.linkedServiceOrderId === order.id) {
+              return false;
+            }
             const statusStr = String(call.status || '').toLowerCase();
             const isResolved = statusStr === 'resolved' || statusStr === 'cancelled' || statusStr === 'resolvido' || statusStr === 'cancelado' || statusStr === ServiceCallStatus.RESOLVED || statusStr === ServiceCallStatus.CANCELLED;
             if (isResolved) return false;
@@ -2930,22 +2989,29 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     }
 
     try {
-      await dataService.addServiceOrder(newOrder);
+      const saveResult = await dataService.addServiceOrder(newOrder);
 
       // Sincroniza imediatamente em memória (Relatório Avançado, Lista Principal e Cache de Páginas) com 0 leituras extras
       const orderForLocalSync: ServiceOrder = {
         ...(selectedOrder || {}),
         ...newOrder,
+        linkedWorkshopCallId: saveResult?.linkedWorkshopCallId ?? selectedOrder?.linkedWorkshopCallId,
         hasTechSignature: Boolean(formTechSignature),
         hasClientSignature: Boolean(formClientSignature),
         photoCount: Array.isArray(formPhotos) ? formPhotos.length : 0
       };
       syncOrderInLocalState(orderForLocalSync, { isNew: !selectedOrder });
 
-      if (selectedOrder && Boolean(selectedOrder.isWorkshop) !== Boolean(newOrder.isWorkshop)) {
+      const workshopChanged = selectedOrder
+        ? Boolean(selectedOrder.isWorkshop) !== Boolean(newOrder.isWorkshop)
+        : Boolean(newOrder.isWorkshop);
+
+      if (workshopChanged) {
         setServerWorkshopOrders(prev =>
           prev === null ? null : Math.max(0, prev + (newOrder.isWorkshop ? 1 : -1))
         );
+        // Invalida o cache local de chamados para refletir o chamado de oficina criado/concluído
+        serviceCallsLoadedRef.current = false;
       }
 
       // Se a ordem foi finalizada pelo técnico ou pelo administrativo, sincronizar checklist na central de jateamento
@@ -5334,8 +5400,35 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     if (!reportHasSearched) return [];
 
     const f = reportAppliedFilters;
+    const normalizeStr = (str: string) =>
+      (str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+    const selectedReportAddr = f.addressId !== 'all'
+      ? addresses.find(a => a.id === f.addressId)
+      : undefined;
+    const addressQueryTerms = (f.addressId === 'all' && f.addressQuery)
+      ? normalizeStr(f.addressQuery).split(/\s+/).filter(Boolean)
+      : [];
+
     const list = reportRawOrders.filter(o => {
       if (f.clientId !== 'all' && o.clientId !== f.clientId) return false;
+
+      if (f.addressId !== 'all') {
+        const directMatch = o.addressId === f.addressId;
+        const legacyStreetMatch = Boolean(
+          !o.addressId &&
+          selectedReportAddr?.street &&
+          normalizeStr(o.addressStreet || o.clientAddress || '').includes(normalizeStr(selectedReportAddr.street))
+        );
+        if (!directMatch && !legacyStreetMatch) return false;
+      } else if (addressQueryTerms.length > 0) {
+        const orderAddrObj = o.addressId ? addresses.find(a => a.id === o.addressId) : undefined;
+        const combinedAddress = normalizeStr(
+          `${o.addressStreet || ''} ${o.clientAddress || ''} ${orderAddrObj?.street || ''} ${orderAddrObj?.name || ''} ${orderAddrObj?.neighborhood || ''} ${orderAddrObj?.complement || ''} ${orderAddrObj?.number || ''}`
+        );
+        if (!addressQueryTerms.every(term => combinedAddress.includes(term))) return false;
+      }
+
       if (f.technicianId !== 'all') {
         const matchesTitular = techIndex.matchesTechTitular(o.technicianId, f.technicianId);
         if (!matchesTitular) return false;
@@ -5369,7 +5462,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     });
 
     return sortOrdersByCreationDateDesc(list);
-  }, [reportHasSearched, reportRawOrders, reportAppliedFilters, techIndex]);
+  }, [reportHasSearched, reportRawOrders, reportAppliedFilters, techIndex, addresses]);
 
   // Contagem de O.S. na Oficina no sistema (via agregação leve no servidor) e filtradas
   const totalWorkshopOrders = useMemo(() => {
@@ -7908,7 +8001,19 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Cliente</label>
                 <select
                   value={reportClientId}
-                  onChange={(e) => { setReportClientId(e.target.value); setReportError(null); if (reportHasSearched) setReportFiltersDirty(true); }}
+                  onChange={(e) => {
+                    const nextClientId = e.target.value;
+                    setReportClientId(nextClientId);
+                    if (reportAddressId !== 'all' && nextClientId !== 'all') {
+                      const currentAddr = addresses.find(a => a.id === reportAddressId);
+                      if (currentAddr && currentAddr.clientId !== nextClientId) {
+                        setReportAddressId('all');
+                        setReportAddressQuery('');
+                      }
+                    }
+                    setReportError(null);
+                    if (reportHasSearched) setReportFiltersDirty(true);
+                  }}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 px-3 text-xs font-semibold text-slate-700 outline-none focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
                 >
                   <option value="all">TODOS OS CLIENTES</option>
@@ -7916,6 +8021,134 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
                 </select>
+              </div>
+
+              {/* Endereço do Cliente (Busca + Seleção) */}
+              <div className="relative" ref={reportAddressDropdownRef}>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">Endereço</label>
+                  {reportAddressId !== 'all' && (
+                    <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/70 px-1.5 rounded-full">
+                      Selecionado
+                    </span>
+                  )}
+                </div>
+                <div className="relative flex items-center">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={reportAddressQuery}
+                    placeholder={
+                      reportClientId !== 'all'
+                        ? 'Buscar endereço do cliente...'
+                        : 'Todos os endereços (digite p/ buscar)'
+                    }
+                    onFocus={() => setIsReportAddressDropdownOpen(true)}
+                    onClick={() => setIsReportAddressDropdownOpen(true)}
+                    onChange={(e) => {
+                      setReportAddressQuery(e.target.value);
+                      if (reportAddressId !== 'all') {
+                        setReportAddressId('all');
+                      }
+                      setIsReportAddressDropdownOpen(true);
+                      setReportError(null);
+                      if (reportHasSearched) setReportFiltersDirty(true);
+                    }}
+                    className={cn(
+                      "w-full border rounded-xl py-2 pl-8 pr-12 text-xs font-semibold outline-none transition-all",
+                      reportAddressId !== 'all'
+                        ? "bg-emerald-50/40 border-emerald-300 text-slate-800 focus:ring-2 focus:ring-emerald-500/15"
+                        : "bg-slate-50 border-slate-200 text-slate-700 focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+                    )}
+                  />
+                  <div className="absolute right-1.5 flex items-center gap-0.5">
+                    {(reportAddressId !== 'all' || reportAddressQuery) && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setReportAddressId('all');
+                          setReportAddressQuery('');
+                          setReportError(null);
+                          if (reportHasSearched) setReportFiltersDirty(true);
+                        }}
+                        title="Limpar filtro de endereço"
+                        className="p-1 text-slate-400 hover:text-rose-500 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setIsReportAddressDropdownOpen(prev => !prev)}
+                      title="Exibir lista de endereços"
+                      className="p-1 text-slate-400 hover:text-slate-600 rounded-md transition-colors cursor-pointer"
+                    >
+                      <ChevronDown className={cn("w-3.5 h-3.5 transition-transform", isReportAddressDropdownOpen ? "rotate-180" : "")} />
+                    </button>
+                  </div>
+                </div>
+
+                {isReportAddressDropdownOpen && (
+                  <div className="absolute z-40 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl max-h-64 overflow-y-auto py-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReportAddressId('all');
+                        setReportAddressQuery('');
+                        setIsReportAddressDropdownOpen(false);
+                        setReportError(null);
+                        if (reportHasSearched) setReportFiltersDirty(true);
+                      }}
+                      className={cn(
+                        "w-full text-left px-3 py-2 text-xs font-bold hover:bg-slate-50 transition-colors border-b border-slate-100 cursor-pointer",
+                        reportAddressId === 'all' && !reportAddressQuery ? "text-blue-700 bg-blue-50/50" : "text-slate-600"
+                      )}
+                    >
+                      TODOS OS ENDEREÇOS
+                    </button>
+
+                    {filteredReportAddressOptions.length === 0 ? (
+                      <div className="px-3 py-3 text-[11px] text-slate-400 font-medium text-center">
+                        Nenhum endereço cadastrado encontrado. Pressione Enter para buscar pelo texto digitado.
+                      </div>
+                    ) : (
+                      filteredReportAddressOptions.map(addr => {
+                        const addrClientName = reportClientId === 'all'
+                          ? (clients.find(c => c.id === addr.clientId)?.name || '')
+                          : '';
+                        const addrLabel = `${addr.street}${addr.number ? `, ${addr.number}` : ''}${addr.name ? ` (${addr.name})` : ''}`;
+                        const isSelected = reportAddressId === addr.id;
+                        return (
+                          <button
+                            key={addr.id}
+                            type="button"
+                            onClick={() => {
+                              setReportAddressId(addr.id);
+                              setReportAddressQuery(addrLabel);
+                              setIsReportAddressDropdownOpen(false);
+                              setReportError(null);
+                              if (reportHasSearched) setReportFiltersDirty(true);
+                            }}
+                            className={cn(
+                              "w-full text-left px-3 py-2 hover:bg-blue-50/70 transition-colors border-b border-slate-100/70 last:border-b-0 cursor-pointer",
+                              isSelected ? "bg-emerald-50/70" : ""
+                            )}
+                          >
+                            <div className="text-[11px] font-bold text-slate-800 leading-snug">
+                              {addrLabel}
+                            </div>
+                            {(addr.neighborhood || addrClientName) && (
+                              <div className="text-[10px] text-slate-500 font-medium truncate">
+                                {[addr.neighborhood, addrClientName].filter(Boolean).join(' • ')}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Técnico */}
@@ -7932,9 +8165,11 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   ))}
                 </select>
               </div>
+            </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3.5 pt-1">
               {/* Status */}
-              <div>
+              <div className="lg:col-span-2">
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Status</label>
                 <select
                   value={reportStatus}
@@ -7949,11 +8184,9 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <option value="cancelada">CANCELADA</option>
                 </select>
               </div>
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-1">
               {/* Empresa Prestadora */}
-              <div>
+              <div className="lg:col-span-2">
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Empresa Prestadora</label>
                 <select
                   value={reportCompany}
@@ -7973,7 +8206,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
 
               {/* Tipo de Manutenção */}
-              <div>
+              <div className="lg:col-span-2">
                 <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider block mb-1">Tipo de Manutenção</label>
                 <select
                   value={reportType}
@@ -7996,7 +8229,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
 
               {/* Filtro de Oficina com Indicador */}
-              <div>
+              <div className="lg:col-span-3">
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-[10px] font-black uppercase text-slate-400 tracking-wider">Oficina</label>
                   <span className="text-[9px] font-black text-purple-700 bg-purple-50 border border-purple-200/70 px-1.5 py-0.2 rounded-full">
@@ -8020,7 +8253,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               </div>
 
               {/* Botões de Ação do Relatório */}
-              <div className="flex items-end gap-1.5">
+              <div className="sm:col-span-2 lg:col-span-3 flex items-end gap-1.5">
                 <button
                   type="button"
                   onClick={handleExportCSV}
@@ -8510,7 +8743,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         const isTechFinalizeReady = isClientSignatureFilled && isClientRepFilled && isClientMatriculaFilled && isSolutionFilled && !isLockedForTech && !isSaving;
         const isFinalizeReady = !isAlreadyFinalized && !isOrderCancelled && isSolutionFilled && !isSolutionDisabled && !isOtherEquipmentSelected;
 
-        const activeOrderOpenCalls = getOpenCallsForAddress(formAddressId || selectedOrder?.addressId || '', formClientId || selectedOrder?.clientId || '');
+        const activeOrderOpenCalls = getOpenCallsForAddress(formAddressId || selectedOrder?.addressId || '', formClientId || selectedOrder?.clientId || '', selectedOrder);
         const hasOpenCallsForAddress = activeOrderOpenCalls.length > 0;
 
         const isExternalOrTechOpenedSO = Boolean(
@@ -8921,9 +9154,15 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     <div>
                       <div className="flex items-center justify-between mb-0.5">
                         <label className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">Equipamento na Oficina</label>
-                        {formIsWorkshop && (
-                          <span className="text-[8px] font-bold text-purple-700 bg-purple-100 px-1 py-0.2 rounded border border-purple-200 uppercase">Acompanhamento</span>
-                        )}
+                        {formIsWorkshop ? (
+                          <span className="text-[8px] font-bold text-purple-700 bg-purple-100 px-1.5 py-0.2 rounded border border-purple-200 uppercase">
+                            {selectedOrder?.linkedWorkshopCallId ? 'Chamado Vinculado' : 'Gera Chamado Auto'}
+                          </span>
+                        ) : selectedOrder?.linkedWorkshopCallId && selectedOrder?.isWorkshop ? (
+                          <span className="text-[8px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200 uppercase">
+                            Concluirá Chamado
+                          </span>
+                        ) : null}
                       </div>
                       <button
                         type="button"
@@ -8934,7 +9173,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                             ? "bg-purple-600 text-white border-purple-700 shadow-xs"
                             : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
                         )}
-                        title="Marque para sinalizar que o equipamento foi trazido para conserto na oficina e precisa de acompanhamento especial"
+                        title="Ao ativar e salvar, o sistema gera automaticamente um Chamado de Oficina vinculado a esta O.S. Ao desativar, o chamado vinculado é concluído automaticamente."
                       >
                         <div className="flex items-center gap-1.5 truncate">
                           <Wrench className={cn("w-3.5 h-3.5 shrink-0", formIsWorkshop ? "text-amber-300" : "text-slate-400")} />
@@ -11136,6 +11375,19 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                   <div className="border border-slate-300 p-2.5 print:p-1.5 bg-slate-50 rounded-sm text-[8.5px] grid grid-cols-2 gap-y-1">
                     <div><span className="font-bold text-slate-600">Período:</span> {reportStartDate ? new Date(reportStartDate).toLocaleDateString('pt-BR') : 'Início'} a {reportEndDate ? new Date(reportEndDate).toLocaleDateString('pt-BR') : 'Fim'}</div>
                     <div><span className="font-bold text-slate-600">Cliente:</span> {reportClientId === 'all' ? 'Todos os Clientes' : (clients.find(c => c.id === reportClientId)?.name || '')}</div>
+                    {(reportAppliedFilters.addressId !== 'all' || reportAppliedFilters.addressQuery) && (
+                      <div className="col-span-2">
+                        <span className="font-bold text-slate-600">Endereço:</span>{' '}
+                        {reportAppliedFilters.addressId !== 'all'
+                          ? (() => {
+                              const addr = addresses.find(a => a.id === reportAppliedFilters.addressId);
+                              return addr
+                                ? `${addr.street}${addr.number ? `, ${addr.number}` : ''}${addr.name ? ` (${addr.name})` : ''}`
+                                : reportAppliedFilters.addressQuery;
+                            })()
+                          : reportAppliedFilters.addressQuery}
+                      </div>
+                    )}
                     <div><span className="font-bold text-slate-600">Técnico:</span> {reportTechnicianId === 'all' ? 'Todos os Técnicos' : (technicians.find(t => t.id === reportTechnicianId)?.name || '')}</div>
                     <div><span className="font-bold text-slate-600">Status:</span> {reportStatus === 'all' ? 'Todos os Status' : getStatusLabel(reportStatus).toUpperCase()}</div>
                     <div><span className="font-bold text-slate-600">Empresa:</span> {reportCompany === 'all' ? 'Todas' : getActiveCompanyForOrder(reportCompany).shortName}</div>

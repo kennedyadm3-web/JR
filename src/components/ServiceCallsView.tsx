@@ -29,13 +29,16 @@ import {
   Wrench,
   Flame,
   Filter,
-  FileText
+  FileText,
+  Link2,
+  Unlink
 } from 'lucide-react';
 import { dataService } from '../services/dataService';
 import { 
   ServiceCall, 
   ServiceCallStatus, 
   ServiceCallPriority, 
+  ServiceOrder,
   Client, 
   Address, 
   UserRole, 
@@ -139,6 +142,8 @@ export default function ServiceCallsView({
     priority: ServiceCallPriority.MEDIUM,
     status: ServiceCallStatus.OPEN,
     isWorkshop: false, // Chamado de máquina na Oficina da Empresa
+    linkedServiceOrderId: '',
+    linkedOsNumber: '',
     resolutionNotes: '',
     attachmentUrl1: '',
     attachmentUrl2: '',
@@ -148,6 +153,13 @@ export default function ServiceCallsView({
     forecastDate: '',
     initialObservation: '' // Observação inicial para novos chamados
   });
+
+  // Estados de busca e vínculo manual de O.S. no chamado
+  const [osLinkSearchInput, setOsLinkSearchInput] = useState('');
+  const [osLinkSearchResults, setOsLinkSearchResults] = useState<ServiceOrder[]>([]);
+  const [isSearchingOsToLink, setIsSearchingOsToLink] = useState(false);
+  const [osLinkFeedback, setOsLinkFeedback] = useState<{ text: string; type: 'error' | 'info' | 'success' } | null>(null);
+  const [isLinkingOs, setIsLinkingOs] = useState(false);
 
   const [newCommentText, setNewCommentText] = useState('');
   const commentsEndRef = useRef<HTMLDivElement>(null);
@@ -285,6 +297,9 @@ export default function ServiceCallsView({
     setNewCommentText('');
     setUnifiedTab(initialTab);
     setIsCallAddressDropdownOpen(false);
+    setOsLinkSearchInput('');
+    setOsLinkSearchResults([]);
+    setOsLinkFeedback(null);
 
     if (call) {
       setActiveModalCall(call);
@@ -297,6 +312,8 @@ export default function ServiceCallsView({
         priority: call.priority || ServiceCallPriority.MEDIUM,
         status: call.status || ServiceCallStatus.OPEN,
         isWorkshop: Boolean(call.isWorkshop),
+        linkedServiceOrderId: call.linkedServiceOrderId || '',
+        linkedOsNumber: call.linkedOsNumber || '',
         resolutionNotes: (call.resolutionNotes || '').toUpperCase(),
         attachmentUrl1: call.attachmentUrl1 || (call.attachmentUrl?.startsWith('data:image') ? call.attachmentUrl : '') || '',
         attachmentUrl2: call.attachmentUrl2 || '',
@@ -316,6 +333,8 @@ export default function ServiceCallsView({
         priority: ServiceCallPriority.MEDIUM,
         status: ServiceCallStatus.OPEN,
         isWorkshop: false,
+        linkedServiceOrderId: '',
+        linkedOsNumber: '',
         resolutionNotes: '',
         attachmentUrl1: '',
         attachmentUrl2: '',
@@ -327,6 +346,132 @@ export default function ServiceCallsView({
       });
     }
     setIsUnifiedModalOpen(true);
+  };
+
+  // Busca O.S. pelo número ou ID para vincular manualmente ao chamado
+  const handleSearchOsToLink = async () => {
+    const rawQuery = osLinkSearchInput.trim();
+    if (!rawQuery) {
+      setOsLinkFeedback({ text: 'Digite o número ou ID da O.S. para buscar.', type: 'error' });
+      return;
+    }
+
+    setIsSearchingOsToLink(true);
+    setOsLinkFeedback(null);
+    setOsLinkSearchResults([]);
+    try {
+      const results = await dataService.findServiceOrderByExactNumber(rawQuery, managerClientId);
+      if (results.length === 0) {
+        setOsLinkFeedback({
+          text: `Nenhuma O.S. encontrada com o número/ID "${rawQuery}". Confira o número exato na aba Ordens de Serviço.`,
+          type: 'error'
+        });
+      } else {
+        setOsLinkSearchResults(results);
+        setOsLinkFeedback({
+          text: results.length === 1
+            ? 'O.S. encontrada! Clique em "Vincular" abaixo para confirmar.'
+            : `${results.length} O.S. encontradas. Selecione a correta abaixo para vincular.`,
+          type: 'info'
+        });
+      }
+    } catch (err) {
+      console.error('Erro ao buscar O.S. para vincular:', err);
+      setOsLinkFeedback({ text: 'Erro ao buscar a O.S. Verifique sua conexão e tente novamente.', type: 'error' });
+    } finally {
+      setIsSearchingOsToLink(false);
+    }
+  };
+
+  // Confirma o vínculo entre o chamado atual e a O.S. selecionada
+  const handleConfirmLinkOrder = async (targetOs: ServiceOrder) => {
+    const displayOsNumber = targetOs.osNumber && targetOs.osNumber !== '00000' ? targetOs.osNumber : targetOs.id;
+
+    // Se ainda estiver criando um novo chamado (sem ID), apenas armazena no formData para vincular ao salvar
+    if (!activeModalCall) {
+      setFormData(prev => ({
+        ...prev,
+        linkedServiceOrderId: targetOs.id,
+        linkedOsNumber: displayOsNumber
+      }));
+      setOsLinkSearchResults([]);
+      setOsLinkSearchInput('');
+      setOsLinkFeedback({ text: `O.S. #${displayOsNumber} selecionada. Ela será vinculada ao salvar o chamado.`, type: 'success' });
+      return;
+    }
+
+    setIsLinkingOs(true);
+    setOsLinkFeedback(null);
+    try {
+      await dataService.linkServiceCallToOrder(
+        activeModalCall.id,
+        { id: targetOs.id, osNumber: displayOsNumber },
+        {
+          previousOrderId: activeModalCall.linkedServiceOrderId,
+          isWorkshop: Boolean(formData.isWorkshop),
+          callStatus: formData.status
+        }
+      );
+
+      setFormData(prev => ({
+        ...prev,
+        linkedServiceOrderId: targetOs.id,
+        linkedOsNumber: displayOsNumber
+      }));
+      setCalls(prev => prev.map(c => c.id === activeModalCall.id ? {
+        ...c,
+        linkedServiceOrderId: targetOs.id,
+        linkedOsNumber: displayOsNumber
+      } : c));
+      setActiveModalCall(prev => prev ? {
+        ...prev,
+        linkedServiceOrderId: targetOs.id,
+        linkedOsNumber: displayOsNumber
+      } : null);
+      setOsLinkSearchResults([]);
+      setOsLinkSearchInput('');
+      setOsLinkFeedback({ text: `Chamado vinculado com sucesso à O.S. #${displayOsNumber}!`, type: 'success' });
+    } catch (err) {
+      console.error('Erro ao vincular O.S. ao chamado:', err);
+      setOsLinkFeedback({ text: 'Não foi possível vincular a O.S. Tente novamente.', type: 'error' });
+    } finally {
+      setIsLinkingOs(false);
+    }
+  };
+
+  // Remove vínculo da O.S. com o chamado
+  const handleUnlinkOrder = async () => {
+    if (!activeModalCall) {
+      setFormData(prev => ({ ...prev, linkedServiceOrderId: '', linkedOsNumber: '' }));
+      setOsLinkFeedback(null);
+      return;
+    }
+
+    setIsLinkingOs(true);
+    setOsLinkFeedback(null);
+    try {
+      await dataService.linkServiceCallToOrder(activeModalCall.id, null, {
+        previousOrderId: activeModalCall.linkedServiceOrderId || formData.linkedServiceOrderId
+      });
+
+      setFormData(prev => ({ ...prev, linkedServiceOrderId: '', linkedOsNumber: '' }));
+      setCalls(prev => prev.map(c => c.id === activeModalCall.id ? {
+        ...c,
+        linkedServiceOrderId: undefined,
+        linkedOsNumber: undefined
+      } : c));
+      setActiveModalCall(prev => prev ? {
+        ...prev,
+        linkedServiceOrderId: undefined,
+        linkedOsNumber: undefined
+      } : null);
+      setOsLinkFeedback({ text: 'Vínculo com a O.S. removido.', type: 'info' });
+    } catch (err) {
+      console.error('Erro ao desvincular O.S.:', err);
+      setOsLinkFeedback({ text: 'Erro ao desvincular a O.S. Tente novamente.', type: 'error' });
+    } finally {
+      setIsLinkingOs(false);
+    }
   };
 
   // Upload e compressão de fotos do chamado (suporta até 4 fotos)
@@ -412,13 +557,17 @@ export default function ServiceCallsView({
           });
         }
 
-        const newCallData = {
+        const newCallData: Omit<ServiceCall, 'id'> = {
           clientId: formData.clientId,
           addressId: formData.addressId,
           description: formData.description.trim(),
           status: formData.status || ServiceCallStatus.OPEN,
           priority: formData.priority,
           isWorkshop: Boolean(formData.isWorkshop),
+          ...(formData.linkedServiceOrderId ? {
+            linkedServiceOrderId: formData.linkedServiceOrderId,
+            linkedOsNumber: formData.linkedOsNumber || formData.linkedServiceOrderId
+          } : {}),
           clientName: client?.name,
           addressLabel: address?.street,
           createdAt: new Date(),
@@ -433,6 +582,14 @@ export default function ServiceCallsView({
         };
 
         const addedRef = await dataService.addServiceCall(newCallData);
+
+        if (addedRef && formData.linkedServiceOrderId) {
+          await dataService.linkServiceCallToOrder(
+            addedRef.id,
+            { id: formData.linkedServiceOrderId, osNumber: formData.linkedOsNumber },
+            { isWorkshop: Boolean(formData.isWorkshop), callStatus: formData.status || ServiceCallStatus.OPEN }
+          );
+        }
 
         if (addedRef) {
           const authorName = userProfile?.name || "Um usuário";
@@ -683,7 +840,8 @@ export default function ServiceCallsView({
       const matchesSearch = 
         (c.clientName?.toLowerCase() || '').includes(search.toLowerCase()) ||
         (c.description?.toLowerCase() || '').includes(search.toLowerCase()) ||
-        (c.addressLabel?.toLowerCase() || '').includes(search.toLowerCase());
+        (c.addressLabel?.toLowerCase() || '').includes(search.toLowerCase()) ||
+        (c.linkedOsNumber?.toLowerCase() || '').includes(search.toLowerCase());
       
       const matchesStatus = statusFilter === 'all' || c.status === statusFilter;
       const matchesPriority = priorityFilter === 'all' || c.priority === priorityFilter;
@@ -1435,6 +1593,16 @@ export default function ServiceCallsView({
                         </span>
                       )}
 
+                      {/* Badge de Vínculo com O.S. */}
+                      {call.linkedServiceOrderId && (
+                        <span
+                          className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200 flex items-center gap-1"
+                          title="Chamado gerado automaticamente e sincronizado com a Ordem de Serviço"
+                        >
+                          O.S. #{call.linkedOsNumber || call.linkedServiceOrderId}
+                        </span>
+                      )}
+
                       <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-1">
                         <MapPin className="w-2.5 h-2.5 text-slate-400" />
                         {routeName}
@@ -1591,6 +1759,15 @@ export default function ServiceCallsView({
                           <span className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-purple-100 text-purple-900 border border-purple-300 flex items-center gap-1">
                             <Wrench className="w-2.5 h-2.5 text-purple-700" />
                             Oficina
+                          </span>
+                        )}
+
+                        {call.linkedServiceOrderId && (
+                          <span
+                            className="text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200"
+                            title="Chamado sincronizado automaticamente com a O.S."
+                          >
+                            O.S. #{call.linkedOsNumber || call.linkedServiceOrderId}
                           </span>
                         )}
                       </div>
@@ -2016,6 +2193,125 @@ export default function ServiceCallsView({
                       </div>
                     </div>
                   </label>
+                  {/* Vínculo Manual ou Automático com Ordem de Serviço (O.S.) */}
+                  <div className="mt-2.5 bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-600 flex items-center gap-1.5">
+                        <Link2 className="w-3.5 h-3.5 text-indigo-600" />
+                        Vincular Ordem de Serviço (O.S.)
+                      </label>
+                      {formData.linkedServiceOrderId && (
+                        <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 border border-indigo-200">
+                          O.S. #{formData.linkedOsNumber || formData.linkedServiceOrderId}
+                        </span>
+                      )}
+                    </div>
+
+                    {formData.linkedServiceOrderId ? (
+                      <div className="bg-indigo-50/80 border border-indigo-200 rounded-xl px-3 py-2 flex items-center justify-between gap-2">
+                        <div className="text-[11px] text-indigo-950 font-semibold leading-snug">
+                          Vinculado à <strong>O.S. #{formData.linkedOsNumber || formData.linkedServiceOrderId}</strong>.
+                          <span className="block text-[10px] text-indigo-700 font-medium">
+                            Desativar Oficina na O.S. concluirá este chamado automaticamente (e vice-versa).
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={isLinkingOs}
+                          onClick={handleUnlinkOrder}
+                          title="Desvincular esta O.S. do chamado"
+                          className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          {isLinkingOs ? <Loader2 className="w-3 h-3 animate-spin" /> : <Unlink className="w-3 h-3" />}
+                          Desvincular
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-1.5">
+                          <div className="relative flex-1">
+                            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            <input
+                              type="text"
+                              value={osLinkSearchInput}
+                              onChange={(e) => {
+                                setOsLinkSearchInput(e.target.value);
+                                if (osLinkFeedback) setOsLinkFeedback(null);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleSearchOsToLink();
+                                }
+                              }}
+                              placeholder="Digite o nº ou ID da O.S. (ex: 00412 ou OS_...)"
+                              className="w-full bg-white border border-slate-300 rounded-xl py-2 pl-8 pr-3 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            disabled={isSearchingOsToLink || !osLinkSearchInput.trim()}
+                            onClick={handleSearchOsToLink}
+                            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 h-[34px]"
+                          >
+                            {isSearchingOsToLink ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                            Buscar O.S.
+                          </button>
+                        </div>
+
+                        {osLinkSearchResults.length > 0 && (
+                          <div className="bg-white border border-indigo-200 rounded-xl divide-y divide-slate-100 max-h-44 overflow-y-auto shadow-xs">
+                            {osLinkSearchResults.map((osItem) => {
+                              const osNum = osItem.osNumber && osItem.osNumber !== '00000' ? osItem.osNumber : osItem.id;
+                              return (
+                                <div key={osItem.id} className="p-2.5 flex items-center justify-between gap-2 hover:bg-indigo-50/40">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="text-[11px] font-black text-indigo-900">O.S. #{osNum}</span>
+                                      {osItem.isWorkshop && (
+                                        <span className="text-[8.5px] font-black uppercase px-1.5 py-0.2 rounded bg-purple-100 text-purple-800 border border-purple-200">
+                                          Oficina
+                                        </span>
+                                      )}
+                                      <span className="text-[9px] font-bold uppercase text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded">
+                                        {osItem.status}
+                                      </span>
+                                    </div>
+                                    <p className="text-[11px] font-bold text-slate-800 truncate">{osItem.clientName}</p>
+                                    <p className="text-[10px] text-slate-500 truncate">
+                                      {[osItem.addressStreet || osItem.clientAddress, osItem.equipmentName, osItem.equipmentSector].filter(Boolean).join(' • ')}
+                                    </p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={isLinkingOs}
+                                    onClick={() => handleConfirmLinkOrder(osItem)}
+                                    className="shrink-0 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-[10px] font-black uppercase tracking-wider flex items-center gap-1 cursor-pointer transition-colors"
+                                  >
+                                    {isLinkingOs ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
+                                    Vincular
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {osLinkFeedback && (
+                      <p className={cn(
+                        "text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border",
+                        osLinkFeedback.type === 'error'
+                          ? "bg-rose-50 text-rose-700 border-rose-200"
+                          : osLinkFeedback.type === 'success'
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : "bg-blue-50 text-blue-700 border-blue-200"
+                      )}>
+                        {osLinkFeedback.text}
+                      </p>
+                    )}
+                  </div>
                 </div>
 
                 {/* Se editando, permite mudar status se necessário */}
@@ -3056,6 +3352,11 @@ export default function ServiceCallsView({
                                           {call.isWorkshop && (
                                             <span className="px-1.5 py-0.2 rounded text-[7.5px] font-black uppercase bg-purple-100 text-purple-900 border border-purple-300">
                                               Oficina
+                                            </span>
+                                          )}
+                                          {call.linkedServiceOrderId && (
+                                            <span className="px-1.5 py-0.2 rounded text-[7.5px] font-black uppercase bg-indigo-50 text-indigo-800 border border-indigo-200">
+                                              O.S. #{call.linkedOsNumber || call.linkedServiceOrderId}
                                             </span>
                                           )}
                                         </div>

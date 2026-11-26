@@ -5,9 +5,11 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -26,11 +28,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.lefrio.atendimento.data.auth.TechnicianUser
+import com.lefrio.atendimento.data.local.LocalServiceOrderDraft
+import com.lefrio.atendimento.data.local.ServiceOrderDraftStorage
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.ui.theme.BluePrimary
 import com.lefrio.atendimento.ui.theme.TextPrimary
 import com.lefrio.atendimento.ui.theme.TextSecondary
 import com.lefrio.atendimento.util.DateTimeUtils
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -40,10 +46,16 @@ fun ServiceOrdersScreen(
     viewModel: ServiceOrdersViewModel,
     onMenuClick: () -> Unit,
     onOrderClick: (orderId: String) -> Unit,
+    onDraftClick: (draft: LocalServiceOrderDraft) -> Unit,
     onNewOrderClick: () -> Unit,
     onProfileClick: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    var draftPendingDelete by remember { mutableStateOf<LocalServiceOrderDraft?>(null) }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshDrafts()
+    }
 
     val infiniteTransition = rememberInfiniteTransition(label = "sync_spin")
     val rotationAngle by infiniteTransition.animateFloat(
@@ -144,11 +156,13 @@ fun ServiceOrdersScreen(
                     modifier = Modifier.weight(1f)
                 )
                 MetricMiniCard(
-                    title = "Abertas",
-                    count = uiState.openCount,
-                    bgColor = Color(0xFFEFF6FF),
-                    textColor = Color(0xFF1D4ED8),
-                    modifier = Modifier.weight(1f)
+                    title = "Salvas",
+                    count = uiState.draftsCount,
+                    bgColor = Color(0xFFDBEAFE),
+                    textColor = Color(0xFF1E40AF),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { viewModel.setFilterTab(OSFilterTab.DRAFTS) }
                 )
                 MetricMiniCard(
                     title = "Em Rota",
@@ -176,7 +190,7 @@ fun ServiceOrdersScreen(
                 textStyle = LocalTextStyle.current.copy(fontSize = 13.sp, color = TextPrimary),
                 placeholder = {
                     Text(
-                        text = "Buscar O.S., cliente ou endereço...",
+                        text = "Buscar O.S., salvas, cliente ou endereço...",
                         fontSize = 13.sp,
                         color = TextSecondary,
                         maxLines = 1,
@@ -214,41 +228,52 @@ fun ServiceOrdersScreen(
                 singleLine = true
             )
 
-            // 3. ABAS DE FILTRO POR STATUS
+            // 3. ABAS DE FILTRO POR STATUS (inclui O.S. Salvas localmente por 7 dias)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 FilterTabChip(
-                    label = "Todas (${uiState.totalCount})",
+                    label = "Todas (${uiState.totalCount + uiState.draftsCount})",
                     isSelected = uiState.selectedTab == OSFilterTab.ALL,
-                    onClick = { viewModel.setFilterTab(OSFilterTab.ALL) },
-                    modifier = Modifier.weight(1f)
+                    onClick = { viewModel.setFilterTab(OSFilterTab.ALL) }
+                )
+                FilterTabChip(
+                    label = "Salvas (${uiState.draftsCount})",
+                    isSelected = uiState.selectedTab == OSFilterTab.DRAFTS,
+                    highlightAccent = uiState.draftsCount > 0,
+                    onClick = { viewModel.setFilterTab(OSFilterTab.DRAFTS) }
                 )
                 FilterTabChip(
                     label = "Abertas (${uiState.openCount})",
                     isSelected = uiState.selectedTab == OSFilterTab.OPEN,
-                    onClick = { viewModel.setFilterTab(OSFilterTab.OPEN) },
-                    modifier = Modifier.weight(1f)
+                    onClick = { viewModel.setFilterTab(OSFilterTab.OPEN) }
                 )
                 FilterTabChip(
                     label = "Em Rota (${uiState.inProgressCount})",
                     isSelected = uiState.selectedTab == OSFilterTab.IN_PROGRESS,
-                    onClick = { viewModel.setFilterTab(OSFilterTab.IN_PROGRESS) },
-                    modifier = Modifier.weight(1f)
+                    onClick = { viewModel.setFilterTab(OSFilterTab.IN_PROGRESS) }
                 )
                 FilterTabChip(
                     label = "Feitas (${uiState.finishedCount})",
                     isSelected = uiState.selectedTab == OSFilterTab.FINISHED,
-                    onClick = { viewModel.setFilterTab(OSFilterTab.FINISHED) },
-                    modifier = Modifier.weight(1f)
+                    onClick = { viewModel.setFilterTab(OSFilterTab.FINISHED) }
                 )
             }
 
-            // 4. LISTA DE ORDENS DE SERVIÇO
-            if (uiState.filteredOrders.isEmpty()) {
+            // 4. LISTA DE ORDENS DE SERVIÇO E O.S. SALVAS NO DISPOSITIVO
+            val showDraftsSection = uiState.selectedTab == OSFilterTab.DRAFTS ||
+                (uiState.selectedTab == OSFilterTab.ALL && uiState.filteredDrafts.isNotEmpty())
+            val isListEmpty = when (uiState.selectedTab) {
+                OSFilterTab.DRAFTS -> uiState.filteredDrafts.isEmpty()
+                OSFilterTab.ALL -> uiState.filteredDrafts.isEmpty() && uiState.filteredOrders.isEmpty()
+                else -> uiState.filteredOrders.isEmpty()
+            }
+
+            if (isListEmpty) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -263,26 +288,37 @@ fun ServiceOrdersScreen(
                             modifier = Modifier
                                 .size(64.dp)
                                 .clip(RoundedCornerShape(32.dp))
-                                .background(Color(0xFFEDE9FE)),
+                                .background(
+                                    if (uiState.selectedTab == OSFilterTab.DRAFTS) Color(0xFFDBEAFE)
+                                    else Color(0xFFEDE9FE)
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Assignment,
+                                imageVector = if (uiState.selectedTab == OSFilterTab.DRAFTS) Icons.Default.Save else Icons.Default.Assignment,
                                 contentDescription = null,
-                                tint = Color(0xFF6B21A8),
+                                tint = if (uiState.selectedTab == OSFilterTab.DRAFTS) Color(0xFF1D4ED8) else Color(0xFF6B21A8),
                                 modifier = Modifier.size(32.dp)
                             )
                         }
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Nenhuma O.S. encontrada",
+                            text = if (uiState.selectedTab == OSFilterTab.DRAFTS) {
+                                "Nenhuma O.S. salva no dispositivo"
+                            } else {
+                                "Nenhuma O.S. encontrada"
+                            },
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = TextPrimary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Toque em '+ NOVA O.S.' abaixo para abrir um atendimento nos endereços do seu roteiro.",
+                            text = if (uiState.selectedTab == OSFilterTab.DRAFTS) {
+                                "Ao criar uma nova O.S., toque em 'SALVAR O.S.' no rodapé para guardar os dados preenchidos neste aparelho por até 7 dias e continuar de onde parou."
+                            } else {
+                                "Toque em '+ NOVA O.S.' abaixo para abrir um atendimento nos endereços do seu roteiro."
+                            },
                             fontSize = 12.sp,
                             color = TextSecondary,
                             textAlign = TextAlign.Center
@@ -295,12 +331,389 @@ fun ServiceOrdersScreen(
                     contentPadding = PaddingValues(start = 14.dp, top = 6.dp, end = 14.dp, bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    items(uiState.filteredOrders, key = { it.id }) { order ->
-                        ServiceOrderItemCard(
-                            order = order,
-                            onClick = { onOrderClick(order.id) }
+                    if (showDraftsSection && uiState.filteredDrafts.isNotEmpty()) {
+                        item(key = "header_saved_drafts") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 2.dp, bottom = 2.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.Save,
+                                        contentDescription = null,
+                                        tint = Color(0xFF1D4ED8),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "O.S. SALVAS NO DISPOSITIVO (${uiState.filteredDrafts.size})",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color(0xFF1E40AF),
+                                        letterSpacing = 0.4.sp
+                                    )
+                                }
+                                Text(
+                                    text = "Retenção: 7 dias",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        items(uiState.filteredDrafts, key = { "draft_${it.id}" }) { draft ->
+                            SavedDraftOrderCard(
+                                draft = draft,
+                                onContinueClick = { onDraftClick(draft) },
+                                onDeleteClick = { draftPendingDelete = draft }
+                            )
+                        }
+
+                        if (uiState.selectedTab == OSFilterTab.ALL && uiState.filteredOrders.isNotEmpty()) {
+                            item(key = "header_today_orders") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = 8.dp, bottom = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Assignment,
+                                        contentDescription = null,
+                                        tint = Color(0xFF581C87),
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "ORDENS DE SERVIÇO DO DIA (${uiState.filteredOrders.size})",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = TextSecondary,
+                                        letterSpacing = 0.4.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (uiState.selectedTab != OSFilterTab.DRAFTS) {
+                        items(uiState.filteredOrders, key = { it.id }) { order ->
+                            ServiceOrderItemCard(
+                                order = order,
+                                onClick = { onOrderClick(order.id) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    draftPendingDelete?.let { draft ->
+        AlertDialog(
+            onDismissRequest = { draftPendingDelete = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.DeleteOutline,
+                    contentDescription = null,
+                    tint = Color(0xFFDC2626)
+                )
+            },
+            title = {
+                Text(
+                    text = "Excluir O.S. salva?",
+                    fontWeight = FontWeight.Black,
+                    fontSize = 16.sp,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                val label = draft.clientName.ifBlank { draft.addressStreet.ifBlank { "este rascunho" } }
+                Text(
+                    text = "Os dados preenchidos de \"$label\" serão removidos da memória do dispositivo e não poderão ser recuperados.",
+                    fontSize = 13.sp,
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.deleteOrderDraft(draft.id)
+                        draftPendingDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Excluir", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { draftPendingDelete = null }) {
+                    Text("Cancelar", fontWeight = FontWeight.Bold, color = TextSecondary)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SavedDraftOrderCard(
+    draft: LocalServiceOrderDraft,
+    onContinueClick: () -> Unit,
+    onDeleteClick: () -> Unit
+) {
+    val savedTimeLabel = remember(draft.updatedAtMillis) {
+        SimpleDateFormat("dd/MM 'às' HH:mm", Locale.getDefault()).format(Date(draft.updatedAtMillis))
+    }
+    val expirationLabel = remember(draft.expiresAtMillis) {
+        ServiceOrderDraftStorage.formatExpirationLabel(draft)
+    }
+    val remainingDays = remember(draft.expiresAtMillis) {
+        ServiceOrderDraftStorage.remainingDays(draft)
+    }
+    val expirationBg = if (remainingDays <= 1) Color(0xFFFEE2E2) else Color(0xFFFEF3C7)
+    val expirationColor = if (remainingDays <= 1) Color(0xFFDC2626) else Color(0xFFB45309)
+
+    val summaryText = listOf(draft.description, draft.diagnosis, draft.solution)
+        .firstOrNull { it.isNotBlank() }
+        .orEmpty()
+
+    val equipmentLine = draft.equipmentDisplay.ifBlank {
+        buildString {
+            if (draft.equipmentName.isNotBlank()) append(draft.equipmentName)
+            if (draft.equipmentSector.isNotBlank()) {
+                if (isNotEmpty()) append(" • ")
+                append(draft.equipmentSector)
+            }
+            if (draft.equipmentBtus.isNotBlank()) {
+                if (isNotEmpty()) append(" • ")
+                append("${draft.equipmentBtus} BTUs")
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onContinueClick),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(1.3.dp, Color(0xFF93C5FD)),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFFDBEAFE))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "SALVA NO APARELHO",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF1D4ED8),
+                            maxLines = 1,
+                            softWrap = false
                         )
                     }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(expirationBg)
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = expirationLabel.uppercase(Locale.getDefault()),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Black,
+                            color = expirationColor,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onDeleteClick,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Excluir O.S. salva",
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier.size(19.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = draft.clientName.ifBlank { "Cliente ainda não selecionado" },
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Black,
+                color = if (draft.clientName.isNotBlank()) TextPrimary else TextSecondary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            if (draft.addressStreet.isNotBlank()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.LocationOn,
+                        contentDescription = null,
+                        tint = Color(0xFFDC2626),
+                        modifier = Modifier
+                            .size(14.dp)
+                            .padding(top = 1.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = draft.addressStreet,
+                        fontSize = 12.sp,
+                        color = TextSecondary,
+                        lineHeight = 16.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (equipmentLine.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AcUnit,
+                        contentDescription = null,
+                        tint = Color(0xFF1D4ED8),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = equipmentLine,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF1E3A8A),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (summaryText.isNotBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF8FAFC))
+                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 7.dp)
+                ) {
+                    Text(
+                        text = summaryText,
+                        fontSize = 12.sp,
+                        color = TextPrimary,
+                        lineHeight = 16.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (draft.photoPaths.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.PhotoCamera,
+                        contentDescription = null,
+                        tint = BluePrimary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = if (draft.photoPaths.size == 1) "1 foto anexada" else "${draft.photoPaths.size} fotos anexadas",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BluePrimary
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = Color(0xFFEFF6FF), thickness = 1.dp)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Schedule,
+                        contentDescription = null,
+                        tint = TextSecondary,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = "Salva em $savedTimeLabel",
+                        fontSize = 11.sp,
+                        color = TextSecondary,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Continuar O.S.",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black,
+                        color = Color(0xFF1D4ED8),
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                    Spacer(modifier = Modifier.width(2.dp))
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = Color(0xFF1D4ED8),
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         }
@@ -352,28 +765,44 @@ private fun MetricMiniCard(
 private fun FilterTabChip(
     label: String,
     isSelected: Boolean,
+    highlightAccent: Boolean = false,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(10.dp)
+    val bgColor = when {
+        isSelected -> BluePrimary
+        highlightAccent -> Color(0xFFEFF6FF)
+        else -> Color.White
+    }
+    val borderColor = when {
+        isSelected -> BluePrimary
+        highlightAccent -> Color(0xFF93C5FD)
+        else -> Color(0xFFE2E8F0)
+    }
+    val labelColor = when {
+        isSelected -> Color.White
+        highlightAccent -> Color(0xFF1D4ED8)
+        else -> TextSecondary
+    }
     Box(
         modifier = modifier
             .clip(shape)
-            .background(if (isSelected) BluePrimary else Color.White)
+            .background(bgColor)
             .border(
                 width = 1.dp,
-                color = if (isSelected) BluePrimary else Color(0xFFE2E8F0),
+                color = borderColor,
                 shape = shape
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 9.dp),
+            .padding(horizontal = 12.dp, vertical = 9.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
             fontSize = 11.sp,
-            fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
-            color = if (isSelected) Color.White else TextSecondary,
+            fontWeight = if (isSelected || highlightAccent) FontWeight.Black else FontWeight.SemiBold,
+            color = labelColor,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis

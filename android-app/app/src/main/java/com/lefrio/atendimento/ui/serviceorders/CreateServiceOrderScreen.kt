@@ -37,6 +37,8 @@ import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.lefrio.atendimento.data.auth.TechnicianUser
+import com.lefrio.atendimento.data.local.LocalServiceOrderDraft
+import com.lefrio.atendimento.data.local.ServiceOrderDraftStorage
 import com.lefrio.atendimento.ui.signature.components.SignaturePad
 import com.lefrio.atendimento.ui.signature.components.SignaturePath
 import com.lefrio.atendimento.ui.signature.components.saveSignatureToLocalFile
@@ -64,50 +66,58 @@ private fun fileToBase64(file: File): String? {
 fun CreateServiceOrderScreen(
     user: TechnicianUser,
     viewModel: ServiceOrdersViewModel,
+    initialDraft: LocalServiceOrderDraft? = null,
     onBackClick: () -> Unit,
+    onDraftSaved: () -> Unit = onBackClick,
     onOrderCreated: (orderId: String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
-    // Campos de Seleção do Local do Roteiro
-    var selectedClientId by remember { mutableStateOf("") }
-    var selectedClientName by remember { mutableStateOf("") }
-    var selectedAddressId by remember { mutableStateOf("") }
-    var selectedAddressStreet by remember { mutableStateOf("") }
-    var selectedEquipmentId by remember { mutableStateOf("") }
-    var selectedEquipmentName by remember { mutableStateOf("") }
-    var selectedEquipmentDisplay by remember { mutableStateOf("") }
-    var selectedEquipmentBrand by remember { mutableStateOf("") }
-    var selectedEquipmentBtus by remember { mutableStateOf("") }
-    var selectedEquipmentSector by remember { mutableStateOf("") }
+    // Campos de Seleção do Local do Roteiro (restaurados caso seja continuação de uma O.S. salva)
+    var currentDraftId by remember(initialDraft?.id) { mutableStateOf(initialDraft?.id) }
+    var selectedClientId by remember(initialDraft?.id) { mutableStateOf(initialDraft?.clientId.orEmpty()) }
+    var selectedClientName by remember(initialDraft?.id) { mutableStateOf(initialDraft?.clientName.orEmpty()) }
+    var selectedAddressId by remember(initialDraft?.id) { mutableStateOf(initialDraft?.addressId.orEmpty()) }
+    var selectedAddressStreet by remember(initialDraft?.id) { mutableStateOf(initialDraft?.addressStreet.orEmpty()) }
+    var selectedEquipmentId by remember(initialDraft?.id) { mutableStateOf(initialDraft?.equipmentId.orEmpty()) }
+    var selectedEquipmentName by remember(initialDraft?.id) { mutableStateOf(initialDraft?.equipmentName.orEmpty()) }
+    var selectedEquipmentDisplay by remember(initialDraft?.id) { mutableStateOf(initialDraft?.equipmentDisplay.orEmpty()) }
+    var selectedEquipmentBrand by remember(initialDraft?.id) { mutableStateOf(initialDraft?.equipmentBrand.orEmpty()) }
+    var selectedEquipmentBtus by remember(initialDraft?.id) { mutableStateOf(initialDraft?.equipmentBtus.orEmpty()) }
+    var selectedEquipmentSector by remember(initialDraft?.id) { mutableStateOf(initialDraft?.equipmentSector.orEmpty()) }
 
     // Campos Técnicos do Atendimento
-    var description by remember { mutableStateOf("") }
-    var diagnosis by remember { mutableStateOf("") }
-    var solution by remember { mutableStateOf("") }
-    var technicalReport by remember { mutableStateOf("") }
+    var description by remember(initialDraft?.id) { mutableStateOf(initialDraft?.description.orEmpty()) }
+    var diagnosis by remember(initialDraft?.id) { mutableStateOf(initialDraft?.diagnosis.orEmpty()) }
+    var solution by remember(initialDraft?.id) { mutableStateOf(initialDraft?.solution.orEmpty()) }
+    var technicalReport by remember(initialDraft?.id) { mutableStateOf(initialDraft?.technicalReport.orEmpty()) }
 
     // Campos do Fiscal / Responsável
-    var fiscalName by remember { mutableStateOf("") }
-    var fiscalRegistration by remember { mutableStateOf("") }
-    var fiscalRole by remember { mutableStateOf("") }
-    var fiscalContact by remember { mutableStateOf("") }
-    val signaturePaths = remember { mutableStateListOf<SignaturePath>() }
-    var hasSignature by remember { mutableStateOf(false) }
+    var fiscalName by remember(initialDraft?.id) { mutableStateOf(initialDraft?.fiscalName.orEmpty()) }
+    var fiscalRegistration by remember(initialDraft?.id) { mutableStateOf(initialDraft?.fiscalRegistration.orEmpty()) }
+    var fiscalRole by remember(initialDraft?.id) { mutableStateOf(initialDraft?.fiscalRole.orEmpty()) }
+    var fiscalContact by remember(initialDraft?.id) { mutableStateOf(initialDraft?.fiscalContact.orEmpty()) }
+    val signaturePaths = remember(initialDraft?.id) { mutableStateListOf<SignaturePath>() }
+    var hasSignature by remember(initialDraft?.id) { mutableStateOf(false) }
 
     // Fotos do Equipamento / Atendimento (até 4 imagens por O.S.)
     val maxPhotos = 4
-    val attachedPhotoPaths = remember { mutableStateListOf<String>() }
+    val attachedPhotoPaths = remember(initialDraft?.id) {
+        mutableStateListOf<String>().apply {
+            addAll(initialDraft?.photoPaths.orEmpty().filter { it.isNotBlank() && File(it).exists() })
+        }
+    }
     var isProcessingPhoto by remember { mutableStateOf(false) }
     var pendingCameraFile by remember { mutableStateOf<File?>(null) }
     var previewPhotoPath by remember { mutableStateOf<String?>(null) }
-    val photoSessionId = remember { "NEWOS_${System.currentTimeMillis()}" }
+    val photoSessionId = remember(initialDraft?.id) { initialDraft?.id ?: "NEWOS_${System.currentTimeMillis()}" }
     val photoCaptureManager = remember(context) { PhotoCaptureManager(context) }
     val coroutineScope = rememberCoroutineScope()
 
     // Estados de UI e Validação
     var isSubmitting by remember { mutableStateOf(false) }
+    var isSavingDraft by remember { mutableStateOf(false) }
     var validationError by remember { mutableStateOf<String?>(null) }
     var clientExpanded by remember { mutableStateOf(false) }
     var addressExpanded by remember { mutableStateOf(false) }
@@ -231,17 +241,25 @@ fun CreateServiceOrderScreen(
         }
     }
 
-    // Auto-seleciona cliente quando houver apenas 1 programado no roteiro de hoje
-    LaunchedEffect(uiState.clients) {
-        if (uiState.clients.size == 1 && selectedClientId.isBlank()) {
+    // Carrega equipamentos do endereço restaurado quando estiver continuando uma O.S. salva
+    LaunchedEffect(initialDraft?.id) {
+        val draftAddressId = initialDraft?.addressId.orEmpty()
+        if (draftAddressId.isNotBlank()) {
+            viewModel.loadEquipmentsForAddress(draftAddressId)
+        }
+    }
+
+    // Auto-seleciona cliente quando houver apenas 1 programado no roteiro de hoje (apenas em nova O.S.)
+    LaunchedEffect(uiState.clients, initialDraft?.id) {
+        if (initialDraft == null && uiState.clients.size == 1 && selectedClientId.isBlank()) {
             selectedClientId = uiState.clients[0].id
             selectedClientName = uiState.clients[0].name
         }
     }
 
-    // Auto-seleciona endereço quando houver apenas 1 para o cliente selecionado
-    LaunchedEffect(filteredAddresses) {
-        if (filteredAddresses.size == 1 && selectedAddressId.isBlank()) {
+    // Auto-seleciona endereço quando houver apenas 1 para o cliente selecionado (apenas em nova O.S.)
+    LaunchedEffect(filteredAddresses, initialDraft?.id) {
+        if (initialDraft == null && filteredAddresses.size == 1 && selectedAddressId.isBlank()) {
             val addr = filteredAddresses[0]
             selectedAddressId = addr.id
             selectedAddressStreet = addr.street
@@ -255,13 +273,17 @@ fun CreateServiceOrderScreen(
                 title = {
                     Column {
                         Text(
-                            text = "Nova Ordem de Serviço",
+                            text = if (initialDraft != null) "Continuar O.S. Salva" else "Nova Ordem de Serviço",
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Black,
                             color = BluePrimary
                         )
                         Text(
-                            text = "Abertura no Local de Atendimento • ${user.name}",
+                            text = if (initialDraft != null) {
+                                "Salva no dispositivo • ${ServiceOrderDraftStorage.formatExpirationLabel(initialDraft)}"
+                            } else {
+                                "Abertura no Local de Atendimento • ${user.name}"
+                            },
                             fontSize = 11.sp,
                             color = TextSecondary,
                             fontWeight = FontWeight.Medium
@@ -299,18 +321,105 @@ fun CreateServiceOrderScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedButton(
-                        onClick = onBackClick,
+                        onClick = {
+                            val hasAnyContent = selectedClientName.isNotBlank() ||
+                                selectedAddressStreet.isNotBlank() ||
+                                selectedEquipmentName.isNotBlank() ||
+                                description.isNotBlank() ||
+                                diagnosis.isNotBlank() ||
+                                solution.isNotBlank() ||
+                                technicalReport.isNotBlank() ||
+                                fiscalName.isNotBlank() ||
+                                fiscalRegistration.isNotBlank() ||
+                                fiscalRole.isNotBlank() ||
+                                fiscalContact.isNotBlank() ||
+                                attachedPhotoPaths.isNotEmpty()
+
+                            if (!hasAnyContent) {
+                                val msg = "Preencha ao menos um dado antes de salvar a O.S. no dispositivo."
+                                validationError = msg
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                return@OutlinedButton
+                            }
+
+                            isSavingDraft = true
+                            validationError = null
+                            viewModel.saveOrderDraft(
+                                existingDraftId = currentDraftId,
+                                clientId = selectedClientId,
+                                clientName = selectedClientName,
+                                addressId = selectedAddressId,
+                                addressStreet = selectedAddressStreet,
+                                equipmentId = selectedEquipmentId,
+                                equipmentName = selectedEquipmentName,
+                                equipmentDisplay = selectedEquipmentDisplay,
+                                equipmentBrand = selectedEquipmentBrand,
+                                equipmentBtus = selectedEquipmentBtus,
+                                equipmentSector = selectedEquipmentSector,
+                                description = description,
+                                diagnosis = diagnosis,
+                                solution = solution,
+                                technicalReport = technicalReport,
+                                fiscalName = fiscalName,
+                                fiscalRegistration = fiscalRegistration,
+                                fiscalRole = fiscalRole,
+                                fiscalContact = fiscalContact,
+                                photoPaths = attachedPhotoPaths.toList(),
+                                onSaved = { savedDraft ->
+                                    currentDraftId = savedDraft.id
+                                    isSavingDraft = false
+                                    Toast.makeText(
+                                        context,
+                                        "O.S. salva no dispositivo! Mantida por até ${ServiceOrderDraftStorage.RETENTION_DAYS} dias para continuar depois.",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    onDraftSaved()
+                                },
+                                onError = { err ->
+                                    isSavingDraft = false
+                                    validationError = err
+                                    Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+                                }
+                            )
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(50.dp),
                         shape = RoundedCornerShape(12.dp),
-                        enabled = !isSubmitting
+                        border = BorderStroke(1.3.dp, BluePrimary),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Color(0xFFEFF6FF),
+                            contentColor = BluePrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                        enabled = !isSubmitting && !isSavingDraft && !isProcessingPhoto
                     ) {
-                        Text("VOLTAR", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextSecondary)
+                        if (isSavingDraft) {
+                            CircularProgressIndicator(
+                                color = BluePrimary,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Save,
+                                contentDescription = null,
+                                tint = BluePrimary,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "SALVAR O.S.",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Black,
+                                color = BluePrimary,
+                                maxLines = 1
+                            )
+                        }
                     }
 
                     Button(
@@ -394,6 +503,9 @@ fun CreateServiceOrderScreen(
                                 photoPaths = attachedPhotoPaths.toList(),
                                 isFinalized = true,
                                 onSuccess = { createdId ->
+                                    currentDraftId?.let { draftId ->
+                                        viewModel.deleteOrderDraft(draftId)
+                                    }
                                     isSubmitting = false
                                     Toast.makeText(
                                         context,
@@ -410,11 +522,12 @@ fun CreateServiceOrderScreen(
                             )
                         },
                         modifier = Modifier
-                            .weight(1.8f)
+                            .weight(1.35f)
                             .height(50.dp),
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF581C87)),
-                        enabled = !isSubmitting && uiState.clients.isNotEmpty()
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                        enabled = !isSubmitting && !isSavingDraft && (uiState.clients.isNotEmpty() || selectedClientName.isNotBlank())
                     ) {
                         if (isSubmitting) {
                             CircularProgressIndicator(
@@ -423,9 +536,9 @@ fun CreateServiceOrderScreen(
                                 strokeWidth = 2.dp
                             )
                         } else {
-                            Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(17.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("FINALIZAR E CRIAR O.S.", fontSize = 12.sp, fontWeight = FontWeight.Black)
+                            Text("FINALIZAR O.S.", fontSize = 12.sp, fontWeight = FontWeight.Black, maxLines = 1)
                         }
                     }
                 }
@@ -445,7 +558,9 @@ fun CreateServiceOrderScreen(
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF3B1578))
+                colors = CardDefaults.cardColors(
+                    containerColor = if (initialDraft != null) Color(0xFF1E3A8A) else Color(0xFF3B1578)
+                )
             ) {
                 Row(
                     modifier = Modifier
@@ -457,28 +572,32 @@ fun CreateServiceOrderScreen(
                         modifier = Modifier
                             .size(40.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(Color(0xFF581C87)),
+                            .background(if (initialDraft != null) Color(0xFF1D4ED8) else Color(0xFF581C87)),
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Build,
+                            imageVector = if (initialDraft != null) Icons.Default.Save else Icons.Default.Build,
                             contentDescription = null,
-                            tint = Color(0xFFD8B4FE),
+                            tint = if (initialDraft != null) Color(0xFFBFDBFE) else Color(0xFFD8B4FE),
                             modifier = Modifier.size(22.dp)
                         )
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "Abertura de Ordem de Serviço",
+                            text = if (initialDraft != null) "Continuando O.S. Salva no Dispositivo" else "Abertura de Ordem de Serviço",
                             fontWeight = FontWeight.Black,
                             fontSize = 14.sp,
                             color = Color.White
                         )
                         Text(
-                            text = "Preencha a máquina atendida, o laudo e a assinatura do fiscal no local.",
+                            text = if (initialDraft != null) {
+                                "Revise os dados preenchidos, atualize se necessário ou colha a assinatura para finalizar."
+                            } else {
+                                "Preencha a máquina e o serviço. Use 'SALVAR O.S.' para guardar no aparelho por até 7 dias ou finalize agora."
+                            },
                             fontSize = 11.sp,
-                            color = Color(0xFFD8B4FE)
+                            color = if (initialDraft != null) Color(0xFFDBEAFE) else Color(0xFFD8B4FE)
                         )
                     }
                 }
@@ -522,7 +641,7 @@ fun CreateServiceOrderScreen(
                         }
                     }
 
-                    if (uiState.clients.isEmpty()) {
+                    if (uiState.clients.isEmpty() && selectedClientName.isBlank()) {
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(12.dp),

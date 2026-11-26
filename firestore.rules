@@ -193,9 +193,25 @@ service cloud.firestore {
       allow read: if isSignedIn() || (resource != null && resource.data.shareSignatureToken != null);
       // Atualização permitida para usuários autenticados OU para coleta da assinatura digital externa via token
       allow update: if isSignedIn() || (
-        resource != null && 
+        resource != null &&
         resource.data.shareSignatureToken != null &&
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['clientSignature', 'clientSignatureDate', 'clientSigneeName', 'clientSigneeRegistration', 'clientRepresentative', 'clientRepresentativeMatricula', 'status', 'updatedAt'])
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'clientSignature',
+          'hasClientSignature',
+          'clientSignatureDate',
+          'clientSigneeName',
+          'clientSigneeRegistration',
+          'clientSigneeRole',
+          'clientRepresentative',
+          'clientRepresentativeMatricula',
+          'clientRepresentativeRole',
+          'status',
+          'updatedAt'
+        ]) &&
+        (!('clientSigneeName' in request.resource.data) || (request.resource.data.clientSigneeName is string && request.resource.data.clientSigneeName.size() <= 160)) &&
+        (!('clientSigneeRegistration' in request.resource.data) || (request.resource.data.clientSigneeRegistration is string && request.resource.data.clientSigneeRegistration.size() <= 100)) &&
+        (!('clientSigneeRole' in request.resource.data) || (request.resource.data.clientSigneeRole is string && request.resource.data.clientSigneeRole.size() <= 120)) &&
+        (!('clientRepresentativeRole' in request.resource.data) || (request.resource.data.clientRepresentativeRole is string && request.resource.data.clientRepresentativeRole.size() <= 120))
       );
       allow create, delete: if isSignedIn();
 

@@ -493,6 +493,119 @@ async function startServer() {
     }
   });
 
+  // Helper: sanitiza dados da O.S. para o link público do fiscal (oculta preços e observações internas)
+  const sanitizeOrderForPublicSignature = (id: string, rawData: any, mediaData?: any) => {
+    const sanitizeItems = (items: any) => {
+      if (!Array.isArray(items)) return [];
+      return items.map((item: any) => ({
+        id: item?.id,
+        code: item?.code,
+        description: item?.description || '',
+        unit: item?.unit || 'UN',
+        quantity: item?.quantity ?? 1,
+        type: item?.type
+      }));
+    };
+
+    const rawPhotos = (Array.isArray(rawData?.photos) && rawData.photos.length > 0)
+      ? rawData.photos
+      : (Array.isArray(mediaData?.photos) ? mediaData.photos : []);
+
+    const safePhotos = rawPhotos.filter((p: any) =>
+      typeof p === 'string' &&
+      (p.startsWith('data:image/') || p.startsWith('https://') || p.startsWith('http://'))
+    );
+
+    const clientSignature = rawData?.clientSignature || mediaData?.clientSignature || '';
+
+    const {
+      internalNotes: _internalNotes,
+      technicalReport: _technicalReport,
+      routeNotes: _routeNotes,
+      totalValue: _totalValue,
+      servicesTotal: _servicesTotal,
+      productsTotal: _productsTotal,
+      techSignature: _techSignature,
+      ...publicSafeData
+    } = rawData || {};
+
+    return {
+      ...publicSafeData,
+      id,
+      services: sanitizeItems(rawData?.services),
+      products: sanitizeItems(rawData?.products),
+      photos: safePhotos,
+      photoCount: safePhotos.length,
+      clientSignature
+    };
+  };
+
+  // Helper: busca segura da subcoleção media/attachments da O.S.
+  const fetchServiceOrderMediaSafe = async (orderId: string): Promise<any | null> => {
+    try {
+      const adminSnap = await dbAdmin.collection("serviceOrders").doc(orderId).collection("media").doc("attachments").get();
+      if (adminSnap.exists) {
+        return adminSnap.data() || null;
+      }
+    } catch (e: any) {
+      console.warn(`[Server] Admin media read failed for ${orderId}, trying Client SDK:`, e?.message);
+      try {
+        const clientSnap = await clientGetDoc(clientDoc(dbClient, "serviceOrders", orderId, "media", "attachments"));
+        if (clientSnap.exists()) {
+          return clientSnap.data() || null;
+        }
+      } catch {}
+    }
+    return null;
+  };
+
+  // Helper: localiza O.S. pelo token de compartilhamento com verificação de correspondência do token
+  const findServiceOrderByShareToken = async (token: string): Promise<{ id: string; data: any } | null> => {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken || cleanToken.length > 200) return null;
+
+    // 1. Extração rápida de ID se codificado no formato sign_os_OS_<ts>_<rand>_...
+    const tokenParts = cleanToken.split('_');
+    if (cleanToken.startsWith('sign_os_OS_') && tokenParts.length >= 5) {
+      const candidateIds = [
+        `OS_${tokenParts[3]}_${tokenParts[4]}`,
+        `OS_${tokenParts[2]}_${tokenParts[3]}`
+      ];
+      for (const candidateId of candidateIds) {
+        try {
+          const docSnap = await robustGetDoc("serviceOrders", candidateId);
+          if (docSnap.exists) {
+            const data = docSnap.data();
+            if (data?.shareSignatureToken === cleanToken) {
+              return { id: candidateId, data };
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // 2. Busca por shareSignatureToken == token no Firestore Admin (com fallback Client SDK)
+    try {
+      const snap = await dbAdmin.collection("serviceOrders").where("shareSignatureToken", "==", cleanToken).limit(1).get();
+      if (!snap.empty) {
+        const d = snap.docs[0];
+        return { id: d.id, data: d.data() };
+      }
+    } catch (e: any) {
+      console.warn("[Server] Admin search by token failed, trying Client SDK workaround:", e?.message);
+      try {
+        const q = clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("shareSignatureToken", "==", cleanToken));
+        const snap = await clientGetDocs(q);
+        if (!snap.empty) {
+          const d = snap.docs[0];
+          return { id: d.id, data: d.data() };
+        }
+      } catch {}
+    }
+
+    return null;
+  };
+
   // Endpoint seguro e público para buscar O.S. pelo token de assinatura (utiliza Admin SDK)
   app.get("/api/public/os-by-token", async (req, res) => {
     try {
@@ -501,60 +614,20 @@ async function startServer() {
         return res.status(400).json({ error: "Token não fornecido" });
       }
 
-      let osDocData: any = null;
-      let osIdFound: string | null = null;
-
-      // 1. Extração rápida de ID se codificado no formato sign_os_OS_...
-      const tokenParts = token.split('_');
-      if (token.startsWith('sign_os_OS_') && tokenParts.length >= 5) {
-        const extractedId = `OS_${tokenParts[2]}_${tokenParts[3]}`;
-        const docSnap = await robustGetDoc("serviceOrders", extractedId);
-        if (docSnap.exists) {
-          osDocData = docSnap.data();
-          osIdFound = extractedId;
-        }
-      }
-
-      // 2. Busca por shareSignatureToken == token no Firestore Admin
-      if (!osDocData) {
-        try {
-          const snap = await dbAdmin.collection("serviceOrders").where("shareSignatureToken", "==", token).get();
-          if (!snap.empty) {
-            const d = snap.docs[0];
-            osDocData = d.data();
-            osIdFound = d.id;
-          }
-        } catch (e: any) {
-          console.warn("[Server] Admin search by token failed, trying Client SDK workaround:", e.message);
-          try {
-            const q = clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("shareSignatureToken", "==", token));
-            const snap = await clientGetDocs(q);
-            if (!snap.empty) {
-              const d = snap.docs[0];
-              osDocData = d.data();
-              osIdFound = d.id;
-            }
-          } catch {}
-        }
-      }
-
-      // 3. Fallback: se o token for o próprio ID do documento
-      if (!osDocData) {
-        const docSnap = await robustGetDoc("serviceOrders", token);
-        if (docSnap.exists) {
-          osDocData = docSnap.data();
-          osIdFound = token;
-        }
-      }
-
-      if (!osDocData || !osIdFound) {
+      const found = await findServiceOrderByShareToken(token);
+      if (!found) {
         return res.status(404).json({ error: "Ordem de Serviço não encontrada para este link" });
       }
 
-      return res.json({
-        id: osIdFound,
-        ...osDocData
-      });
+      const { id: osIdFound, data: osDocData } = found;
+      const needsMedia =
+        Boolean(osDocData?.mediaExternalized) ||
+        (Boolean(osDocData?.hasClientSignature) && !osDocData?.clientSignature) ||
+        ((osDocData?.photoCount || 0) > 0 && (!Array.isArray(osDocData?.photos) || osDocData.photos.length === 0));
+
+      const mediaData = needsMedia ? await fetchServiceOrderMediaSafe(osIdFound) : null;
+
+      return res.json(sanitizeOrderForPublicSignature(osIdFound, osDocData, mediaData));
     } catch (err: any) {
       console.error("[Server] Erro no endpoint público de O.S. por token:", err);
       return res.status(500).json({ error: err.message || "Erro interno do servidor" });
@@ -564,56 +637,74 @@ async function startServer() {
   // Endpoint público para submeter a assinatura digital do fiscal/cliente pelo token
   app.post("/api/public/os-sign-by-token", async (req, res) => {
     try {
-      const { token, signature, signeeName, signeeRegistration } = req.body;
-      if (!token || !signature || !signeeName || !signeeRegistration) {
-        return res.status(400).json({ error: "Dados incompletos para registro da assinatura" });
+      const { token, signature, signeeName, signeeRegistration, signeeRole } = req.body || {};
+      const cleanToken = String(token || '').trim();
+      const cleanName = String(signeeName || '').trim().toUpperCase();
+      const cleanReg = String(signeeRegistration || '').trim().toUpperCase();
+      const cleanRole = String(signeeRole || '').trim().toUpperCase();
+      const cleanSignature = typeof signature === 'string' ? signature.trim() : '';
+
+      if (!cleanToken || !cleanSignature || !cleanName || !cleanReg || !cleanRole) {
+        return res.status(400).json({ error: "Preencha nome, matrícula/documento, cargo/função e a assinatura." });
       }
 
-      let osIdFound: string | null = null;
-      let osDocData: any = null;
-
-      const tokenParts = String(token).split('_');
-      if (String(token).startsWith('sign_os_OS_') && tokenParts.length >= 5) {
-        const extractedId = `OS_${tokenParts[2]}_${tokenParts[3]}`;
-        const docSnap = await robustGetDoc("serviceOrders", extractedId);
-        if (docSnap.exists) {
-          osDocData = docSnap.data();
-          osIdFound = extractedId;
-        }
+      if (cleanName.length > 160 || cleanReg.length > 100 || cleanRole.length > 120) {
+        return res.status(400).json({ error: "Os dados informados excedem o limite permitido." });
       }
 
-      if (!osDocData) {
-        try {
-          const snap = await dbAdmin.collection("serviceOrders").where("shareSignatureToken", "==", token).get();
-          if (!snap.empty) {
-            osIdFound = snap.docs[0].id;
-            osDocData = snap.docs[0].data();
-          }
-        } catch {}
+      if (!cleanSignature.startsWith('data:image/') || cleanSignature.length > 500_000) {
+        return res.status(400).json({ error: "Formato de assinatura inválido." });
       }
 
-      if (!osDocData && token) {
-        const docSnap = await robustGetDoc("serviceOrders", String(token));
-        if (docSnap.exists) {
-          osDocData = docSnap.data();
-          osIdFound = String(token);
-        }
-      }
-
-      if (!osIdFound || !osDocData) {
+      const found = await findServiceOrderByShareToken(cleanToken);
+      if (!found) {
         return res.status(404).json({ error: "Ordem de Serviço não encontrada para gravação da assinatura" });
+      }
+
+      const { id: osIdFound, data: osDocData } = found;
+
+      // Validação de expiração do link (48h) no servidor
+      const nowMs = Date.now();
+      if (osDocData.shareSignatureExpiresAt) {
+        const expMs = new Date(osDocData.shareSignatureExpiresAt).getTime();
+        if (!isNaN(expMs) && nowMs > expMs) {
+          return res.status(410).json({ error: "Este link de assinatura expirou." });
+        }
+      } else if (osDocData.shareSignatureCreatedAt) {
+        const createdMs = new Date(osDocData.shareSignatureCreatedAt).getTime();
+        if (!isNaN(createdMs) && nowMs > createdMs + 48 * 60 * 60 * 1000) {
+          return res.status(410).json({ error: "Este link de assinatura expirou." });
+        }
       }
 
       const nowIso = new Date().toISOString();
       const updatedStatus = (osDocData.status === 'aberta' || osDocData.status === 'em_andamento') ? 'pre_finalizada' : osDocData.status;
 
-      const updateData = {
-        clientSignature: signature,
+      let signatureExternalized = false;
+      if (osDocData.mediaExternalized) {
+        try {
+          await dbAdmin
+            .collection("serviceOrders")
+            .doc(osIdFound)
+            .collection("media")
+            .doc("attachments")
+            .set({ clientSignature: cleanSignature, updatedAt: SERVER_TIMESTAMP }, { merge: true });
+          signatureExternalized = true;
+        } catch (mediaSaveErr: any) {
+          console.warn(`[Server] Fallback para salvar assinatura inline na O.S. ${osIdFound}:`, mediaSaveErr?.message);
+        }
+      }
+
+      const updateData: Record<string, any> = {
+        ...(!signatureExternalized ? { clientSignature: cleanSignature } : {}),
+        hasClientSignature: true,
         clientSignatureDate: nowIso,
-        clientSigneeName: String(signeeName).trim().toUpperCase(),
-        clientSigneeRegistration: String(signeeRegistration).trim().toUpperCase(),
-        clientRepresentative: String(signeeName).trim().toUpperCase(),
-        clientRepresentativeMatricula: String(signeeRegistration).trim().toUpperCase(),
+        clientSigneeName: cleanName,
+        clientSigneeRegistration: cleanReg,
+        clientSigneeRole: cleanRole,
+        clientRepresentative: cleanName,
+        clientRepresentativeMatricula: cleanReg,
+        clientRepresentativeRole: cleanRole,
         status: updatedStatus,
         updatedAt: SERVER_TIMESTAMP
       };

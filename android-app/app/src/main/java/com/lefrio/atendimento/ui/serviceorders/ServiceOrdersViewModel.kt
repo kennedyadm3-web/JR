@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.lefrio.atendimento.data.auth.TechnicianUser
+import com.lefrio.atendimento.data.local.LocalServiceOrderDraft
+import com.lefrio.atendimento.data.local.ServiceOrderDraftStorage
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.data.repository.*
@@ -12,11 +14,13 @@ import com.lefrio.atendimento.data.sync.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
 enum class OSFilterTab {
     ALL,
+    DRAFTS,
     OPEN,
     IN_PROGRESS,
     FINISHED
@@ -25,6 +29,9 @@ enum class OSFilterTab {
 data class ServiceOrdersUiState(
     val orders: List<ServiceOrderEntity> = emptyList(),
     val filteredOrders: List<ServiceOrderEntity> = emptyList(),
+    val drafts: List<LocalServiceOrderDraft> = emptyList(),
+    val filteredDrafts: List<LocalServiceOrderDraft> = emptyList(),
+    val draftsCount: Int = 0,
     val selectedTab: OSFilterTab = OSFilterTab.ALL,
     val searchQuery: String = "",
     val totalCount: Int = 0,
@@ -49,10 +56,12 @@ class ServiceOrdersViewModel(
 ) : AndroidViewModel(application) {
 
     private val repository = ServiceOrderRepository(application)
+    private val draftStorage = ServiceOrderDraftStorage(application)
     private val _uiState = MutableStateFlow(ServiceOrdersUiState())
     val uiState: StateFlow<ServiceOrdersUiState> = _uiState.asStateFlow()
 
     init {
+        refreshDrafts()
         loadData()
         triggerSync(forceRefresh = false)
         observeOrders()
@@ -66,8 +75,125 @@ class ServiceOrdersViewModel(
                 technicianId = currentUser.uid,
                 date = todayStr
             ).collect { myOrdersForToday ->
-                updateFilteredList(myOrdersForToday, _uiState.value.selectedTab, _uiState.value.searchQuery)
+                updateFilteredList(
+                    orders = myOrdersForToday,
+                    drafts = _uiState.value.drafts,
+                    tab = _uiState.value.selectedTab,
+                    query = _uiState.value.searchQuery
+                )
             }
+        }
+    }
+
+    fun refreshDrafts() {
+        viewModelScope.launch {
+            val activeDrafts = withContext(Dispatchers.IO) {
+                draftStorage.getActiveDrafts(
+                    technicianId = currentUser.uid,
+                    technicianName = currentUser.name
+                )
+            }
+            updateFilteredList(
+                orders = _uiState.value.orders,
+                drafts = activeDrafts,
+                tab = _uiState.value.selectedTab,
+                query = _uiState.value.searchQuery
+            )
+        }
+    }
+
+    fun saveOrderDraft(
+        existingDraftId: String? = null,
+        clientId: String,
+        clientName: String,
+        addressId: String,
+        addressStreet: String,
+        equipmentId: String,
+        equipmentName: String,
+        equipmentDisplay: String,
+        equipmentBrand: String,
+        equipmentBtus: String,
+        equipmentSector: String,
+        description: String,
+        diagnosis: String,
+        solution: String,
+        technicalReport: String,
+        fiscalName: String,
+        fiscalRegistration: String,
+        fiscalRole: String,
+        fiscalContact: String,
+        photoPaths: List<String>,
+        onSaved: (LocalServiceOrderDraft) -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val draftToSave = LocalServiceOrderDraft(
+                    id = existingDraftId?.takeIf { it.isNotBlank() }
+                        ?: "DRAFT_${now}_${UUID.randomUUID().toString().take(6)}",
+                    technicianId = currentUser.uid,
+                    technicianName = currentUser.name,
+                    clientId = clientId,
+                    clientName = clientName,
+                    addressId = addressId,
+                    addressStreet = addressStreet,
+                    equipmentId = equipmentId,
+                    equipmentName = equipmentName,
+                    equipmentDisplay = equipmentDisplay,
+                    equipmentBrand = equipmentBrand,
+                    equipmentBtus = equipmentBtus,
+                    equipmentSector = equipmentSector,
+                    description = description,
+                    diagnosis = diagnosis,
+                    solution = solution,
+                    technicalReport = technicalReport,
+                    fiscalName = fiscalName,
+                    fiscalRegistration = fiscalRegistration,
+                    fiscalRole = fiscalRole,
+                    fiscalContact = fiscalContact,
+                    photoPaths = photoPaths,
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    expiresAtMillis = now + ServiceOrderDraftStorage.RETENTION_MILLIS
+                )
+                val saved = withContext(Dispatchers.IO) {
+                    draftStorage.saveDraft(draftToSave)
+                }
+                val activeDrafts = withContext(Dispatchers.IO) {
+                    draftStorage.getActiveDrafts(
+                        technicianId = currentUser.uid,
+                        technicianName = currentUser.name
+                    )
+                }
+                updateFilteredList(
+                    orders = _uiState.value.orders,
+                    drafts = activeDrafts,
+                    tab = _uiState.value.selectedTab,
+                    query = _uiState.value.searchQuery
+                )
+                onSaved(saved)
+            } catch (e: Exception) {
+                onError(e.message ?: "Não foi possível salvar a O.S. na memória do dispositivo.")
+            }
+        }
+    }
+
+    fun deleteOrderDraft(draftId: String) {
+        viewModelScope.launch {
+            val activeDrafts = withContext(Dispatchers.IO) {
+                draftStorage.deleteDraft(draftId)
+                draftStorage.getActiveDrafts(
+                    technicianId = currentUser.uid,
+                    technicianName = currentUser.name
+                )
+            }
+            updateFilteredList(
+                orders = _uiState.value.orders,
+                drafts = activeDrafts,
+                tab = _uiState.value.selectedTab,
+                query = _uiState.value.searchQuery
+            )
         }
     }
 
@@ -75,6 +201,7 @@ class ServiceOrdersViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
+                refreshDrafts()
                 val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
                 var (scheduledClients, scheduledAddresses) = repository.getScheduledClientsAndAddressesForTechnician(
                     technicianName = currentUser.name,
@@ -103,16 +230,27 @@ class ServiceOrdersViewModel(
 
     fun setFilterTab(tab: OSFilterTab) {
         _uiState.update { it.copy(selectedTab = tab) }
-        updateFilteredList(_uiState.value.orders, tab, _uiState.value.searchQuery)
+        updateFilteredList(
+            orders = _uiState.value.orders,
+            drafts = _uiState.value.drafts,
+            tab = tab,
+            query = _uiState.value.searchQuery
+        )
     }
 
     fun setSearchQuery(query: String) {
         _uiState.update { it.copy(searchQuery = query) }
-        updateFilteredList(_uiState.value.orders, _uiState.value.selectedTab, query)
+        updateFilteredList(
+            orders = _uiState.value.orders,
+            drafts = _uiState.value.drafts,
+            tab = _uiState.value.selectedTab,
+            query = query
+        )
     }
 
     private fun updateFilteredList(
         orders: List<ServiceOrderEntity>,
+        drafts: List<LocalServiceOrderDraft> = _uiState.value.drafts,
         tab: OSFilterTab,
         query: String
     ) {
@@ -123,6 +261,7 @@ class ServiceOrdersViewModel(
 
         val tabFiltered = when (tab) {
             OSFilterTab.ALL -> orders
+            OSFilterTab.DRAFTS -> emptyList()
             OSFilterTab.OPEN -> orders.filter { it.status == "aberta" }
             OSFilterTab.IN_PROGRESS -> orders.filter { it.status == "em_andamento" }
             OSFilterTab.FINISHED -> orders.filter { it.status == "finalizada" || it.status == "pre_finalizada" }
@@ -141,10 +280,29 @@ class ServiceOrdersViewModel(
             }
         }
 
+        val finalDrafts = if (q.isBlank()) {
+            drafts
+        } else {
+            drafts.filter { draft ->
+                draft.clientName.lowercase().contains(q) ||
+                draft.addressStreet.lowercase().contains(q) ||
+                draft.equipmentDisplay.lowercase().contains(q) ||
+                draft.equipmentName.lowercase().contains(q) ||
+                draft.equipmentSector.lowercase().contains(q) ||
+                draft.description.lowercase().contains(q) ||
+                draft.diagnosis.lowercase().contains(q) ||
+                draft.solution.lowercase().contains(q) ||
+                draft.fiscalName.lowercase().contains(q)
+            }
+        }
+
         _uiState.update {
             it.copy(
                 orders = orders,
                 filteredOrders = finalFiltered,
+                drafts = drafts,
+                filteredDrafts = finalDrafts,
+                draftsCount = drafts.size,
                 totalCount = total,
                 openCount = open,
                 inProgressCount = inProg,
@@ -285,6 +443,7 @@ class ServiceOrdersViewModel(
                     isSyncing = false
                 )
             }
+            refreshDrafts()
         }
     }
 }
