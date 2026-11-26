@@ -1,5 +1,6 @@
 package com.lefrio.atendimento.ui.serviceorders
 
+import android.widget.Toast
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -18,9 +19,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
@@ -39,6 +42,36 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private data class BatchLocationAnchor(
+    val clientId: String,
+    val clientName: String,
+    val addressId: String,
+    val addressStreet: String
+)
+
+private fun isOrderEligibleForBatch(order: ServiceOrderEntity): Boolean {
+    return order.status != "finalizada" && order.status != "pre_finalizada" && order.status != "cancelada"
+}
+
+private fun isSameBatchLocation(
+    anchor: BatchLocationAnchor,
+    clientId: String,
+    clientName: String,
+    addressId: String,
+    addressStreet: String
+): Boolean {
+    val aId = anchor.addressId.trim()
+    val bId = addressId.trim()
+    if (aId.isNotEmpty() && bId.isNotEmpty() && aId == bId) {
+        return true
+    }
+    val cNameA = anchor.clientName.trim().uppercase(Locale.getDefault())
+    val cNameB = clientName.trim().uppercase(Locale.getDefault())
+    val streetA = anchor.addressStreet.trim().uppercase(Locale.getDefault())
+    val streetB = addressStreet.trim().uppercase(Locale.getDefault())
+    return cNameA.isNotEmpty() && cNameA == cNameB && streetA.isNotEmpty() && streetA == streetB
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ServiceOrdersScreen(
@@ -47,14 +80,89 @@ fun ServiceOrdersScreen(
     onMenuClick: () -> Unit,
     onOrderClick: (orderId: String) -> Unit,
     onDraftClick: (draft: LocalServiceOrderDraft) -> Unit,
+    onStartBatchSignature: (drafts: List<LocalServiceOrderDraft>, openOrders: List<ServiceOrderEntity>) -> Unit,
     onNewOrderClick: () -> Unit,
     onProfileClick: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
     var draftPendingDelete by remember { mutableStateOf<LocalServiceOrderDraft?>(null) }
+    var isBatchMode by remember { mutableStateOf(false) }
+    var selectedDraftIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectedOrderIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     LaunchedEffect(Unit) {
         viewModel.refreshDrafts()
+        viewModel.triggerSync(forceRefresh = false)
+    }
+
+    val eligibleOpenOrders = remember(uiState.orders) {
+        uiState.orders.filter { isOrderEligibleForBatch(it) }
+    }
+    val totalSignableCount = uiState.drafts.size + eligibleOpenOrders.size
+
+    // Mantém seleção limpa caso alguma O.S. suma ou seja finalizada
+    LaunchedEffect(uiState.drafts, uiState.orders) {
+        val validDraftIds = uiState.drafts.map { it.id }.toSet()
+        val validOrderIds = eligibleOpenOrders.map { it.id }.toSet()
+        selectedDraftIds = selectedDraftIds.intersect(validDraftIds)
+        selectedOrderIds = selectedOrderIds.intersect(validOrderIds)
+        if (totalSignableCount == 0 && isBatchMode) {
+            isBatchMode = false
+        }
+    }
+
+    val lockedLocation: BatchLocationAnchor? = remember(selectedDraftIds, selectedOrderIds, uiState.drafts, eligibleOpenOrders) {
+        val firstDraft = uiState.drafts.firstOrNull { it.id in selectedDraftIds }
+        if (firstDraft != null) {
+            BatchLocationAnchor(
+                clientId = firstDraft.clientId,
+                clientName = firstDraft.clientName,
+                addressId = firstDraft.addressId,
+                addressStreet = firstDraft.addressStreet
+            )
+        } else {
+            val firstOrder = eligibleOpenOrders.firstOrNull { it.id in selectedOrderIds }
+            firstOrder?.let {
+                BatchLocationAnchor(
+                    clientId = it.clientId,
+                    clientName = it.clientName,
+                    addressId = it.addressId,
+                    addressStreet = it.addressStreet
+                )
+            }
+        }
+    }
+    val totalSelectedBatchCount = selectedDraftIds.size + selectedOrderIds.size
+
+    fun exitBatchMode() {
+        isBatchMode = false
+        selectedDraftIds = emptySet()
+        selectedOrderIds = emptySet()
+    }
+
+    fun selectAllForLockedLocation() {
+        val anchor = lockedLocation ?: return
+        val matchingDrafts = uiState.drafts.filter { draft ->
+            viewModel.validateDraftForBatch(draft) == null &&
+                isSameBatchLocation(anchor, draft.clientId, draft.clientName, draft.addressId, draft.addressStreet)
+        }
+        val matchingOrders = eligibleOpenOrders.filter { order ->
+            isSameBatchLocation(anchor, order.clientId, order.clientName, order.addressId, order.addressStreet)
+        }
+        selectedDraftIds = matchingDrafts.map { it.id }.toSet()
+        selectedOrderIds = matchingOrders.map { it.id }.toSet()
+        val incompleteSameLocationCount = uiState.drafts.count { draft ->
+            viewModel.validateDraftForBatch(draft) != null &&
+                isSameBatchLocation(anchor, draft.clientId, draft.clientName, draft.addressId, draft.addressStreet)
+        }
+        if (incompleteSameLocationCount > 0) {
+            Toast.makeText(
+                context,
+                "$incompleteSameLocationCount O.S. salva(s) deste endereço está(ão) incompleta(s) e não foi(foram) marcada(s).",
+                Toast.LENGTH_LONG
+            ).show()
+        }
     }
 
     val infiniteTransition = rememberInfiniteTransition(label = "sync_spin")
@@ -74,15 +182,20 @@ fun ServiceOrdersScreen(
                 title = {
                     Column {
                         Text(
-                            text = "Ordens de Serviço",
+                            text = if (isBatchMode) "Assinatura em Lote" else "Ordens de Serviço",
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Black,
-                            color = BluePrimary,
+                            color = if (isBatchMode) Color(0xFF065F46) else BluePrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "Ordens de Serviço do Dia • ${user.name}",
+                            text = if (isBatchMode) {
+                                if (totalSelectedBatchCount == 0) "Selecione O.S. do mesmo cliente e endereço"
+                                else "$totalSelectedBatchCount O.S. selecionada(s) para assinatura única"
+                            } else {
+                                "Ordens de Serviço do Dia • ${user.name}"
+                            },
                             fontSize = 11.sp,
                             color = TextSecondary,
                             fontWeight = FontWeight.Medium,
@@ -92,47 +205,118 @@ fun ServiceOrdersScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onMenuClick) {
-                        Icon(
-                            imageVector = Icons.Default.Menu,
-                            contentDescription = "Abrir Menu",
-                            tint = BluePrimary
-                        )
+                    if (isBatchMode) {
+                        IconButton(onClick = { exitBatchMode() }) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Sair do modo lote",
+                                tint = Color(0xFF065F46)
+                            )
+                        }
+                    } else {
+                        IconButton(onClick = onMenuClick) {
+                            Icon(
+                                imageVector = Icons.Default.Menu,
+                                contentDescription = "Abrir Menu",
+                                tint = BluePrimary
+                            )
+                        }
                     }
                 },
                 actions = {
-                    IconButton(
-                        onClick = { viewModel.triggerSync() },
-                        enabled = !uiState.isSyncing
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Sincronizar O.S.",
-                            tint = if (uiState.isSyncing) BluePrimary.copy(alpha = 0.6f) else BluePrimary,
-                            modifier = if (uiState.isSyncing) Modifier.rotate(rotationAngle) else Modifier
-                        )
-                    }
-                    IconButton(onClick = onProfileClick) {
-                        Icon(
-                            imageVector = Icons.Default.AccountCircle,
-                            contentDescription = "Meu Perfil",
-                            tint = BluePrimary
-                        )
+                    if (isBatchMode) {
+                        TextButton(onClick = { exitBatchMode() }) {
+                            Text(
+                                text = "Cancelar",
+                                color = Color(0xFFDC2626),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                        }
+                    } else {
+                        if (totalSignableCount >= 1) {
+                            IconButton(
+                                onClick = {
+                                    isBatchMode = true
+                                    selectedDraftIds = emptySet()
+                                    selectedOrderIds = emptySet()
+                                    viewModel.setFilterTab(OSFilterTab.ALL)
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DoneAll,
+                                    contentDescription = "Assinar O.S. em Lote",
+                                    tint = Color(0xFF059669)
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = { viewModel.triggerSync() },
+                            enabled = !uiState.isSyncing
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Sincronizar O.S.",
+                                tint = if (uiState.isSyncing) BluePrimary.copy(alpha = 0.6f) else BluePrimary,
+                                modifier = if (uiState.isSyncing) Modifier.rotate(rotationAngle) else Modifier
+                            )
+                        }
+                        IconButton(onClick = onProfileClick) {
+                            Icon(
+                                imageVector = Icons.Default.AccountCircle,
+                                contentDescription = "Meu Perfil",
+                                tint = BluePrimary
+                            )
+                        }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.White)
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = if (isBatchMode) Color(0xFFECFDF5) else Color.White
+                )
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onNewOrderClick,
-                icon = { Icon(Icons.Default.Add, contentDescription = null, tint = Color.White) },
-                text = { Text("NOVA O.S.", fontWeight = FontWeight.Black, fontSize = 13.sp, color = Color.White) },
-                containerColor = Color(0xFF581C87), // Roxo do botão de Nova O.S. PWA
-                contentColor = Color.White,
-                shape = RoundedCornerShape(16.dp),
-                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp)
-            )
+            if (isBatchMode) {
+                ExtendedFloatingActionButton(
+                    onClick = {
+                        if (totalSelectedBatchCount == 0) {
+                            Toast.makeText(
+                                context,
+                                "Selecione ao menos uma O.S. para continuar para a assinatura.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                            return@ExtendedFloatingActionButton
+                        }
+                        val chosenDrafts = uiState.drafts.filter { it.id in selectedDraftIds }
+                        val chosenOrders = eligibleOpenOrders.filter { it.id in selectedOrderIds }
+                        exitBatchMode()
+                        onStartBatchSignature(chosenDrafts, chosenOrders)
+                    },
+                    icon = { Icon(Icons.Default.DoneAll, contentDescription = null, tint = Color.White) },
+                    text = {
+                        Text(
+                            text = if (totalSelectedBatchCount == 0) "SELECIONE AS O.S." else "ASSINAR EM LOTE ($totalSelectedBatchCount)",
+                            fontWeight = FontWeight.Black,
+                            fontSize = 13.sp,
+                            color = Color.White
+                        )
+                    },
+                    containerColor = if (totalSelectedBatchCount > 0) Color(0xFF059669) else Color(0xFF94A3B8),
+                    contentColor = Color.White,
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp)
+                )
+            } else {
+                ExtendedFloatingActionButton(
+                    onClick = onNewOrderClick,
+                    icon = { Icon(Icons.Default.Add, contentDescription = null, tint = Color.White) },
+                    text = { Text("NOVA O.S.", fontWeight = FontWeight.Black, fontSize = 13.sp, color = Color.White) },
+                    containerColor = Color(0xFF581C87), // Roxo do botão de Nova O.S. PWA
+                    contentColor = Color.White,
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp)
+                )
+            }
         },
         containerColor = Color(0xFFF8FAFC)
     ) { paddingValues ->
@@ -264,6 +448,138 @@ fun ServiceOrdersScreen(
                 )
             }
 
+            // 3.5 BANNER DE ASSINATURA EM LOTE (ACESSO RÁPIDO OU CONTROLE DE SELEÇÃO)
+            if (isBatchMode) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFECFDF5),
+                    border = BorderStroke(1.dp, Color(0xFF6EE7B7))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DoneAll,
+                                    contentDescription = null,
+                                    tint = Color(0xFF059669),
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (lockedLocation == null) {
+                                        "Toque nas O.S. salvas ou abertas do mesmo local"
+                                    } else {
+                                        "Local: ${lockedLocation.clientName}"
+                                    },
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF065F46),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (lockedLocation != null) {
+                                TextButton(
+                                    onClick = { selectAllForLockedLocation() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(28.dp)
+                                ) {
+                                    Text(
+                                        text = "Selecionar todas",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Black,
+                                        color = Color(0xFF047857)
+                                    )
+                                }
+                            }
+                        }
+                        if (lockedLocation != null && lockedLocation.addressStreet.isNotBlank()) {
+                            Text(
+                                text = lockedLocation.addressStreet,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF047857),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            } else if (totalSignableCount >= 2) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable {
+                            isBatchMode = true
+                            selectedDraftIds = emptySet()
+                            selectedOrderIds = emptySet()
+                            viewModel.setFilterTab(OSFilterTab.ALL)
+                        },
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFFECFDF5),
+                    border = BorderStroke(1.dp, Color(0xFFA7F3D0))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 9.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DoneAll,
+                                contentDescription = null,
+                                tint = Color(0xFF059669),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Assinar O.S. em Lote",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color(0xFF065F46)
+                                )
+                                Text(
+                                    text = "Colha 1 única assinatura para várias O.S. do mesmo local",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF047857),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = Color(0xFF059669),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+
             // 4. LISTA DE ORDENS DE SERVIÇO E O.S. SALVAS NO DISPOSITIVO
             val showDraftsSection = uiState.selectedTab == OSFilterTab.DRAFTS ||
                 (uiState.selectedTab == OSFilterTab.ALL && uiState.filteredDrafts.isNotEmpty())
@@ -366,9 +682,48 @@ fun ServiceOrdersScreen(
                         }
 
                         items(uiState.filteredDrafts, key = { "draft_${it.id}" }) { draft ->
+                            val draftMissingReason = viewModel.validateDraftForBatch(draft)
+                            val isDraftSelected = draft.id in selectedDraftIds
+                            val sameLoc = lockedLocation == null || isSameBatchLocation(
+                                lockedLocation,
+                                draft.clientId,
+                                draft.clientName,
+                                draft.addressId,
+                                draft.addressStreet
+                            )
+                            val canSelectDraft = draftMissingReason == null && sameLoc
+
                             SavedDraftOrderCard(
                                 draft = draft,
-                                onContinueClick = { onDraftClick(draft) },
+                                isBatchMode = isBatchMode,
+                                isSelected = isDraftSelected,
+                                isSelectableInBatch = canSelectDraft,
+                                incompleteReason = if (isBatchMode) draftMissingReason else null,
+                                onContinueClick = {
+                                    if (!isBatchMode) {
+                                        onDraftClick(draft)
+                                    } else {
+                                        if (draftMissingReason != null) {
+                                            Toast.makeText(
+                                                context,
+                                                "Complete esta O.S. antes de assinar em lote ($draftMissingReason).",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        } else if (!sameLoc) {
+                                            Toast.makeText(
+                                                context,
+                                                "Só é possível assinar em lote O.S. do mesmo cliente e endereço.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            selectedDraftIds = if (isDraftSelected) {
+                                                selectedDraftIds - draft.id
+                                            } else {
+                                                selectedDraftIds + draft.id
+                                            }
+                                        }
+                                    }
+                                },
                                 onDeleteClick = { draftPendingDelete = draft }
                             )
                         }
@@ -402,9 +757,47 @@ fun ServiceOrdersScreen(
 
                     if (uiState.selectedTab != OSFilterTab.DRAFTS) {
                         items(uiState.filteredOrders, key = { it.id }) { order ->
+                            val isEligible = isOrderEligibleForBatch(order)
+                            val isOrderSelected = order.id in selectedOrderIds
+                            val sameLoc = lockedLocation == null || isSameBatchLocation(
+                                lockedLocation,
+                                order.clientId,
+                                order.clientName,
+                                order.addressId,
+                                order.addressStreet
+                            )
+                            val canSelectOrder = isEligible && sameLoc
+
                             ServiceOrderItemCard(
                                 order = order,
-                                onClick = { onOrderClick(order.id) }
+                                isBatchMode = isBatchMode,
+                                isSelected = isOrderSelected,
+                                isSelectableInBatch = canSelectOrder,
+                                onClick = {
+                                    if (!isBatchMode) {
+                                        onOrderClick(order.id)
+                                    } else {
+                                        if (!isEligible) {
+                                            Toast.makeText(
+                                                context,
+                                                "Esta O.S. já está concluída/cancelada e não entra no lote.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else if (!sameLoc) {
+                                            Toast.makeText(
+                                                context,
+                                                "Só é possível assinar em lote O.S. do mesmo cliente e endereço.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            selectedOrderIds = if (isOrderSelected) {
+                                                selectedOrderIds - order.id
+                                            } else {
+                                                selectedOrderIds + order.id
+                                            }
+                                        }
+                                    }
+                                }
                             )
                         }
                     }
@@ -463,6 +856,10 @@ fun ServiceOrdersScreen(
 @Composable
 private fun SavedDraftOrderCard(
     draft: LocalServiceOrderDraft,
+    isBatchMode: Boolean = false,
+    isSelected: Boolean = false,
+    isSelectableInBatch: Boolean = true,
+    incompleteReason: String? = null,
     onContinueClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
@@ -496,13 +893,21 @@ private fun SavedDraftOrderCard(
         }
     }
 
+    val cardBorderColor = when {
+        isBatchMode && isSelected -> Color(0xFF059669)
+        isBatchMode && !isSelectableInBatch -> Color(0xFFE2E8F0)
+        else -> Color(0xFF93C5FD)
+    }
+    val cardBgColor = if (isBatchMode && isSelected) Color(0xFFF0FDF4) else Color.White
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .alpha(if (isBatchMode && !isSelectableInBatch && !isSelected) 0.52f else 1f)
             .clickable(onClick = onContinueClick),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = BorderStroke(1.3.dp, Color(0xFF93C5FD)),
+        colors = CardDefaults.cardColors(containerColor = cardBgColor),
+        border = BorderStroke(if (isBatchMode && isSelected) 2.dp else 1.3.dp, cardBorderColor),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(
@@ -520,6 +925,18 @@ private fun SavedDraftOrderCard(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.weight(1f)
                 ) {
+                    if (isBatchMode) {
+                        Checkbox(
+                            checked = isSelected,
+                            onCheckedChange = { onContinueClick() },
+                            enabled = isSelectableInBatch || isSelected,
+                            modifier = Modifier.size(24.dp),
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = Color(0xFF059669),
+                                uncheckedColor = Color(0xFF64748B)
+                            )
+                        )
+                    }
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
@@ -552,15 +969,36 @@ private fun SavedDraftOrderCard(
                     }
                 }
 
-                IconButton(
-                    onClick = onDeleteClick,
-                    modifier = Modifier.size(30.dp)
+                if (!isBatchMode) {
+                    IconButton(
+                        onClick = onDeleteClick,
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "Excluir O.S. salva",
+                            tint = Color(0xFFDC2626),
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+            }
+
+            if (!incompleteReason.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFEF3C7))
+                        .border(1.dp, Color(0xFFFDE68A), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 5.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteOutline,
-                        contentDescription = "Excluir O.S. salva",
-                        tint = Color(0xFFDC2626),
-                        modifier = Modifier.size(19.dp)
+                    Text(
+                        text = "Incompleta para lote: $incompleteReason",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF92400E)
                     )
                 }
             }
@@ -813,6 +1251,9 @@ private fun FilterTabChip(
 @Composable
 private fun ServiceOrderItemCard(
     order: ServiceOrderEntity,
+    isBatchMode: Boolean = false,
+    isSelected: Boolean = false,
+    isSelectableInBatch: Boolean = true,
     onClick: () -> Unit
 ) {
     val statusColor = when (order.status) {
@@ -848,13 +1289,20 @@ private fun ServiceOrderItemCard(
         }
     }
 
+    val cardBorderColor = when {
+        isBatchMode && isSelected -> Color(0xFF059669)
+        else -> Color(0xFFE2E8F0)
+    }
+    val cardBgColor = if (isBatchMode && isSelected) Color(0xFFF0FDF4) else Color.White
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .alpha(if (isBatchMode && !isSelectableInBatch && !isSelected) 0.45f else 1f)
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+        colors = CardDefaults.cardColors(containerColor = cardBgColor),
+        border = BorderStroke(if (isBatchMode && isSelected) 2.dp else 1.dp, cardBorderColor),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.5.dp)
     ) {
         Column(
@@ -868,22 +1316,39 @@ private fun ServiceOrderItemCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF581C87).copy(alpha = 0.12f))
-                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f, fill = false)
                 ) {
-                    Text(
-                        text = "#${order.osNumber}",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Black,
-                        color = Color(0xFF581C87),
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (isBatchMode) {
+                        Checkbox(
+                            checked = isSelected,
+                            onCheckedChange = { onClick() },
+                            enabled = isSelectableInBatch || isSelected,
+                            modifier = Modifier.size(24.dp),
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = Color(0xFF059669),
+                                uncheckedColor = Color(0xFF64748B)
+                            )
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF581C87).copy(alpha = 0.12f))
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "#${order.osNumber}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Color(0xFF581C87),
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))

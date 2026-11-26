@@ -1751,7 +1751,7 @@ async function startServer() {
           : Promise.resolve({ docs: [] as any[] }),
         fetchTechsServer(),
         clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("plannedDate", "==", targetDate))),
-        clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("status", "in", ["aberta", "em_atendimento", "pendente"])))
+        clientGetDocs(clientQuery(clientCollection(dbClient, "serviceOrders"), clientWhere("status", "in", ["aberta", "em_andamento", "em_atendimento", "pendente"])))
       ]);
 
       const recordsMap = new Map<string, any>();

@@ -577,7 +577,10 @@ export interface ServiceOrder {
   totalValue: number;
   
   technicianId?: string; // ID do técnico responsável
+  technician1?: string; // Nome do técnico responsável (compatibilidade com consultas do app Android)
+  technicianName?: string; // Nome do técnico responsável (compatibilidade com consultas do app Android)
   technician2Id?: string; // ID do segundo técnico (opcional)
+  technician2?: string; // Nome do segundo técnico (compatibilidade com consultas do app Android)
   authenticatedTeam?: string; // Ex: "Equipe autenticada no aplicativo JDSmartOS..."
   clientRepresentative?: string; // Nome do representante (ex: ALUÍSIO MELO SIMÕES FILHO)
   clientRepresentativeMatricula?: string; // Matrícula do representante (ex: 0813)

@@ -446,4 +446,122 @@ class ServiceOrdersViewModel(
             refreshDrafts()
         }
     }
+
+    fun validateDraftForBatch(draft: LocalServiceOrderDraft): String? {
+        if (draft.clientName.isBlank()) return "Cliente não selecionado"
+        if (draft.addressStreet.isBlank()) return "Endereço não selecionado"
+        if (draft.equipmentName.isBlank()) return "Máquina não selecionada"
+        if (draft.description.isBlank()) return "Descrição do problema pendente"
+        if (draft.diagnosis.isBlank()) return "Diagnóstico técnico pendente"
+        if (draft.solution.isBlank()) return "Solução aplicada pendente"
+        return null
+    }
+
+    fun finalizeBatchOrders(
+        drafts: List<LocalServiceOrderDraft>,
+        openOrders: List<ServiceOrderEntity>,
+        fiscalName: String,
+        fiscalRegistration: String,
+        fiscalRole: String,
+        fiscalContact: String,
+        signaturePath: String,
+        signatureBase64: String?,
+        latitude: Double,
+        longitude: Double,
+        accuracy: Float,
+        onProgress: (completed: Int, total: Int) -> Unit = { _, _ -> },
+        onSuccess: (totalFinalized: Int) -> Unit,
+        onError: (message: String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val total = drafts.size + openOrders.size
+            if (total == 0) {
+                onError("Nenhuma O.S. selecionada para assinatura em lote.")
+                return@launch
+            }
+
+            var completed = 0
+            try {
+                val todayStr = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }.format(Date())
+
+                // 1. Finaliza cada O.S. salva na memória do dispositivo criando sua O.S. individual
+                for (draft in drafts) {
+                    val params = CreateServiceOrderParams(
+                        plannedDate = todayStr,
+                        type = "MANUTENÇÃO CORRETIVA CONTRATO",
+                        clientId = draft.clientId.ifBlank { "CLI_ROTEIRO_${System.currentTimeMillis()}" },
+                        clientName = draft.clientName,
+                        addressId = draft.addressId.ifBlank { "ADDR_ROTEIRO_${System.currentTimeMillis()}" },
+                        addressStreet = draft.addressStreet,
+                        equipmentId = draft.equipmentId.ifBlank { null },
+                        equipmentName = draft.equipmentName.ifBlank { null },
+                        equipmentBrand = draft.equipmentBrand.ifBlank { null },
+                        equipmentBtus = draft.equipmentBtus.ifBlank { null },
+                        equipmentSector = draft.equipmentSector.ifBlank { null },
+                        technicianId = currentUser.uid,
+                        technicianName = currentUser.name,
+                        technician2Name = null,
+                        description = draft.description.ifBlank { "Atendimento / Chamado de Ordem de Serviço" },
+                        diagnosis = draft.diagnosis.ifBlank { null },
+                        solution = draft.solution.ifBlank { null },
+                        technicalReport = draft.technicalReport.trim().ifBlank { null },
+                        fiscalName = fiscalName,
+                        fiscalRegistration = fiscalRegistration,
+                        fiscalRole = fiscalRole.ifBlank { null },
+                        fiscalContact = fiscalContact.ifBlank { null },
+                        signaturePath = signaturePath,
+                        signatureBase64 = signatureBase64,
+                        photoPaths = draft.photoPaths,
+                        isFinalized = true
+                    )
+
+                    repository.createServiceOrder(params)
+                    withContext(Dispatchers.IO) {
+                        draftStorage.deleteDraft(draft.id)
+                    }
+                    completed++
+                    onProgress(completed, total)
+                    kotlinx.coroutines.delay(15L)
+                }
+
+                // 2. Finaliza cada O.S. já aberta/em andamento vinda do sistema administrativo
+                for (order in openOrders) {
+                    val checklistItems = repository.getChecklistForOrderSync(order.id)
+                    repository.finalizeServiceOrder(
+                        orderId = order.id,
+                        signeeName = fiscalName,
+                        signeeDoc = fiscalRegistration,
+                        signeeRole = fiscalRole,
+                        signeeContact = fiscalContact,
+                        signatureDate = nowIso,
+                        signatureFilePath = signaturePath,
+                        completionDate = nowIso,
+                        latitude = latitude,
+                        longitude = longitude,
+                        accuracy = accuracy,
+                        signatureBase64 = signatureBase64,
+                        checklistItems = checklistItems
+                    )
+                    completed++
+                    onProgress(completed, total)
+                }
+
+                refreshDrafts()
+                onSuccess(completed)
+
+                // Sincronização imediata em segundo plano com o Firestore
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        FirebaseSyncManager(getApplication()).processPendingSyncQueue(ignoreBackoff = true)
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                refreshDrafts()
+                onError(e.message ?: "Erro ao finalizar assinatura em lote ($completed de $total concluídas).")
+            }
+        }
+    }
 }

@@ -29,9 +29,11 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import com.lefrio.atendimento.data.local.LocalServiceOrderDraft
+import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
 import com.lefrio.atendimento.ui.components.AppDrawerContent
 import com.lefrio.atendimento.ui.components.DrawerDestination
+import com.lefrio.atendimento.ui.serviceorders.BatchSignatureScreen
 import com.lefrio.atendimento.ui.serviceorders.CreateServiceOrderScreen
 import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersScreen
 import com.lefrio.atendimento.ui.serviceorders.ServiceOrdersViewModel
@@ -202,6 +204,9 @@ class MainActivity : ComponentActivity() {
                             var currentDestination by remember { mutableStateOf(DrawerDestination.ROTEIRO) }
                             var showCreateOrderScreen by remember { mutableStateOf(false) }
                             var editingDraft by remember { mutableStateOf<LocalServiceOrderDraft?>(null) }
+                            var showBatchSignatureScreen by remember { mutableStateOf(false) }
+                            var batchDraftsToSign by remember { mutableStateOf<List<LocalServiceOrderDraft>>(emptyList()) }
+                            var batchOpenOrdersToSign by remember { mutableStateOf<List<ServiceOrderEntity>>(emptyList()) }
                             val serviceOrdersViewModel = remember(state.user.uid) {
                                 ServiceOrdersViewModel(
                                     application,
@@ -225,6 +230,9 @@ class MainActivity : ComponentActivity() {
                                                     currentDestination = DrawerDestination.ROTEIRO
                                                     showCreateOrderScreen = false
                                                     editingDraft = null
+                                                    showBatchSignatureScreen = false
+                                                    batchDraftsToSign = emptyList()
+                                                    batchOpenOrdersToSign = emptyList()
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
                                                     selectedOrderId = null
@@ -235,6 +243,9 @@ class MainActivity : ComponentActivity() {
                                                     currentDestination = DrawerDestination.SERVICE_ORDERS
                                                     showCreateOrderScreen = false
                                                     editingDraft = null
+                                                    showBatchSignatureScreen = false
+                                                    batchDraftsToSign = emptyList()
+                                                    batchOpenOrdersToSign = emptyList()
                                                     showProfileScreen = false
                                                     showNotificationsScreen = false
                                                     selectedOrderId = null
@@ -249,6 +260,9 @@ class MainActivity : ComponentActivity() {
                                                     signatureOrderId = null
                                                     summaryOrderId = null
                                                     editingDraft = null
+                                                    showBatchSignatureScreen = false
+                                                    batchDraftsToSign = emptyList()
+                                                    batchOpenOrdersToSign = emptyList()
                                                     showCreateOrderScreen = true
                                                 }
                                                 DrawerDestination.NOTIFICATIONS -> {
@@ -278,6 +292,9 @@ class MainActivity : ComponentActivity() {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            showBatchSignatureScreen = false
+                                            batchDraftsToSign = emptyList()
+                                            batchOpenOrdersToSign = emptyList()
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -309,6 +326,9 @@ class MainActivity : ComponentActivity() {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            showBatchSignatureScreen = false
+                                            batchDraftsToSign = emptyList()
+                                            batchOpenOrdersToSign = emptyList()
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -318,6 +338,9 @@ class MainActivity : ComponentActivity() {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            showBatchSignatureScreen = false
+                                            batchDraftsToSign = emptyList()
+                                            batchOpenOrdersToSign = emptyList()
                                             selectedOrderId = null
                                             signatureOrderId = null
                                             summaryOrderId = null
@@ -377,6 +400,23 @@ class MainActivity : ComponentActivity() {
                                             }
                                         )
                                     }
+                                } else if (showBatchSignatureScreen) {
+                                    BatchSignatureScreen(
+                                        user = state.user,
+                                        viewModel = serviceOrdersViewModel,
+                                        drafts = batchDraftsToSign,
+                                        openOrders = batchOpenOrdersToSign,
+                                        onBackClick = {
+                                            showBatchSignatureScreen = false
+                                            batchDraftsToSign = emptyList()
+                                            batchOpenOrdersToSign = emptyList()
+                                        },
+                                        onBatchFinished = {
+                                            showBatchSignatureScreen = false
+                                            batchDraftsToSign = emptyList()
+                                            batchOpenOrdersToSign = emptyList()
+                                        }
+                                    )
                                 } else if (showCreateOrderScreen) {
                                     CreateServiceOrderScreen(
                                         user = state.user,
@@ -409,6 +449,11 @@ class MainActivity : ComponentActivity() {
                                         onDraftClick = { draft ->
                                             editingDraft = draft
                                             showCreateOrderScreen = true
+                                        },
+                                        onStartBatchSignature = { drafts, openOrders ->
+                                            batchDraftsToSign = drafts
+                                            batchOpenOrdersToSign = openOrders
+                                            showBatchSignatureScreen = true
                                         },
                                         onNewOrderClick = {
                                             editingDraft = null

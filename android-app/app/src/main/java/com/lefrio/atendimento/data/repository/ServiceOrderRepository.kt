@@ -126,9 +126,34 @@ class ServiceOrderRepository(private val context: Context) {
         orderDao.deleteFakeSeedOrders()
         checklistDao.deleteFakeSeedChecklists()
 
-        val normTechName = technicianName.trim().uppercase()
-        val normTechId = technicianId.trim().uppercase()
+        val rawTechName = technicianName.trim()
+        val rawTechId = technicianId.trim()
+        val normTechName = rawTechName.uppercase()
+        val normTechId = rawTechId.uppercase()
         val syncKey = "${normTechName}|${normTechId}|${targetDate}"
+
+        // Coleta todos os aliases exatos (preservando maiúsculas/minúsculas do ID no Firestore!)
+        // para que consultas case-sensitive whereEqualTo("technicianId", ...) sempre encontrem o técnico.
+        val candidateTechIds = linkedSetOf<String>()
+        val candidateTechNames = linkedSetOf<String>()
+        if (rawTechId.isNotBlank()) candidateTechIds.add(rawTechId)
+        if (normTechId.isNotBlank()) candidateTechIds.add(normTechId)
+        if (rawTechName.isNotBlank()) candidateTechNames.add(rawTechName)
+        if (normTechName.isNotBlank()) candidateTechNames.add(normTechName)
+        try {
+            val localTechs = db.technicianDao().getActiveTechniciansSync()
+            for (t in localTechs) {
+                if (matchesTechResilient(t.id, normTechName, normTechId) ||
+                    matchesTechResilient(t.name, normTechName, normTechId)
+                ) {
+                    if (t.id.isNotBlank()) candidateTechIds.add(t.id.trim())
+                    if (t.name.isNotBlank()) {
+                        candidateTechNames.add(t.name.trim())
+                        candidateTechNames.add(t.name.trim().uppercase())
+                    }
+                }
+            }
+        } catch (_: Exception) {}
 
         // GARANTIA OFFLINE-FIRST: Se o dispositivo não tem internet validada,
         // NUNCA consulta cache vazio nem apaga o banco local Room — retorna imediatamente os dados salvos!
@@ -157,7 +182,8 @@ class ServiceOrderRepository(private val context: Context) {
             val currentMonth = if (targetDate.length >= 7) targetDate.substring(0, 7) else "2026-11"
 
             var fetchSuccess = false
-            var serverQuerySucceeded = false
+            var preventiveServerQuerySucceeded = false
+            var osServerQuerySucceeded = false
 
             // 1. TENTATIVA DIRETA E ENXUTA NO FIRESTORE (Recorte temporal estrito — NUNCA baixa meses históricos!)
             try {
@@ -216,8 +242,7 @@ class ServiceOrderRepository(private val context: Context) {
                 }
 
                 if (querySuccessCount.get() > 0) {
-                    serverQuerySucceeded = true
-                    fetchSuccess = true
+                    preventiveServerQuerySucceeded = true
                 }
 
             // Filtra estritamente documentos do técnico com data válida entre (hoje - 7 dias) e hoje (NUNCA datas futuras)
@@ -541,50 +566,57 @@ class ServiceOrderRepository(private val context: Context) {
                 }
             }
 
-            // B) Busca Ordens de Serviço Corretivas filtradas pelo técnico no SERVIDOR (evita baixar O.S. de toda a empresa no 4G)
+            // B) Busca Ordens de Serviço (criadas/agendadas pelo administrativo ou pelo app) direto no SERVIDOR
+            //    IMPORTANTE: Firestore whereEqualTo é estritamente case-sensitive! Por isso consultamos com o ID exato (mixed-case),
+            //    por nomes/aliases do técnico, pela data agendada de hoje e pelos status em aberto/em andamento.
             try {
                 val osCandidateMap = LinkedHashMap<String, com.google.firebase.firestore.DocumentSnapshot>()
+                val osQuerySuccessCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+                suspend fun runOsQuery(query: com.google.firebase.firestore.Query): List<com.google.firebase.firestore.DocumentSnapshot> {
+                    return try {
+                        val docs = withTimeout(12_000L) {
+                            query.get(Source.SERVER).await().documents
+                        }
+                        osQuerySuccessCount.incrementAndGet()
+                        docs
+                    } catch (serverErr: Exception) {
+                        try {
+                            withTimeout(8_000L) {
+                                query.get().await().documents
+                            }
+                        } catch (_: Exception) {
+                            Log.d(TAG, "Consulta parcial em serviceOrders falhou: ${serverErr.message}")
+                            emptyList()
+                        }
+                    }
+                }
+
                 coroutineScope {
                     val osQueries = buildList {
-                        if (normTechName.isNotBlank()) {
-                            add(async {
-                                try {
-                                    withTimeout(10_000L) {
-                                        firestore.collection("serviceOrders").whereEqualTo("technician1", normTechName).get().await().documents
-                                    }
-                                } catch (_: Exception) { emptyList() }
-                            })
-                            add(async {
-                                try {
-                                    withTimeout(10_000L) {
-                                        firestore.collection("serviceOrders").whereEqualTo("technicianName", normTechName).get().await().documents
-                                    }
-                                } catch (_: Exception) { emptyList() }
-                            })
-                            add(async {
-                                try {
-                                    withTimeout(10_000L) {
-                                        firestore.collection("serviceOrders").whereEqualTo("technician2", normTechName).get().await().documents
-                                    }
-                                } catch (_: Exception) { emptyList() }
-                            })
+                        // 1. Por ID exato do técnico (mixed-case do Firestore, ex: K10YTjFSrb16rpsWjdE7) e variantes
+                        for (techIdVal in candidateTechIds) {
+                            add(async { runOsQuery(firestore.collection("serviceOrders").whereEqualTo("technicianId", techIdVal)) })
+                            add(async { runOsQuery(firestore.collection("serviceOrders").whereEqualTo("technician2Id", techIdVal)) })
                         }
-                        if (normTechId.isNotBlank()) {
-                            add(async {
-                                try {
-                                    withTimeout(10_000L) {
-                                        firestore.collection("serviceOrders").whereEqualTo("technicianId", normTechId).get().await().documents
-                                    }
-                                } catch (_: Exception) { emptyList() }
-                            })
-                            add(async {
-                                try {
-                                    withTimeout(10_000L) {
-                                        firestore.collection("serviceOrders").whereEqualTo("technician2Id", normTechId).get().await().documents
-                                    }
-                                } catch (_: Exception) { emptyList() }
-                            })
+                        // 2. Por nome do técnico (para O.S. com campos denormalizados ou legados)
+                        for (techNameVal in candidateTechNames) {
+                            add(async { runOsQuery(firestore.collection("serviceOrders").whereEqualTo("technician1", techNameVal)) })
+                            add(async { runOsQuery(firestore.collection("serviceOrders").whereEqualTo("technicianName", techNameVal)) })
+                            add(async { runOsQuery(firestore.collection("serviceOrders").whereEqualTo("technician2", techNameVal)) })
+                            add(async { runOsQuery(firestore.collection("serviceOrders").whereEqualTo("technicianId", techNameVal)) })
                         }
+                        // 3. O.S. agendadas para hoje (consulta pequena — cobre qualquer diferença de caixa/campo)
+                        add(async {
+                            runOsQuery(firestore.collection("serviceOrders").whereEqualTo("plannedDate", targetDate))
+                        })
+                        // 4. O.S. abertas/em andamento no sistema (garante exibição mesmo sem plannedDate preenchida)
+                        add(async {
+                            runOsQuery(
+                                firestore.collection("serviceOrders")
+                                    .whereIn("status", listOf("aberta", "em_andamento", "em_atendimento", "pendente"))
+                            )
+                        })
                     }
                     for (docs in osQueries.awaitAll()) {
                         for (d in docs) {
@@ -593,6 +625,12 @@ class ServiceOrderRepository(private val context: Context) {
                     }
                 }
 
+                if (osQuerySuccessCount.get() > 0) {
+                    osServerQuerySucceeded = true
+                }
+
+                // Filtra em memória os documentos que pertencem a este técnico e atendem à janela de exibição
+                val matchedOsDocs = mutableListOf<Pair<com.google.firebase.firestore.DocumentSnapshot, String>>()
                 for (doc in osCandidateMap.values) {
                     val rawStatus = (doc.getString("status") ?: "aberta").trim().lowercase()
                     if (rawStatus == "cancelada") continue
@@ -605,97 +643,203 @@ class ServiceOrderRepository(private val context: Context) {
                         rawStatus == "pre_finalizada"
                     val effectiveStatus = when {
                         isTechFinalized || isAdminFinalized -> "finalizada"
-                        rawStatus == "em_andamento" -> "em_andamento"
+                        rawStatus == "em_andamento" || rawStatus == "em_atendimento" -> "em_andamento"
                         else -> "aberta"
                     }
 
-                    val tId = (doc.getString("technicianId") ?: "").trim().uppercase()
-                    val tName = (doc.getString("technicianName") ?: doc.getString("technician1") ?: "").trim().uppercase()
-                    val t2Id = (doc.getString("technician2Id") ?: "").trim().uppercase()
-                    val t2Name = (doc.getString("technician2") ?: "").trim().uppercase()
-                    val pDate = (doc.getString("plannedDate") ?: (doc.getString("openedAt")?.take(10) ?: "")).trim().take(10)
+                    val tId = (doc.getString("technicianId") ?: "").trim()
+                    val tName = (doc.getString("technicianName") ?: doc.getString("technician1") ?: "").trim()
+                    val t2Id = (doc.getString("technician2Id") ?: "").trim()
+                    val t2Name = (doc.getString("technician2") ?: "").trim()
 
-                    val matchesTech = matchesTechResilient(tId, normTechName, normTechId) ||
-                                      matchesTechResilient(tName, normTechName, normTechId) ||
-                                      matchesTechResilient(t2Id, normTechName, normTechId) ||
-                                      matchesTechResilient(t2Name, normTechName, normTechId)
+                    val matchesTech = listOf(tId, tName, t2Id, t2Name).any { fieldVal ->
+                        if (fieldVal.isBlank()) false
+                        else candidateTechIds.any { cid -> fieldVal.equals(cid, ignoreCase = true) } ||
+                            candidateTechNames.any { cname -> matchesTechResilient(fieldVal, cname, normTechId) } ||
+                            matchesTechResilient(fieldVal, normTechName, normTechId)
+                    }
 
-                    val isFutureDate = isIsoDate(pDate) && pDate > targetDate
-                    val matchesDate = !isFutureDate && (pDate.isBlank() || pDate >= minPastDate || pDate.startsWith(currentMonth))
+                    val rawPlannedDate = (doc.getString("plannedDate") ?: "").trim().take(10)
+                    val pDate = rawPlannedDate.ifBlank { (doc.getString("openedAt") ?: "").trim().take(10) }
+
+                    // Nunca exibe O.S. agendadas para datas futuras; O.S. abertas/em andamento sempre aparecem
+                    val isFutureDate = isIsoDate(rawPlannedDate) && rawPlannedDate > targetDate
+                    val isActiveOpen = effectiveStatus == "aberta" || effectiveStatus == "em_andamento"
+                    val matchesDate = !isFutureDate && (
+                        isActiveOpen ||
+                            pDate.isBlank() ||
+                            pDate >= minPastDate ||
+                            pDate.startsWith(currentMonth)
+                        )
 
                     if (matchesTech && matchesDate) {
-                        val cId = doc.getString("clientId") ?: ""
-                        val aId = doc.getString("addressId") ?: ""
-                        val addrDoc = addressMap[aId]
+                        matchedOsDocs.add(doc to effectiveStatus)
+                    }
+                }
 
-                        val realClientName = clientMap[cId]
-                            ?: doc.getString("clientName")?.takeIf { it.isNotBlank() && it != "Cliente LeFrio" && it != "Cliente PMOC" }
-                            ?: "Cliente Solicitante O.S."
+                // Busca endereços/clientes faltantes para O.S. corretivas caso algum documento não traga os campos denormalizados
+                val osMissingAddrIds = matchedOsDocs.mapNotNull { (doc, _) ->
+                    val aid = doc.getString("addressId")?.trim() ?: ""
+                    val hasStreet = !doc.getString("addressStreet").isNullOrBlank()
+                    val hasClientName = !doc.getString("clientName").isNullOrBlank()
+                    if (aid.isNotBlank() && !addressMap.containsKey(aid) && (!hasStreet || !hasClientName)) aid else null
+                }.toSet()
+                val osMissingClientIds = matchedOsDocs.mapNotNull { (doc, _) ->
+                    val cid = doc.getString("clientId")?.trim() ?: ""
+                    val hasClientName = !doc.getString("clientName").isNullOrBlank()
+                    if (cid.isNotBlank() && !clientMap.containsKey(cid) && !hasClientName) cid else null
+                }.toMutableSet()
 
-                        val realStreet = addrDoc?.let {
-                            val s = it.getString("street") ?: ""
-                            val num = it.getString("number")?.let { n -> ", $n" } ?: ""
-                            val neigh = it.getString("neighborhood")?.let { nb -> " - $nb" } ?: ""
-                            "$s$num$neigh".trim()
-                        }?.takeIf { it.isNotBlank() } ?: doc.getString("addressStreet")?.takeIf { it.isNotBlank() && it != "Endereço do Chamado" } ?: "Endereço de Atendimento"
+                if (osMissingAddrIds.isNotEmpty()) {
+                    coroutineScope {
+                        osMissingAddrIds.map { aid ->
+                            async {
+                                try {
+                                    val addrDoc = withTimeout(8_000L) {
+                                        firestore.collection("addresses").document(aid).get().await()
+                                    }
+                                    if (addrDoc.exists()) {
+                                        addressMap[aid] = addrDoc
+                                        addrDoc.getString("clientId")?.trim()?.takeIf { it.isNotBlank() && !clientMap.containsKey(it) }?.let {
+                                            osMissingClientIds.add(it)
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }.awaitAll()
+                    }
+                }
+                if (osMissingClientIds.isNotEmpty()) {
+                    coroutineScope {
+                        osMissingClientIds.map { cid ->
+                            async {
+                                try {
+                                    val clientDoc = withTimeout(8_000L) {
+                                        firestore.collection("clients").document(cid).get().await()
+                                    }
+                                    if (clientDoc.exists()) {
+                                        val cName = clientDoc.getString("name") ?: clientDoc.getString("fullName")
+                                        if (!cName.isNullOrBlank()) clientMap[cid] = cName.trim()
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }.awaitAll()
+                    }
+                }
 
-                        val serverFiscalName = doc.getString("clientRepresentative")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("clientSigneeName")?.takeIf { it.isNotBlank() }
-                        val serverFiscalDoc = doc.getString("clientSigneeDoc")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("clientSigneeRegistration")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("clientRepresentativeMatricula")?.takeIf { it.isNotBlank() }
-                        val serverFiscalRole = doc.getString("clientRepresentativeRole")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("clientSigneeRole")?.takeIf { it.isNotBlank() }
-                        val serverFiscalContact = doc.getString("clientRepresentativeContact")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("clientSigneeContact")?.takeIf { it.isNotBlank() }
-                        if (!serverFiscalRole.isNullOrBlank() || !serverFiscalContact.isNullOrBlank()) {
-                            val (existingRole, existingContact) = getFiscalExtraDraft(doc.id)
-                            saveFiscalExtraDraft(
-                                doc.id,
-                                existingRole.ifBlank { serverFiscalRole.orEmpty() },
-                                existingContact.ifBlank { serverFiscalContact.orEmpty() }
+                for ((doc, effectiveStatus) in matchedOsDocs) {
+                    val cId = doc.getString("clientId")?.trim() ?: ""
+                    val aId = doc.getString("addressId")?.trim() ?: ""
+                    val addrDoc = addressMap[aId]
+
+                    val realClientName = doc.getString("clientName")?.takeIf { it.isNotBlank() && it != "Cliente LeFrio" && it != "Cliente PMOC" }
+                        ?: clientMap[cId]
+                        ?: "Cliente Solicitante O.S."
+
+                    val realStreet = addrDoc?.let {
+                        val s = it.getString("street") ?: ""
+                        val num = it.getString("number")?.takeIf { n -> n.isNotBlank() }?.let { n -> ", $n" } ?: ""
+                        val neigh = it.getString("neighborhood")?.takeIf { nb -> nb.isNotBlank() }?.let { nb -> " - $nb" } ?: ""
+                        "$s$num$neigh".trim()
+                    }?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("addressStreet")?.takeIf { it.isNotBlank() && it != "Endereço do Chamado" }
+                        ?: "Endereço de Atendimento"
+
+                    val rawPlannedDate = (doc.getString("plannedDate") ?: "").trim().take(10)
+                    val fallbackDate = (doc.getString("openedAt") ?: "").trim().take(10)
+                    val resolvedPlannedDate = rawPlannedDate.ifBlank { fallbackDate.ifBlank { targetDate } }
+
+                    val serverFiscalName = doc.getString("clientRepresentative")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("clientSigneeName")?.takeIf { it.isNotBlank() }
+                    val serverFiscalDoc = doc.getString("clientSigneeDoc")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("clientSigneeRegistration")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("clientRepresentativeMatricula")?.takeIf { it.isNotBlank() }
+                    val serverFiscalRole = doc.getString("clientRepresentativeRole")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("clientSigneeRole")?.takeIf { it.isNotBlank() }
+                    val serverFiscalContact = doc.getString("clientRepresentativeContact")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("clientSigneeContact")?.takeIf { it.isNotBlank() }
+                    if (!serverFiscalRole.isNullOrBlank() || !serverFiscalContact.isNullOrBlank()) {
+                        val (existingRole, existingContact) = getFiscalExtraDraft(doc.id)
+                        saveFiscalExtraDraft(
+                            doc.id,
+                            existingRole.ifBlank { serverFiscalRole.orEmpty() },
+                            existingContact.ifBlank { serverFiscalContact.orEmpty() }
+                        )
+                    }
+                    val serverSigDate = doc.getString("clientSignatureDate")?.takeIf { it.isNotBlank() }
+                    val serverCompletionDate = doc.getString("techFinalizedAt")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("completionDate")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("finishedAt")?.takeIf { it.isNotBlank() }
+                    val serverNotes = doc.getString("generalNotes")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("routeNotes")?.takeIf { it.isNotBlank() }
+                        ?: doc.getString("description")?.takeIf { it.isNotBlank() }
+                        ?: "Atendimento Corretivo Solicitado"
+
+                    if (ordersToSave.none { it.id == doc.id }) {
+                        ordersToSave.add(
+                            ServiceOrderEntity(
+                                id = doc.id,
+                                osNumber = doc.getString("osNumber")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("orderNumber")?.takeIf { it.isNotBlank() }
+                                    ?: "OS-${doc.id.takeLast(4).uppercase()}",
+                                originalId = doc.id,
+                                clientId = cId,
+                                clientName = realClientName,
+                                addressId = aId,
+                                addressStreet = realStreet,
+                                addressCity = addrDoc?.getString("city")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("addressCity")?.takeIf { it.isNotBlank() }
+                                    ?: "Maceió",
+                                plannedDate = resolvedPlannedDate,
+                                status = effectiveStatus,
+                                type = doc.getString("type")?.takeIf { it.isNotBlank() } ?: "MANUTENÇÃO CORRETIVA CONTRATO",
+                                technician1 = technicianName,
+                                technician2 = doc.getString("technician2")?.takeIf { it.isNotBlank() }
+                                    ?: doc.getString("technician2Id")?.takeIf { it.isNotBlank() },
+                                clientRepresentative = serverFiscalName,
+                                clientSigneeDoc = serverFiscalDoc,
+                                clientSignatureDate = serverSigDate,
+                                completionDate = serverCompletionDate,
+                                generalNotes = serverNotes,
+                                isLockedForEdit = effectiveStatus == "finalizada",
+                                isSyncedWithServer = true
                             )
-                        }
-                        val serverSigDate = doc.getString("clientSignatureDate")?.takeIf { it.isNotBlank() }
-                        val serverCompletionDate = doc.getString("techFinalizedAt")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("completionDate")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("finishedAt")?.takeIf { it.isNotBlank() }
-                        val serverNotes = doc.getString("generalNotes")?.takeIf { it.isNotBlank() }
-                            ?: doc.getString("description")?.takeIf { it.isNotBlank() }
-                            ?: "Atendimento Corretivo Solicitado"
+                        )
+                    }
 
-                        if (ordersToSave.none { it.id == doc.id }) {
-                            ordersToSave.add(
-                                ServiceOrderEntity(
-                                    id = doc.id,
-                                    osNumber = doc.getString("osNumber") ?: doc.getString("orderNumber") ?: "OS-${doc.id.takeLast(4).uppercase()}",
-                                    originalId = doc.id,
-                                    clientId = cId,
-                                    clientName = realClientName,
-                                    addressId = aId,
-                                    addressStreet = realStreet,
-                                    plannedDate = doc.getString("plannedDate")?.takeIf { it.isNotBlank() } ?: pDate.ifBlank { targetDate },
-                                    status = effectiveStatus,
-                                    type = doc.getString("type") ?: "MANUTENÇÃO CORRETIVA CONTRATO",
-                                    technician1 = technicianName,
-                                    technician2 = doc.getString("technician2"),
-                                    clientRepresentative = serverFiscalName,
-                                    clientSigneeDoc = serverFiscalDoc,
-                                    clientSignatureDate = serverSigDate,
-                                    completionDate = serverCompletionDate,
-                                    generalNotes = serverNotes,
-                                    isLockedForEdit = effectiveStatus == "finalizada",
-                                    isSyncedWithServer = true
+                    // Se a O.S. criada pelo administrativo já possui equipamento vinculado, garante item no checklist da tela de detalhes
+                    val osEqId = doc.getString("equipmentId")?.trim().orEmpty()
+                    val osEqName = doc.getString("equipmentName")?.trim().orEmpty()
+                    if (osEqId.isNotBlank() || osEqName.isNotBlank()) {
+                        val effectiveEqId = osEqId.ifBlank { "EQ_OS_${doc.id}" }
+                        val checkId = "CHK_${doc.id}_${effectiveEqId}"
+                        if (checklistToSave.none { it.id == checkId }) {
+                            checklistToSave.add(
+                                EquipmentChecklistEntity(
+                                    id = checkId,
+                                    orderId = doc.id,
+                                    equipmentId = effectiveEqId,
+                                    equipmentName = osEqName.ifBlank { "Equipamento da O.S." },
+                                    equipmentBrand = doc.getString("equipmentBrand")?.takeIf { it.isNotBlank() },
+                                    equipmentBtus = doc.getString("equipmentBtus")?.takeIf { it.isNotBlank() },
+                                    equipmentSector = doc.getString("equipmentSector")?.takeIf { it.isNotBlank() } ?: "Geral",
+                                    equipmentPatrimony = doc.getString("equipmentPatrimony")?.takeIf { it.isNotBlank() },
+                                    isChecked = effectiveStatus == "finalizada",
+                                    isSkipped = false,
+                                    notes = doc.getString("diagnosis")?.takeIf { it.isNotBlank() } ?: "",
+                                    isSynced = true
                                 )
                             )
                         }
                     }
                 }
+
+                Log.d(TAG, "O.S. sincronizadas do Firestore para $normTechName ($rawTechId): ${matchedOsDocs.size} de ${osCandidateMap.size} candidatas")
             } catch (e: Exception) {
-                Log.d(TAG, "Tentativa de leitura em serviceOrders (aviso): ${e.message}")
+                Log.w(TAG, "Tentativa de leitura em serviceOrders falhou: ${e.message}")
             }
 
-            if (ordersToSave.isNotEmpty()) {
+            if (preventiveServerQuerySucceeded && osServerQuerySucceeded) {
                 fetchSuccess = true
             }
         } catch (e: Exception) {
@@ -841,30 +985,32 @@ class ServiceOrderRepository(private val context: Context) {
                                     if (list.isNotEmpty()) saveOtherPhotosLocalOnly(orderId, list)
                                 }
 
-                                ordersToSave.add(
-                                    ServiceOrderEntity(
-                                        id = orderId,
-                                        osNumber = "PMOC-${recId.takeLast(4).uppercase()}",
-                                        originalId = recId,
-                                        clientId = clientId,
-                                        clientName = clientName,
-                                        addressId = addrId,
-                                        addressStreet = fullStreet,
-                                        addressCity = city,
-                                        plannedDate = rec.optString("plannedDate", targetDate),
-                                        status = status,
-                                        type = "MANUTENÇÃO PREVENTIVA",
-                                        technician1 = technicianName,
-                                        technician2 = rec.optString("technician2", null),
-                                        clientRepresentative = rec.optString("clientSigneeName", "").takeIf { it.isNotBlank() },
-                                        clientSigneeDoc = rec.optString("clientSigneeRegistration", "").takeIf { it.isNotBlank() },
-                                        clientSignatureDate = rec.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
-                                        completionDate = rec.optString("completionDate", "").takeIf { it.isNotBlank() },
-                                        generalNotes = apiRouteNotes,
-                                        isLockedForEdit = status == "finalizada",
-                                        isSyncedWithServer = true
+                                if (ordersToSave.none { it.id == orderId }) {
+                                    ordersToSave.add(
+                                        ServiceOrderEntity(
+                                            id = orderId,
+                                            osNumber = "PMOC-${recId.takeLast(4).uppercase()}",
+                                            originalId = recId,
+                                            clientId = clientId,
+                                            clientName = clientName,
+                                            addressId = addrId,
+                                            addressStreet = fullStreet,
+                                            addressCity = city,
+                                            plannedDate = rec.optString("plannedDate", targetDate),
+                                            status = status,
+                                            type = "MANUTENÇÃO PREVENTIVA",
+                                            technician1 = technicianName,
+                                            technician2 = rec.optString("technician2", null),
+                                            clientRepresentative = rec.optString("clientSigneeName", "").takeIf { it.isNotBlank() },
+                                            clientSigneeDoc = rec.optString("clientSigneeRegistration", "").takeIf { it.isNotBlank() },
+                                            clientSignatureDate = rec.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
+                                            completionDate = rec.optString("completionDate", "").takeIf { it.isNotBlank() },
+                                            generalNotes = apiRouteNotes,
+                                            isLockedForEdit = status == "finalizada",
+                                            isSyncedWithServer = true
+                                        )
                                     )
-                                )
+                                }
 
                                 val apiChecklistByEqId = mutableMapOf<String, JSONObject>()
                                 val apiChecklistArr = rec.optJSONArray("checklist")
@@ -962,36 +1108,64 @@ class ServiceOrderRepository(private val context: Context) {
                                     rawOsStatus == "pre_finalizada"
                                 val effectiveOsStatus = when {
                                     osTechFinalized || osAdminFinalized -> "finalizada"
-                                    rawOsStatus == "em_andamento" -> "em_andamento"
+                                    rawOsStatus == "em_andamento" || rawOsStatus == "em_atendimento" -> "em_andamento"
                                     else -> "aberta"
                                 }
 
-                                ordersToSave.add(
-                                    ServiceOrderEntity(
-                                        id = osId,
-                                        osNumber = os.optString("orderNumber", os.optString("osNumber", "OS-${osId.takeLast(4)}")),
-                                        originalId = osId,
-                                        clientId = clientId,
-                                        clientName = resolvedClientName,
-                                        addressId = addrId,
-                                        addressStreet = resolvedStreet,
-                                        plannedDate = os.optString("plannedDate", targetDate).ifBlank { targetDate },
-                                        status = effectiveOsStatus,
-                                        type = os.optString("type", "ORDEM DE SERVIÇO"),
-                                        technician1 = technicianName,
-                                        technician2 = os.optString("technician2", null),
-                                        clientRepresentative = os.optString("clientRepresentative", "").ifBlank { os.optString("clientSigneeName", "") }.takeIf { it.isNotBlank() },
-                                        clientSigneeDoc = os.optString("clientSigneeDoc", "").ifBlank { os.optString("clientSigneeRegistration", "") }.ifBlank { os.optString("clientRepresentativeMatricula", "") }.takeIf { it.isNotBlank() },
-                                        clientSignatureDate = os.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
-                                        completionDate = os.optString("techFinalizedAt", "").ifBlank { os.optString("completionDate", "") }.ifBlank { os.optString("finishedAt", "") }.takeIf { it.isNotBlank() },
-                                        generalNotes = os.optString("generalNotes", "").ifBlank { os.optString("description", "Atendimento Corretivo Solicitado") },
-                                        isLockedForEdit = effectiveOsStatus == "finalizada",
-                                        isSyncedWithServer = true
+                                if (ordersToSave.none { it.id == osId }) {
+                                    ordersToSave.add(
+                                        ServiceOrderEntity(
+                                            id = osId,
+                                            osNumber = os.optString("osNumber", "").ifBlank { os.optString("orderNumber", "OS-${osId.takeLast(4)}") },
+                                            originalId = osId,
+                                            clientId = clientId,
+                                            clientName = resolvedClientName,
+                                            addressId = addrId,
+                                            addressStreet = resolvedStreet,
+                                            plannedDate = os.optString("plannedDate", targetDate).ifBlank { targetDate },
+                                            status = effectiveOsStatus,
+                                            type = os.optString("type", "ORDEM DE SERVIÇO"),
+                                            technician1 = technicianName,
+                                            technician2 = os.optString("technician2", null),
+                                            clientRepresentative = os.optString("clientRepresentative", "").ifBlank { os.optString("clientSigneeName", "") }.takeIf { it.isNotBlank() },
+                                            clientSigneeDoc = os.optString("clientSigneeDoc", "").ifBlank { os.optString("clientSigneeRegistration", "") }.ifBlank { os.optString("clientRepresentativeMatricula", "") }.takeIf { it.isNotBlank() },
+                                            clientSignatureDate = os.optString("clientSignatureDate", "").takeIf { it.isNotBlank() },
+                                            completionDate = os.optString("techFinalizedAt", "").ifBlank { os.optString("completionDate", "") }.ifBlank { os.optString("finishedAt", "") }.takeIf { it.isNotBlank() },
+                                            generalNotes = os.optString("generalNotes", "").ifBlank { os.optString("description", "Atendimento Corretivo Solicitado") },
+                                            isLockedForEdit = effectiveOsStatus == "finalizada",
+                                            isSyncedWithServer = true
+                                        )
                                     )
-                                )
+                                }
+
+                                val apiOsEqId = os.optString("equipmentId", "").trim()
+                                val apiOsEqName = os.optString("equipmentName", "").trim()
+                                if (apiOsEqId.isNotBlank() || apiOsEqName.isNotBlank()) {
+                                    val effectiveEqId = apiOsEqId.ifBlank { "EQ_OS_${osId}" }
+                                    val checkId = "CHK_${osId}_${effectiveEqId}"
+                                    if (checklistToSave.none { it.id == checkId }) {
+                                        checklistToSave.add(
+                                            EquipmentChecklistEntity(
+                                                id = checkId,
+                                                orderId = osId,
+                                                equipmentId = effectiveEqId,
+                                                equipmentName = apiOsEqName.ifBlank { "Equipamento da O.S." },
+                                                equipmentBrand = os.optString("equipmentBrand", "").takeIf { it.isNotBlank() },
+                                                equipmentBtus = os.optString("equipmentBtus", "").takeIf { it.isNotBlank() },
+                                                equipmentSector = os.optString("equipmentSector", "").takeIf { it.isNotBlank() } ?: "Geral",
+                                                equipmentPatrimony = os.optString("equipmentPatrimony", "").takeIf { it.isNotBlank() },
+                                                isChecked = effectiveOsStatus == "finalizada",
+                                                isSkipped = false,
+                                                notes = os.optString("diagnosis", ""),
+                                                isSynced = true
+                                            )
+                                        )
+                                    }
+                                }
                             }
 
-                            serverQuerySucceeded = true
+                            preventiveServerQuerySucceeded = true
+                            osServerQuerySucceeded = true
                             fetchSuccess = true
                         }
                     }
@@ -1003,6 +1177,7 @@ class ServiceOrderRepository(private val context: Context) {
 
         // 3. Reconciliação inteligente com o banco Room:
         //    - Remove agendamentos que foram excluídos ou desvinculados pelo administrativo
+        //    - Só reconcilia preventivas se a consulta de preventivas teve sucesso, e só reconcilia O.S. se a consulta de serviceOrders teve sucesso!
         //    - Preserva 100% de trabalhos offline ainda não enviados na fila (incluindo QUARANTINED)
         val pendingTasks = syncDao.getAllUnfinishedTasks()
         val pendingRefIds = pendingTasks.map { it.referenceId }.toSet()
@@ -1016,11 +1191,13 @@ class ServiceOrderRepository(private val context: Context) {
             } catch (_: Exception) {}
         }
 
-        if (serverQuerySucceeded) {
+        if (preventiveServerQuerySucceeded || osServerQuerySucceeded) {
             val validServerOrderIds = ordersToSave.map { it.id }.toSet()
             val allLocalOrders = orderDao.getAllOrders()
             for (localOrder in allLocalOrders) {
-                if (localOrder.id !in validServerOrderIds) {
+                val isPrevOrder = localOrder.id.startsWith("PREV_")
+                val canReconcileThisOrder = if (isPrevOrder) preventiveServerQuerySucceeded else osServerQuerySucceeded
+                if (canReconcileThisOrder && localOrder.id !in validServerOrderIds) {
                     val hasPendingSync = localOrder.id in pendingOrderIds || !localOrder.isSyncedWithServer
                     // REGRA DE INTEGRIDADE ABSOLUTA:
                     // NUNCA apaga nenhum atendimento (preventivo ou corretivo) que possua alterações locais não enviadas!
@@ -1140,7 +1317,7 @@ class ServiceOrderRepository(private val context: Context) {
             checklistDao.insertAll(finalChecklistMap.values.toList())
         }
 
-            if (serverQuerySucceeded) {
+            if (preventiveServerQuerySucceeded && osServerQuerySucceeded) {
                 lastItinerarySyncAt = System.currentTimeMillis()
                 lastItinerarySyncKey = syncKey
             }

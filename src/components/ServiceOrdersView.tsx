@@ -760,6 +760,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
   const [batchIndex, setBatchIndex] = useState(-1);
   const [isSaving, setIsSaving] = useState(false);
   const [isSavingNext, setIsSavingNext] = useState(false);
+  const [nextOsFeedback, setNextOsFeedback] = useState<{ osNumber: string; count: number } | null>(null);
+  const formScrollContainerRef = useRef<HTMLFormElement | null>(null);
   
   // State do Formulário
   const [formId, setFormId] = useState('');
@@ -2257,6 +2259,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       responsibleOpeningName = loggedUserName || 'ADMINISTRADOR';
     }
 
+    setNextOsFeedback(null);
     setFormId('');
     setFormOsNumber('');
     setOriginalFormOsNumber('');
@@ -2724,7 +2727,8 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     finishedAtOverride?: string,
     moveNextBatch: boolean = false,
     isTechFinalize: boolean = false,
-    customOsNumber?: string
+    customOsNumber?: string,
+    continueSameAddress: boolean = false
   ) => {
     if (e) e.preventDefault();
 
@@ -2947,26 +2951,38 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
       })),
       totalValue,
       
-      technicianId: (() => {
-        if (formTechnicianId) return formTechnicianId;
-        if (formOpenedBy && formOpenedBy !== 'ADMIN' && formOpenedBy !== 'Administrativo') {
-          const matchOpener = technicians.find(t => 
-            t.id === formOpenedBy || 
+      ...(() => {
+        let resolvedTechId: string | undefined;
+        if (formTechnicianId) {
+          resolvedTechId = formTechnicianId;
+        } else if (formOpenedBy && formOpenedBy !== 'ADMIN' && formOpenedBy !== 'Administrativo') {
+          const matchOpener = technicians.find(t =>
+            t.id === formOpenedBy ||
             t.name.trim().toLowerCase() === formOpenedBy.trim().toLowerCase()
           );
-          if (matchOpener) return matchOpener.id;
-          return formOpenedBy;
-        }
-        if (userRole === UserRole.TECHNICIAN && userProfile?.name) {
-          const matchProfile = technicians.find(t => 
-            t.id === userProfile.uid || 
+          resolvedTechId = matchOpener ? matchOpener.id : formOpenedBy;
+        } else if (userRole === UserRole.TECHNICIAN && userProfile?.name) {
+          const matchProfile = technicians.find(t =>
+            t.id === userProfile.uid ||
             t.name.trim().toLowerCase() === userProfile.name.trim().toLowerCase()
           );
-          if (matchProfile) return matchProfile.id;
+          if (matchProfile) resolvedTechId = matchProfile.id;
         }
-        return undefined;
+
+        const resolvedTechObj = resolvedTechId
+          ? technicians.find(t => t.id === resolvedTechId || t.name.trim().toLowerCase() === resolvedTechId!.trim().toLowerCase())
+          : selectedTech;
+        const resolvedTechName = resolvedTechObj?.name?.trim().toUpperCase() || undefined;
+        const resolvedTech2Name = selectedTech2?.name?.trim().toUpperCase() || undefined;
+
+        return {
+          technicianId: resolvedTechId,
+          technician1: resolvedTechName,
+          technicianName: resolvedTechName,
+          technician2Id: formTechnician2Id || undefined,
+          technician2: resolvedTech2Name,
+        };
       })(),
-      technician2Id: formTechnician2Id || undefined,
       authenticatedTeam,
       clientRepresentative: formRepresentative ? formRepresentative.trim().toUpperCase() : undefined,
       clientRepresentativeMatricula: formRepresentativeMatricula ? formRepresentativeMatricula.trim().toUpperCase() : undefined,
@@ -2984,7 +3000,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
     };
 
     setIsSaving(true);
-    if (moveNextBatch) {
+    if (moveNextBatch || continueSameAddress) {
       setIsSavingNext(true);
     }
 
@@ -3078,7 +3094,44 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
         }
       }
       // ---------------------------------
+      // PRÓXIMA O.S. NO MESMO CLIENTE E ENDEREÇO
+      // Salva a O.S. atual e mantém o modal aberto preservando cliente, endereço e demais cabeçalhos,
+      // limpando Equipamento, Descrição, Diagnóstico, Solução, Serviços, Produtos e Imagens (+ ID/Nº para gerar nova O.S.)
+      // ---------------------------------
+      if (continueSameAddress) {
+        setSelectedOrder(null);
+        setCurrentDraftId(null);
+        setFormId('');
+        setFormOsNumber('');
+        setOriginalFormOsNumber('');
+        setFormOsNumberChanged(false);
+        setFormInitialOsNumber('');
+        setFormOsNumberChangedAt(null);
+        setFormOsNumberResetUsed(false);
+        setFormStatus('aberta');
 
+        // Limpa equipamento escolhido, descrição, diagnóstico, solução, serviços, produtos e imagens
+        setFormEquipmentId('');
+        setMachineIdSearchInput('');
+        setMachineSearchFeedback(null);
+        setFormDescription('');
+        setFormDiagnosis('');
+        setFormSolution('');
+        setFormServices([]);
+        setFormProducts([]);
+        setFormPhotos([]);
+
+        setNextOsFeedback(prev => ({
+          osNumber: finalOsNumber,
+          count: (prev?.count || 0) + 1
+        }));
+        if (formScrollContainerRef.current) {
+          formScrollContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+        return;
+      }
+
+      setNextOsFeedback(null);
       setIsFormOpen(false);
       if (userRole === UserRole.TECHNICIAN) {
         setTechActiveTab('my_orders');
@@ -8849,7 +8902,14 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                 )}
                 <button
                   type="button"
-                  onClick={() => userRole === UserRole.TECHNICIAN ? setTechActiveTab('my_orders') : setIsFormOpen(false)}
+                  onClick={() => {
+                    setNextOsFeedback(null);
+                    if (userRole === UserRole.TECHNICIAN) {
+                      setTechActiveTab('my_orders');
+                    } else {
+                      setIsFormOpen(false);
+                    }
+                  }}
                   className="p-1 text-slate-400 hover:bg-slate-200/60 hover:text-slate-800 rounded-lg transition-all cursor-pointer"
                 >
                   <X className="w-4 h-4" />
@@ -8858,7 +8918,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
             </div>
 
             {/* Conteúdo do Form */}
-            <form onSubmit={(e) => {
+            <form ref={formScrollContainerRef} onSubmit={(e) => {
               if (formStatus === 'cancelada') {
                 e.preventDefault();
                 alert('Esta Ordem de Serviço está cancelada. Para alterá-la ou salvá-la, um Administrador precisa reabri-la primeiro.');
@@ -8940,7 +9000,30 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
               {isSavingNext && (
                 <div className="bg-purple-50 border border-purple-200 text-purple-900 rounded-xl px-3 py-2 flex items-center gap-2.5 shadow-2xs animate-pulse text-xs">
                   <Loader2 className="w-4 h-4 animate-spin text-purple-700 shrink-0" />
-                  <span className="font-bold">Salvando e carregando próxima O.S. da fila...</span>
+                  <span className="font-bold">
+                    {batchIndex >= 0 && batchIndex < batchQueue.length - 1
+                      ? 'Salvando e carregando próxima O.S. da fila...'
+                      : 'Salvando O.S. e preparando a próxima para o mesmo cliente e endereço...'}
+                  </span>
+                </div>
+              )}
+              {/* Banner de Confirmação ao usar "Próxima" no mesmo cliente/endereço */}
+              {!isSavingNext && nextOsFeedback && (
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xl px-3 py-2 flex items-center justify-between gap-2.5 shadow-2xs text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span className="font-bold">
+                      O.S. #{nextOsFeedback.osNumber} salva com sucesso! ({nextOsFeedback.count} {nextOsFeedback.count === 1 ? 'criada' : 'criadas'} nesta sequência) — Escolha o próximo equipamento e preencha descrição/solução.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setNextOsFeedback(null)}
+                    className="p-0.5 text-emerald-600 hover:text-emerald-900 hover:bg-emerald-100 rounded transition-colors shrink-0 cursor-pointer"
+                    title="Fechar aviso"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               )}
               {/* Banner de Aviso para O.S. Cancelada */}
@@ -10780,7 +10863,10 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                     <>
                       <button
                         type="button"
-                        onClick={() => setIsFormOpen(false)}
+                        onClick={() => {
+                          setNextOsFeedback(null);
+                          setIsFormOpen(false);
+                        }}
                         disabled={isSaving}
                         className={cn(
                           "border text-xs font-black uppercase tracking-widest py-2.5 px-4 rounded-xl transition-all",
@@ -10827,7 +10913,7 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                         )}
                       </button>
                       
-                      {batchIndex >= 0 && batchIndex < batchQueue.length - 1 && (
+                      {batchIndex >= 0 && batchIndex < batchQueue.length - 1 ? (
                         <button
                           type="button"
                           onClick={(e) => handleSave(e, undefined, undefined, true)}
@@ -10844,6 +10930,31 @@ export default function ServiceOrdersView({ managerClientId, userRole, userProfi
                             <>
                               <Loader2 className="w-4 h-4 animate-spin text-white" />
                               <span>Salvando O.S...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span>Próxima</span>
+                              <ChevronRight className="w-4 h-4" />
+                            </>
+                          )}
+                        </button>
+                      ) : !selectedOrder && (
+                        <button
+                          type="button"
+                          onClick={(e) => handleSave(e, undefined, undefined, false, false, undefined, true)}
+                          disabled={isSaving || !canSaveOrder}
+                          className={cn(
+                            "text-white text-xs font-black uppercase tracking-widest py-2.5 px-5 rounded-xl transition-all shadow-md flex items-center gap-1.5",
+                            isSaving || !canSaveOrder
+                              ? "bg-purple-400 cursor-not-allowed opacity-60 pointer-events-none"
+                              : "bg-purple-600 hover:bg-purple-700 cursor-pointer active:scale-95"
+                          )}
+                          title="Salvar esta O.S. e manter o modal aberto para criar a próxima no mesmo cliente e endereço"
+                        >
+                          {isSavingNext ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin text-white" />
+                              <span>Salvando...</span>
                             </>
                           ) : (
                             <>
