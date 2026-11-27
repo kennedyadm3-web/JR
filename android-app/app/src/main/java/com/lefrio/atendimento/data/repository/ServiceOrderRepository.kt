@@ -807,6 +807,22 @@ class ServiceOrderRepository(private val context: Context) {
                         )
                     }
 
+                    // Persiste os campos estruturados da O.S. do servidor (preservando edições locais ainda não sincronizadas)
+                    mergeServerOrderFormDetails(
+                        orderId = doc.id,
+                        description = doc.getString("description").orEmpty(),
+                        diagnosis = doc.getString("diagnosis").orEmpty(),
+                        solution = doc.getString("solution").orEmpty(),
+                        technicalReport = doc.getString("internalNotes")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("technicalReport")?.takeIf { it.isNotBlank() }
+                            ?: doc.getString("routeNotes").orEmpty(),
+                        equipmentId = doc.getString("equipmentId").orEmpty(),
+                        equipmentName = doc.getString("equipmentName").orEmpty(),
+                        equipmentBrand = doc.getString("equipmentBrand").orEmpty(),
+                        equipmentBtus = doc.getString("equipmentBtus").orEmpty(),
+                        equipmentSector = doc.getString("equipmentSector").orEmpty()
+                    )
+
                     // Se a O.S. criada pelo administrativo já possui equipamento vinculado, garante item no checklist da tela de detalhes
                     val osEqId = doc.getString("equipmentId")?.trim().orEmpty()
                     val osEqName = doc.getString("equipmentName")?.trim().orEmpty()
@@ -1138,6 +1154,21 @@ class ServiceOrderRepository(private val context: Context) {
                                     )
                                 }
 
+                                mergeServerOrderFormDetails(
+                                    orderId = osId,
+                                    description = os.optString("description", ""),
+                                    diagnosis = os.optString("diagnosis", ""),
+                                    solution = os.optString("solution", ""),
+                                    technicalReport = os.optString("internalNotes", "")
+                                        .ifBlank { os.optString("technicalReport", "") }
+                                        .ifBlank { os.optString("routeNotes", "") },
+                                    equipmentId = os.optString("equipmentId", ""),
+                                    equipmentName = os.optString("equipmentName", ""),
+                                    equipmentBrand = os.optString("equipmentBrand", ""),
+                                    equipmentBtus = os.optString("equipmentBtus", ""),
+                                    equipmentSector = os.optString("equipmentSector", "")
+                                )
+
                                 val apiOsEqId = os.optString("equipmentId", "").trim()
                                 val apiOsEqName = os.optString("equipmentName", "").trim()
                                 if (apiOsEqId.isNotBlank() || apiOsEqName.isNotBlank()) {
@@ -1374,6 +1405,291 @@ class ServiceOrderRepository(private val context: Context) {
             .putString("fiscal_role_$orderId", role)
             .putString("fiscal_contact_$orderId", contact)
             .apply()
+    }
+
+    private fun buildEquipmentDisplayLabel(
+        name: String,
+        sector: String,
+        brand: String,
+        btus: String
+    ): String {
+        val sectorStr = sector.trim().takeIf { it.isNotBlank() }
+        val brandStr = brand.trim().takeIf { it.isNotBlank() }
+        val btuStr = btus.trim().takeIf { it.isNotBlank() }?.let { raw ->
+            if (raw.contains("BTU", ignoreCase = true)) raw else "$raw BTUs"
+        }
+        val summary = listOfNotNull(sectorStr, brandStr, btuStr)
+            .joinToString(" • ")
+            .uppercase(Locale.getDefault())
+        return summary.ifBlank { name.trim().uppercase(Locale.getDefault()) }
+    }
+
+    private fun saveOrderFormDetailsLocal(
+        orderId: String,
+        description: String,
+        diagnosis: String,
+        solution: String,
+        technicalReport: String,
+        equipmentId: String,
+        equipmentName: String,
+        equipmentBrand: String,
+        equipmentBtus: String,
+        equipmentSector: String
+    ) {
+        val json = JSONObject().apply {
+            put("description", description.trim())
+            put("diagnosis", diagnosis.trim())
+            put("solution", solution.trim())
+            put("technicalReport", technicalReport.trim())
+            put("equipmentId", equipmentId.trim())
+            put("equipmentName", equipmentName.trim())
+            put("equipmentBrand", equipmentBrand.trim())
+            put("equipmentBtus", equipmentBtus.trim())
+            put("equipmentSector", equipmentSector.trim())
+        }
+        extrasPrefs.edit().putString("os_form_details_$orderId", json.toString()).apply()
+    }
+
+    private fun mergeServerOrderFormDetails(
+        orderId: String,
+        description: String,
+        diagnosis: String,
+        solution: String,
+        technicalReport: String,
+        equipmentId: String,
+        equipmentName: String,
+        equipmentBrand: String,
+        equipmentBtus: String,
+        equipmentSector: String
+    ) {
+        val existingRaw = extrasPrefs.getString("os_form_details_$orderId", null)
+        val existingJson = try {
+            if (!existingRaw.isNullOrBlank()) JSONObject(existingRaw) else null
+        } catch (_: Exception) {
+            null
+        }
+        val mergedDesc = existingJson?.optString("description", "")?.takeIf { it.isNotBlank() } ?: description.trim()
+        val mergedDiag = existingJson?.optString("diagnosis", "")?.takeIf { it.isNotBlank() } ?: diagnosis.trim()
+        val mergedSol = existingJson?.optString("solution", "")?.takeIf { it.isNotBlank() } ?: solution.trim()
+        val mergedReport = existingJson?.optString("technicalReport", "")?.takeIf { it.isNotBlank() } ?: technicalReport.trim()
+        val mergedEqId = existingJson?.optString("equipmentId", "")?.takeIf { it.isNotBlank() } ?: equipmentId.trim()
+        val mergedEqName = existingJson?.optString("equipmentName", "")?.takeIf { it.isNotBlank() } ?: equipmentName.trim()
+        val mergedEqBrand = existingJson?.optString("equipmentBrand", "")?.takeIf { it.isNotBlank() } ?: equipmentBrand.trim()
+        val mergedEqBtus = existingJson?.optString("equipmentBtus", "")?.takeIf { it.isNotBlank() } ?: equipmentBtus.trim()
+        val mergedEqSector = existingJson?.optString("equipmentSector", "")?.takeIf { it.isNotBlank() } ?: equipmentSector.trim()
+
+        saveOrderFormDetailsLocal(
+            orderId = orderId,
+            description = mergedDesc,
+            diagnosis = mergedDiag,
+            solution = mergedSol,
+            technicalReport = mergedReport,
+            equipmentId = mergedEqId,
+            equipmentName = mergedEqName,
+            equipmentBrand = mergedEqBrand,
+            equipmentBtus = mergedEqBtus,
+            equipmentSector = mergedEqSector
+        )
+    }
+
+    private fun getOrderFormDetailsJson(orderId: String): JSONObject? {
+        val raw = extrasPrefs.getString("os_form_details_$orderId", null) ?: return null
+        return try {
+            JSONObject(raw)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun getServiceOrderFormDetails(orderId: String): ServiceOrderFormDetails? = withContext(Dispatchers.IO) {
+        val order = orderDao.getOrderById(orderId) ?: return@withContext null
+        val firstChecklist = checklistDao.getChecklistForOrder(orderId).firstOrNull()
+        val savedJson = getOrderFormDetailsJson(orderId)
+        val (savedRole, savedContact) = getFiscalExtraDraft(orderId)
+        val savedPhotos = getOtherPhotos(orderId)
+
+        val eqId = savedJson?.optString("equipmentId", "").orEmpty()
+            .ifBlank { firstChecklist?.equipmentId.orEmpty() }
+        val eqName = savedJson?.optString("equipmentName", "").orEmpty()
+            .ifBlank { firstChecklist?.equipmentName.orEmpty() }
+        val eqBrand = savedJson?.optString("equipmentBrand", "").orEmpty()
+            .ifBlank { firstChecklist?.equipmentBrand.orEmpty() }
+        val eqBtus = savedJson?.optString("equipmentBtus", "").orEmpty()
+            .ifBlank { firstChecklist?.equipmentBtus.orEmpty() }
+        val eqSector = savedJson?.optString("equipmentSector", "").orEmpty()
+            .ifBlank { firstChecklist?.equipmentSector.orEmpty() }
+
+        val rawNotes = order.generalNotes?.trim().orEmpty()
+        val cleanFallbackDescription = when {
+            rawNotes.isBlank() || rawNotes == "Atendimento Corretivo Solicitado" -> ""
+            rawNotes.contains("MOTIVO / DESCRIÇÃO:") -> rawNotes.substringAfter("MOTIVO / DESCRIÇÃO:").substringBefore("\n").trim()
+            else -> rawNotes
+        }
+        val desc = savedJson?.optString("description", "").orEmpty().ifBlank { cleanFallbackDescription }
+        val diag = savedJson?.optString("diagnosis", "").orEmpty()
+            .ifBlank {
+                if (rawNotes.contains("DIAGNÓSTICO DA MÁQUINA:")) {
+                    rawNotes.substringAfter("DIAGNÓSTICO DA MÁQUINA:").substringBefore("\n").trim()
+                } else {
+                    firstChecklist?.notes.orEmpty()
+                }
+            }
+        val sol = savedJson?.optString("solution", "").orEmpty()
+            .ifBlank {
+                if (rawNotes.contains("SOLUÇÃO APLICADA:")) {
+                    rawNotes.substringAfter("SOLUÇÃO APLICADA:").substringBefore("\n").trim()
+                } else ""
+            }
+        val report = savedJson?.optString("technicalReport", "").orEmpty()
+            .ifBlank {
+                if (rawNotes.contains("OBSERVAÇÃO INTERNA:")) {
+                    rawNotes.substringAfter("OBSERVAÇÃO INTERNA:").trim()
+                } else ""
+            }
+
+        ServiceOrderFormDetails(
+            orderId = order.id,
+            osNumber = order.osNumber,
+            clientId = order.clientId,
+            clientName = order.clientName,
+            addressId = order.addressId,
+            addressStreet = order.addressStreet,
+            equipmentId = eqId,
+            equipmentName = eqName,
+            equipmentDisplay = buildEquipmentDisplayLabel(eqName, eqSector, eqBrand, eqBtus),
+            equipmentBrand = eqBrand,
+            equipmentBtus = eqBtus,
+            equipmentSector = eqSector,
+            description = desc.uppercase(Locale.getDefault()),
+            diagnosis = diag.uppercase(Locale.getDefault()),
+            solution = sol.uppercase(Locale.getDefault()),
+            technicalReport = report.uppercase(Locale.getDefault()),
+            fiscalName = order.clientRepresentative.orEmpty().uppercase(Locale.getDefault()),
+            fiscalRegistration = order.clientSigneeDoc.orEmpty().uppercase(Locale.getDefault()),
+            fiscalRole = savedRole.uppercase(Locale.getDefault()),
+            fiscalContact = savedContact.uppercase(Locale.getDefault()),
+            photoPaths = savedPhotos
+        )
+    }
+
+    suspend fun saveExistingOrderProgress(details: ServiceOrderFormDetails) = withContext(Dispatchers.IO) {
+        val existing = orderDao.getOrderById(details.orderId) ?: return@withContext
+        val now = System.currentTimeMillis()
+        val cleanPhotos = details.photoPaths.map { it.trim() }.filter { it.isNotBlank() }.distinct().take(4)
+
+        saveOrderFormDetailsLocal(
+            orderId = details.orderId,
+            description = details.description.uppercase(Locale.getDefault()),
+            diagnosis = details.diagnosis.uppercase(Locale.getDefault()),
+            solution = details.solution.uppercase(Locale.getDefault()),
+            technicalReport = details.technicalReport.uppercase(Locale.getDefault()),
+            equipmentId = details.equipmentId,
+            equipmentName = details.equipmentName,
+            equipmentBrand = details.equipmentBrand,
+            equipmentBtus = details.equipmentBtus,
+            equipmentSector = details.equipmentSector
+        )
+        saveFiscalExtraDraft(
+            details.orderId,
+            details.fiscalRole.trim().uppercase(Locale.getDefault()),
+            details.fiscalContact.trim().uppercase(Locale.getDefault())
+        )
+        saveOtherPhotosLocalOnly(details.orderId, cleanPhotos)
+
+        val formattedNotes = buildString {
+            if (details.description.isNotBlank()) {
+                append("MOTIVO / DESCRIÇÃO: ${details.description.trim().uppercase(Locale.getDefault())}")
+            }
+            if (details.diagnosis.isNotBlank()) {
+                if (isNotEmpty()) append("\n")
+                append("DIAGNÓSTICO DA MÁQUINA: ${details.diagnosis.trim().uppercase(Locale.getDefault())}")
+            }
+            if (details.solution.isNotBlank()) {
+                if (isNotEmpty()) append("\n")
+                append("SOLUÇÃO APLICADA: ${details.solution.trim().uppercase(Locale.getDefault())}")
+            }
+            if (details.technicalReport.isNotBlank()) {
+                if (isNotEmpty()) append("\n")
+                append("OBSERVAÇÃO INTERNA: ${details.technicalReport.trim().uppercase(Locale.getDefault())}")
+            }
+        }.ifBlank { existing.generalNotes }
+
+        val updatedOrder = existing.copy(
+            clientId = details.clientId.ifBlank { existing.clientId },
+            clientName = details.clientName.ifBlank { existing.clientName },
+            addressId = details.addressId.ifBlank { existing.addressId },
+            addressStreet = details.addressStreet.ifBlank { existing.addressStreet },
+            status = if (existing.status == "aberta") "em_andamento" else existing.status,
+            clientRepresentative = details.fiscalName.trim().uppercase(Locale.getDefault()).ifBlank { existing.clientRepresentative },
+            clientSigneeDoc = details.fiscalRegistration.trim().uppercase(Locale.getDefault()).ifBlank { existing.clientSigneeDoc },
+            generalNotes = formattedNotes,
+            isSyncedWithServer = false,
+            lastModifiedAt = now
+        )
+        orderDao.insertOrUpdate(updatedOrder)
+
+        if (details.equipmentId.isNotBlank() || details.equipmentName.isNotBlank()) {
+            val eqId = details.equipmentId.ifBlank { "EQ_OS_${details.orderId}" }
+            val checkId = "CHK_${details.orderId}_${eqId}"
+            val existingChecklist = checklistDao.getChecklistForOrder(details.orderId).firstOrNull()
+            checklistDao.insertOrUpdate(
+                EquipmentChecklistEntity(
+                    id = existingChecklist?.id ?: checkId,
+                    orderId = details.orderId,
+                    equipmentId = eqId,
+                    equipmentName = details.equipmentName.ifBlank { "Equipamento da O.S." },
+                    equipmentBrand = details.equipmentBrand.takeIf { it.isNotBlank() },
+                    equipmentBtus = details.equipmentBtus.takeIf { it.isNotBlank() },
+                    equipmentSector = details.equipmentSector.takeIf { it.isNotBlank() } ?: "Geral",
+                    isChecked = existingChecklist?.isChecked ?: false,
+                    isSkipped = false,
+                    notes = details.diagnosis.trim().uppercase(Locale.getDefault()),
+                    localPhotoPathsJson = JSONArray(cleanPhotos).toString(),
+                    isSynced = false,
+                    updatedAt = now
+                )
+            )
+        }
+    }
+
+    suspend fun updateAndFinalizeExistingOrder(
+        details: ServiceOrderFormDetails,
+        signaturePath: String,
+        signatureBase64: String?,
+        latitude: Double = 0.0,
+        longitude: Double = 0.0,
+        accuracy: Float = 0f
+    ): Boolean = withContext(Dispatchers.IO) {
+        saveExistingOrderProgress(details)
+
+        val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date())
+
+        val currentChecklist = checklistDao.getChecklistForOrder(details.orderId).map { item ->
+            item.copy(isChecked = true, isSkipped = false, checkedAt = nowIso, isSynced = false)
+        }
+        if (currentChecklist.isNotEmpty()) {
+            checklistDao.insertAll(currentChecklist)
+        }
+
+        finalizeServiceOrder(
+            orderId = details.orderId,
+            signeeName = details.fiscalName.trim().uppercase(Locale.getDefault()),
+            signeeDoc = details.fiscalRegistration.trim().uppercase(Locale.getDefault()),
+            signeeRole = details.fiscalRole.trim().uppercase(Locale.getDefault()),
+            signeeContact = details.fiscalContact.trim().uppercase(Locale.getDefault()),
+            signatureDate = nowIso,
+            signatureFilePath = signaturePath,
+            completionDate = nowIso,
+            latitude = latitude,
+            longitude = longitude,
+            accuracy = accuracy,
+            signatureBase64 = signatureBase64,
+            checklistItems = currentChecklist,
+            routeNotes = null,
+            otherPhotoPaths = details.photoPaths
+        )
     }
 
     /**
@@ -1635,7 +1951,7 @@ class ServiceOrderRepository(private val context: Context) {
         otherPhotoPaths: List<String>? = null
     ): Boolean = withContext(Dispatchers.IO) {
         val existingOrder = orderDao.getOrderById(orderId)
-        val isPreventive = existingOrder?.type?.contains("PREVENTIVA", ignoreCase = true) == true || orderId.startsWith("PREV_")
+        val isPreventive = orderId.startsWith("PREV_")
         val originalRecordId = existingOrder?.originalId ?: orderId.removePrefix("PREV_")
         val addressId = existingOrder?.addressId ?: ""
         val plannedDate = existingOrder?.plannedDate ?: ""
@@ -1658,6 +1974,8 @@ class ServiceOrderRepository(private val context: Context) {
         } else {
             checklistDao.getChecklistForOrder(orderId)
         }
+
+        val savedOsForm = if (!isPreventive) getOrderFormDetailsJson(orderId) else null
 
         // 1. PERSISTÊNCIA LOCAL IMEDIATA E ATÔMICA NO SQLITE (ROOM) — NUNCA DEPENDE DE INTERNET!
         orderDao.updateGeneralNotes(orderId, effectiveRouteNotes)
@@ -1715,6 +2033,7 @@ class ServiceOrderRepository(private val context: Context) {
             put("completionAccuracy", accuracy.toDouble())
             put("isPreventive", isPreventive)
             put("originalRecordId", originalRecordId)
+            put("clientId", existingOrder?.clientId ?: "")
             put("addressId", addressId)
             put("month", month)
             put("technician1", existingOrder?.technician1 ?: "")
@@ -1726,6 +2045,17 @@ class ServiceOrderRepository(private val context: Context) {
             put("routeNotes", effectiveRouteNotes)
             put("otherPhotoPaths", JSONArray(effectiveOtherPhotos))
             put("checklist", checklistArr)
+            if (savedOsForm != null) {
+                put("description", savedOsForm.optString("description", ""))
+                put("diagnosis", savedOsForm.optString("diagnosis", ""))
+                put("solution", savedOsForm.optString("solution", ""))
+                put("technicalReport", savedOsForm.optString("technicalReport", ""))
+                put("equipmentId", savedOsForm.optString("equipmentId", ""))
+                put("equipmentName", savedOsForm.optString("equipmentName", ""))
+                put("equipmentBrand", savedOsForm.optString("equipmentBrand", ""))
+                put("equipmentBtus", savedOsForm.optString("equipmentBtus", ""))
+                put("equipmentSector", savedOsForm.optString("equipmentSector", ""))
+            }
             if (!signatureBase64.isNullOrBlank()) {
                 put("clientSignature", signatureBase64)
             }
@@ -2324,4 +2654,28 @@ data class EquipmentOption(
     val brand: String? = null,
     val sector: String? = null,
     val btu: String? = null
+)
+
+data class ServiceOrderFormDetails(
+    val orderId: String,
+    val osNumber: String = "",
+    val clientId: String = "",
+    val clientName: String = "",
+    val addressId: String = "",
+    val addressStreet: String = "",
+    val equipmentId: String = "",
+    val equipmentName: String = "",
+    val equipmentDisplay: String = "",
+    val equipmentBrand: String = "",
+    val equipmentBtus: String = "",
+    val equipmentSector: String = "",
+    val description: String = "",
+    val diagnosis: String = "",
+    val solution: String = "",
+    val technicalReport: String = "",
+    val fiscalName: String = "",
+    val fiscalRegistration: String = "",
+    val fiscalRole: String = "",
+    val fiscalContact: String = "",
+    val photoPaths: List<String> = emptyList()
 )

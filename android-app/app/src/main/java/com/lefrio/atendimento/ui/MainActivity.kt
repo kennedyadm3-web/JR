@@ -31,6 +31,7 @@ import androidx.compose.material3.rememberDrawerState
 import com.lefrio.atendimento.data.local.LocalServiceOrderDraft
 import com.lefrio.atendimento.data.local.entity.ServiceOrderEntity
 import com.lefrio.atendimento.data.local.entity.TechnicianEntity
+import com.lefrio.atendimento.data.repository.ServiceOrderFormDetails
 import com.lefrio.atendimento.ui.components.AppDrawerContent
 import com.lefrio.atendimento.ui.components.DrawerDestination
 import com.lefrio.atendimento.ui.serviceorders.BatchSignatureScreen
@@ -204,6 +205,7 @@ class MainActivity : ComponentActivity() {
                             var currentDestination by remember { mutableStateOf(DrawerDestination.ROTEIRO) }
                             var showCreateOrderScreen by remember { mutableStateOf(false) }
                             var editingDraft by remember { mutableStateOf<LocalServiceOrderDraft?>(null) }
+                            var editingExistingOrder by remember { mutableStateOf<ServiceOrderFormDetails?>(null) }
                             var showBatchSignatureScreen by remember { mutableStateOf(false) }
                             var batchDraftsToSign by remember { mutableStateOf<List<LocalServiceOrderDraft>>(emptyList()) }
                             var batchOpenOrdersToSign by remember { mutableStateOf<List<ServiceOrderEntity>>(emptyList()) }
@@ -230,6 +232,7 @@ class MainActivity : ComponentActivity() {
                                                     currentDestination = DrawerDestination.ROTEIRO
                                                     showCreateOrderScreen = false
                                                     editingDraft = null
+                                                    editingExistingOrder = null
                                                     showBatchSignatureScreen = false
                                                     batchDraftsToSign = emptyList()
                                                     batchOpenOrdersToSign = emptyList()
@@ -243,6 +246,7 @@ class MainActivity : ComponentActivity() {
                                                     currentDestination = DrawerDestination.SERVICE_ORDERS
                                                     showCreateOrderScreen = false
                                                     editingDraft = null
+                                                    editingExistingOrder = null
                                                     showBatchSignatureScreen = false
                                                     batchDraftsToSign = emptyList()
                                                     batchOpenOrdersToSign = emptyList()
@@ -260,6 +264,7 @@ class MainActivity : ComponentActivity() {
                                                     signatureOrderId = null
                                                     summaryOrderId = null
                                                     editingDraft = null
+                                                    editingExistingOrder = null
                                                     showBatchSignatureScreen = false
                                                     batchDraftsToSign = emptyList()
                                                     batchOpenOrdersToSign = emptyList()
@@ -292,6 +297,7 @@ class MainActivity : ComponentActivity() {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            editingExistingOrder = null
                                             showBatchSignatureScreen = false
                                             batchDraftsToSign = emptyList()
                                             batchOpenOrdersToSign = emptyList()
@@ -326,6 +332,7 @@ class MainActivity : ComponentActivity() {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            editingExistingOrder = null
                                             showBatchSignatureScreen = false
                                             batchDraftsToSign = emptyList()
                                             batchOpenOrdersToSign = emptyList()
@@ -338,6 +345,7 @@ class MainActivity : ComponentActivity() {
                                             showProfileScreen = false
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            editingExistingOrder = null
                                             showBatchSignatureScreen = false
                                             batchDraftsToSign = emptyList()
                                             batchOpenOrdersToSign = emptyList()
@@ -422,18 +430,22 @@ class MainActivity : ComponentActivity() {
                                         user = state.user,
                                         viewModel = serviceOrdersViewModel,
                                         initialDraft = editingDraft,
+                                        existingOrder = editingExistingOrder,
                                         onBackClick = {
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            editingExistingOrder = null
                                         },
                                         onDraftSaved = {
                                             showCreateOrderScreen = false
                                             editingDraft = null
+                                            editingExistingOrder = null
                                         },
                                         onOrderCreated = { createdId ->
                                             showCreateOrderScreen = false
                                             editingDraft = null
-                                            selectedOrderId = createdId
+                                            editingExistingOrder = null
+                                            summaryOrderId = createdId
                                         }
                                     )
                                 } else if (currentDestination == DrawerDestination.SERVICE_ORDERS) {
@@ -444,9 +456,25 @@ class MainActivity : ComponentActivity() {
                                             scope.launch { drawerState.open() }
                                         },
                                         onOrderClick = { orderId ->
-                                            selectedOrderId = orderId
+                                            val clickedOrder = serviceOrdersViewModel.uiState.value.orders.find { it.id == orderId }
+                                            val isFinished = clickedOrder?.status == "finalizada" || clickedOrder?.status == "pre_finalizada"
+                                            if (isFinished) {
+                                                summaryOrderId = orderId
+                                            } else {
+                                                scope.launch {
+                                                    val details = serviceOrdersViewModel.getOrderFormDetails(orderId)
+                                                    if (details != null) {
+                                                        editingDraft = null
+                                                        editingExistingOrder = details
+                                                        showCreateOrderScreen = true
+                                                    } else {
+                                                        selectedOrderId = orderId
+                                                    }
+                                                }
+                                            }
                                         },
                                         onDraftClick = { draft ->
+                                            editingExistingOrder = null
                                             editingDraft = draft
                                             showCreateOrderScreen = true
                                         },
@@ -457,6 +485,7 @@ class MainActivity : ComponentActivity() {
                                         },
                                         onNewOrderClick = {
                                             editingDraft = null
+                                            editingExistingOrder = null
                                             showCreateOrderScreen = true
                                         },
                                         onProfileClick = {

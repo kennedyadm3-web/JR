@@ -404,6 +404,57 @@ class ServiceOrdersViewModel(
         }
     }
 
+    suspend fun getOrderFormDetails(orderId: String): ServiceOrderFormDetails? {
+        return repository.getServiceOrderFormDetails(orderId)
+    }
+
+    fun saveExistingOrderProgress(
+        details: ServiceOrderFormDetails,
+        onSaved: () -> Unit = {},
+        onError: (String) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                repository.saveExistingOrderProgress(details)
+                onSaved()
+            } catch (e: Exception) {
+                onError(e.message ?: "Não foi possível salvar os dados da O.S. no dispositivo.")
+            }
+        }
+    }
+
+    fun finalizeExistingServiceOrder(
+        details: ServiceOrderFormDetails,
+        signaturePath: String,
+        signatureBase64: String?,
+        latitude: Double = 0.0,
+        longitude: Double = 0.0,
+        accuracy: Float = 0f,
+        onSuccess: (orderId: String) -> Unit,
+        onError: (message: String) -> Unit
+    ) {
+        viewModelScope.launch {
+            try {
+                repository.updateAndFinalizeExistingOrder(
+                    details = details,
+                    signaturePath = signaturePath,
+                    signatureBase64 = signatureBase64,
+                    latitude = latitude,
+                    longitude = longitude,
+                    accuracy = accuracy
+                )
+                onSuccess(details.orderId)
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        FirebaseSyncManager(getApplication()).processPendingSyncQueue(ignoreBackoff = true)
+                    } catch (_: Exception) {}
+                }
+            } catch (e: Exception) {
+                onError(e.message ?: "Erro ao finalizar Ordem de Serviço")
+            }
+        }
+    }
+
     fun triggerSync(forceRefresh: Boolean = true) {
         viewModelScope.launch {
             _uiState.update { it.copy(isSyncing = true) }

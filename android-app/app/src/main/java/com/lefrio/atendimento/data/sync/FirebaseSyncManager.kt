@@ -703,18 +703,57 @@ class FirebaseSyncManager(private val context: Context) {
                         )
                     }
                 } else {
-                    // FLUXO DE ORDEM DE SERVIÇO CORRETIVA: atualiza em 'serviceOrders'
+                    // FLUXO DE ORDEM DE SERVIÇO CORRETIVA / ENCAMINHADA PELO ADMINISTRATIVO: atualiza em 'serviceOrders'
                     val effectiveFinDate = if (completionDate.isNotBlank()) completionDate else nowIso
                     val effectiveSigDate = if (clientSignatureDate.isNotBlank()) clientSignatureDate else nowIso
+                    val osDescription = payload.optString("description", "").trim().uppercase()
+                    val osDiagnosis = payload.optString("diagnosis", "").trim().uppercase()
+                    val osSolution = payload.optString("solution", "").trim().uppercase()
+                    val osTechReport = if (payload.has("technicalReport")) {
+                        payload.optString("technicalReport", "").trim().uppercase()
+                    } else {
+                        routeNotes.trim().uppercase()
+                    }
+                    val osEquipmentId = payload.optString("equipmentId", "").trim()
+                    val osEquipmentName = payload.optString("equipmentName", "").trim()
+                    val osEquipmentBrand = payload.optString("equipmentBrand", "").trim().uppercase()
+                    val osEquipmentBtus = payload.optString("equipmentBtus", "").trim().uppercase()
+                    val osEquipmentSector = payload.optString("equipmentSector", "").trim().uppercase()
+                    val osClientId = payload.optString("clientId", "").trim()
+                    val osAddressId = payload.optString("addressId", "").trim()
+
+                    val hasExternalMedia = encodedOtherPhotos.isNotEmpty() || clientSignature.isNotBlank()
+                    var mediaExternalized = false
+                    if (hasExternalMedia) {
+                        try {
+                            val mediaMap = hashMapOf<String, Any>(
+                                "photos" to encodedOtherPhotos,
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            )
+                            if (clientSignature.isNotBlank()) {
+                                mediaMap["clientSignature"] = clientSignature
+                            }
+                            withTimeout(25_000L) {
+                                firestore.collection("serviceOrders").document(orderId)
+                                    .collection("media").document("attachments")
+                                    .set(mediaMap, SetOptions.merge())
+                                    .await()
+                            }
+                            mediaExternalized = true
+                        } catch (mediaErr: Exception) {
+                            Log.w(TAG, "Fallback para gravação inline da mídia na O.S. $orderId: ${mediaErr.message}")
+                        }
+                    }
+
                     val finalizeMap = hashMapOf<String, Any>(
                         "status" to "aberta",
-                        "clientRepresentative" to clientRepresentative,
-                        "clientRepresentativeMatricula" to clientSigneeDoc,
+                        "clientRepresentative" to clientRepresentative.uppercase(),
+                        "clientRepresentativeMatricula" to clientSigneeDoc.uppercase(),
                         "clientRepresentativeRole" to clientSigneeRole,
                         "clientRepresentativeContact" to clientSigneeContact,
-                        "clientSigneeName" to clientRepresentative,
-                        "clientSigneeDoc" to clientSigneeDoc,
-                        "clientSigneeRegistration" to clientSigneeDoc,
+                        "clientSigneeName" to clientRepresentative.uppercase(),
+                        "clientSigneeDoc" to clientSigneeDoc.uppercase(),
+                        "clientSigneeRegistration" to clientSigneeDoc.uppercase(),
                         "clientSigneeRole" to clientSigneeRole,
                         "clientSigneeContact" to clientSigneeContact,
                         "clientSignatureDate" to effectiveSigDate,
@@ -723,21 +762,36 @@ class FirebaseSyncManager(private val context: Context) {
                         "techFinalizedAt" to effectiveFinDate,
                         "techFinalized" to true,
                         "adminFinalized" to false,
-                        "clientSignature" to clientSignature,
                         "hasClientSignature" to clientSignature.isNotBlank(),
                         "generalNotes" to routeNotes,
-                        "technicalReport" to routeNotes,
-                        "routeNotes" to routeNotes,
-                        "otherPhotos" to encodedOtherPhotos,
-                        "photos" to encodedOtherPhotos,
+                        "internalNotes" to osTechReport,
+                        "technicalReport" to osTechReport,
+                        "routeNotes" to osTechReport,
                         "photoCount" to encodedOtherPhotos.size,
-                        "mediaExternalized" to false,
+                        "mediaExternalized" to mediaExternalized,
                         "completionLatitude" to completionLatitude,
                         "completionLongitude" to completionLongitude,
                         "completionAccuracy" to completionAccuracy,
                         "isLockedForTech" to true,
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
+                    if (!mediaExternalized) {
+                        finalizeMap["clientSignature"] = clientSignature
+                        finalizeMap["otherPhotos"] = encodedOtherPhotos
+                        finalizeMap["photos"] = encodedOtherPhotos
+                    }
+                    if (osDescription.isNotBlank()) finalizeMap["description"] = osDescription
+                    if (osDiagnosis.isNotBlank()) finalizeMap["diagnosis"] = osDiagnosis
+                    if (osSolution.isNotBlank()) finalizeMap["solution"] = osSolution
+                    if (osEquipmentId.isNotBlank()) finalizeMap["equipmentId"] = osEquipmentId
+                    if (osEquipmentName.isNotBlank()) finalizeMap["equipmentName"] = osEquipmentName
+                    if (osEquipmentBrand.isNotBlank()) finalizeMap["equipmentBrand"] = osEquipmentBrand
+                    if (osEquipmentBtus.isNotBlank()) finalizeMap["equipmentBtus"] = osEquipmentBtus
+                    if (osEquipmentSector.isNotBlank()) finalizeMap["equipmentSector"] = osEquipmentSector
+                    if (osClientId.isNotBlank()) finalizeMap["clientId"] = osClientId
+                    if (clientName.isNotBlank() && clientName != "Cliente") finalizeMap["clientName"] = clientName
+                    if (osAddressId.isNotBlank()) finalizeMap["addressId"] = osAddressId
+                    if (addressStreet.isNotBlank() && addressStreet != "Endereço") finalizeMap["addressStreet"] = addressStreet
 
                     withTimeout(15_000L) {
                         firestore.collection("serviceOrders").document(orderId)
