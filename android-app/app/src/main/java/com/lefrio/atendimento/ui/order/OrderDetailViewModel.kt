@@ -344,6 +344,16 @@ class OrderDetailViewModel(
                     com.lefrio.atendimento.ui.signature.components.convertFileToBase64(java.io.File(signatureFilePath))
                 } else null
 
+                if (sigBase64.isNullOrBlank() || sigBase64.length <= 50) {
+                    _uiState.update {
+                        it.copy(
+                            isFinalizing = false,
+                            errorMessage = "Não foi possível gravar a imagem da Assinatura Digital. Por favor, assine novamente na tela."
+                        )
+                    }
+                    return@launch
+                }
+
                 // 3. Grava finalização no banco local Room e enfileira para sincronização
                 routeNotesSaveJob?.cancel()
                 val syncedNow = repository.finalizeServiceOrder(

@@ -47,6 +47,7 @@ data class ServiceOrdersUiState(
     val addresses: List<AddressOption> = emptyList(),
     val equipments: List<EquipmentOption> = emptyList(),
     val technicians: List<TechnicianEntity> = emptyList(),
+    val openOrderFormDetailsMap: Map<String, ServiceOrderFormDetails> = emptyMap(),
     val errorMessage: String? = null
 )
 
@@ -75,6 +76,11 @@ class ServiceOrdersViewModel(
                 technicianId = currentUser.uid,
                 date = todayStr
             ).collect { myOrdersForToday ->
+                val openIds = myOrdersForToday
+                    .filter { it.status != "finalizada" && it.status != "pre_finalizada" && it.status != "cancelada" }
+                    .map { it.id }
+                val formMap = repository.getServiceOrderFormDetailsMap(openIds)
+                _uiState.update { it.copy(openOrderFormDetailsMap = formMap) }
                 updateFilteredList(
                     orders = myOrdersForToday,
                     drafts = _uiState.value.drafts,
@@ -416,6 +422,11 @@ class ServiceOrdersViewModel(
         viewModelScope.launch {
             try {
                 repository.saveExistingOrderProgress(details)
+                val updatedMap = _uiState.value.openOrderFormDetailsMap.toMutableMap()
+                repository.getServiceOrderFormDetails(details.orderId)?.let {
+                    updatedMap[details.orderId] = it
+                }
+                _uiState.update { it.copy(openOrderFormDetailsMap = updatedMap) }
                 onSaved()
             } catch (e: Exception) {
                 onError(e.message ?: "Não foi possível salvar os dados da O.S. no dispositivo.")
@@ -508,6 +519,22 @@ class ServiceOrdersViewModel(
         return null
     }
 
+    fun validateOpenOrderDetailsForBatch(details: ServiceOrderFormDetails?): String? {
+        if (details == null) return "Dados da O.S. não carregados"
+        if (details.clientName.isBlank()) return "Cliente não selecionado"
+        if (details.addressStreet.isBlank()) return "Endereço não selecionado"
+        if (details.equipmentName.isBlank()) return "Máquina não selecionada"
+        if (details.description.isBlank()) return "Descrição do problema pendente"
+        if (details.diagnosis.isBlank()) return "Diagnóstico técnico pendente"
+        if (details.solution.isBlank()) return "Solução aplicada pendente"
+        return null
+    }
+
+    fun validateOpenOrderForBatch(order: ServiceOrderEntity): String? {
+        val details = _uiState.value.openOrderFormDetailsMap[order.id]
+        return validateOpenOrderDetailsForBatch(details)
+    }
+
     fun finalizeBatchOrders(
         drafts: List<LocalServiceOrderDraft>,
         openOrders: List<ServiceOrderEntity>,
@@ -529,6 +556,35 @@ class ServiceOrdersViewModel(
             if (total == 0) {
                 onError("Nenhuma O.S. selecionada para assinatura em lote.")
                 return@launch
+            }
+            if (fiscalName.trim().length < 4) {
+                onError("Informe o Nome Completo do fiscal / responsável (mínimo de 4 caracteres).")
+                return@launch
+            }
+            if (fiscalRegistration.trim().length < 3) {
+                onError("Informe a Matrícula / Documento do fiscal / responsável (mínimo de 3 caracteres).")
+                return@launch
+            }
+            if (signatureBase64.isNullOrBlank() || signatureBase64.trim().length <= 50 || signaturePath.isBlank()) {
+                onError("Assinatura Digital obrigatória não pôde ser validada. Assine novamente na tela.")
+                return@launch
+            }
+
+            // Defesa em profundidade: revalida preenchimento técnico de cada item antes de finalizar qualquer O.S.
+            for (draft in drafts) {
+                val reason = validateDraftForBatch(draft)
+                if (reason != null) {
+                    onError("A O.S. salva (${draft.equipmentDisplay.ifBlank { draft.clientName }}) está incompleta: $reason.")
+                    return@launch
+                }
+            }
+            for (order in openOrders) {
+                val freshDetails = repository.getServiceOrderFormDetails(order.id)
+                val reason = validateOpenOrderDetailsForBatch(freshDetails)
+                if (reason != null) {
+                    onError("A O.S. #${order.osNumber} está incompleta ($reason). Abra, preencha e salve antes de assinar em lote.")
+                    return@launch
+                }
             }
 
             var completed = 0
@@ -559,10 +615,10 @@ class ServiceOrdersViewModel(
                         diagnosis = draft.diagnosis.ifBlank { null },
                         solution = draft.solution.ifBlank { null },
                         technicalReport = draft.technicalReport.trim().ifBlank { null },
-                        fiscalName = fiscalName,
-                        fiscalRegistration = fiscalRegistration,
-                        fiscalRole = fiscalRole.ifBlank { null },
-                        fiscalContact = fiscalContact.ifBlank { null },
+                        fiscalName = fiscalName.trim().uppercase(Locale.getDefault()),
+                        fiscalRegistration = fiscalRegistration.trim().uppercase(Locale.getDefault()),
+                        fiscalRole = fiscalRole.trim().uppercase(Locale.getDefault()).ifBlank { null },
+                        fiscalContact = fiscalContact.trim().uppercase(Locale.getDefault()).ifBlank { null },
                         signaturePath = signaturePath,
                         signatureBase64 = signatureBase64,
                         photoPaths = draft.photoPaths,
@@ -580,22 +636,40 @@ class ServiceOrdersViewModel(
 
                 // 2. Finaliza cada O.S. já aberta/em andamento vinda do sistema administrativo
                 for (order in openOrders) {
-                    val checklistItems = repository.getChecklistForOrderSync(order.id)
-                    repository.finalizeServiceOrder(
-                        orderId = order.id,
-                        signeeName = fiscalName,
-                        signeeDoc = fiscalRegistration,
-                        signeeRole = fiscalRole,
-                        signeeContact = fiscalContact,
-                        signatureDate = nowIso,
-                        signatureFilePath = signaturePath,
-                        completionDate = nowIso,
-                        latitude = latitude,
-                        longitude = longitude,
-                        accuracy = accuracy,
-                        signatureBase64 = signatureBase64,
-                        checklistItems = checklistItems
-                    )
+                    val existingDetails = repository.getServiceOrderFormDetails(order.id)
+                    if (existingDetails != null) {
+                        repository.updateAndFinalizeExistingOrder(
+                            details = existingDetails.copy(
+                                fiscalName = fiscalName.trim().uppercase(Locale.getDefault()),
+                                fiscalRegistration = fiscalRegistration.trim().uppercase(Locale.getDefault()),
+                                fiscalRole = fiscalRole.trim().uppercase(Locale.getDefault()),
+                                fiscalContact = fiscalContact.trim().uppercase(Locale.getDefault())
+                            ),
+                            signaturePath = signaturePath,
+                            signatureBase64 = signatureBase64,
+                            latitude = latitude,
+                            longitude = longitude,
+                            accuracy = accuracy
+                        )
+                    } else {
+                        val checklistItems = repository.getChecklistForOrderSync(order.id)
+                        repository.finalizeServiceOrder(
+                            orderId = order.id,
+                            signeeName = fiscalName.trim().uppercase(Locale.getDefault()),
+                            signeeDoc = fiscalRegistration.trim().uppercase(Locale.getDefault()),
+                            signeeRole = fiscalRole.trim().uppercase(Locale.getDefault()),
+                            signeeContact = fiscalContact.trim().uppercase(Locale.getDefault()),
+                            signatureDate = nowIso,
+                            signatureFilePath = signaturePath,
+                            completionDate = nowIso,
+                            latitude = latitude,
+                            longitude = longitude,
+                            accuracy = accuracy,
+                            signatureBase64 = signatureBase64,
+                            checklistItems = checklistItems,
+                            otherPhotoPaths = repository.getOtherPhotos(order.id)
+                        )
+                    }
                     completed++
                     onProgress(completed, total)
                 }

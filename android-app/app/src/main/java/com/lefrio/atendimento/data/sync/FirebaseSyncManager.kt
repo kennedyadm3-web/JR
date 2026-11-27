@@ -526,6 +526,20 @@ class FirebaseSyncManager(private val context: Context) {
                     } else ""
                 }
 
+                // Trava de segurança na sincronização: nunca envia finalização sem nome, matrícula e assinatura do fiscal
+                val hasValidFiscalAndSig = clientRepresentative.trim().length >= 3 &&
+                    clientSigneeDoc.trim().length >= 2 &&
+                    clientSignature.trim().length > 50
+                if (!hasValidFiscalAndSig) {
+                    Log.e(
+                        TAG,
+                        "BLOQUEIO DE FINALIZAÇÃO INDEVIDA na fila para O.S. $orderId: " +
+                            "fiscal='${clientRepresentative.trim()}', doc='${clientSigneeDoc.trim()}', sigLen=${clientSignature.trim().length}"
+                    )
+                    db.serviceOrderDao().updateStatus(orderId, "em_andamento")
+                    return@withContext true
+                }
+
                 val completionLatitude = payload.optDouble("completionLatitude", 0.0)
                 val completionLongitude = payload.optDouble("completionLongitude", 0.0)
                 val completionAccuracy = payload.optDouble("completionAccuracy", 0.0)
@@ -846,7 +860,7 @@ class FirebaseSyncManager(private val context: Context) {
                 val techName = payload.optString("technician1", "").trim().ifBlank { "TÉCNICO" }.uppercase()
                 val clientName = payload.optString("clientName", "").trim().ifBlank { "Cliente" }
                 val addressStreet = payload.optString("addressStreet", "").trim().ifBlank { "Endereço" }
-                val isTechFinalized = payload.optBoolean("techFinalized", false)
+                val rawIsTechFinalized = payload.optBoolean("techFinalized", false)
                 val sigPath = payload.optString("clientSignaturePath", "")
                 val clientSig = payload.optString("clientSignature", "").ifBlank {
                     if (sigPath.isNotBlank()) {
@@ -860,12 +874,6 @@ class FirebaseSyncManager(private val context: Context) {
                 }.format(nowDate)
                 val displayBrDateTime = java.text.SimpleDateFormat("dd/MM/yyyy, HH:mm:ss", java.util.Locale.getDefault()).format(nowDate)
 
-                val openedAtIso = payload.optString("openedAt", "").trim().ifBlank { nowUtcIso }
-                val createdAtIso = payload.optString("createdAt", "").trim().ifBlank { openedAtIso }
-                val completionIso = payload.optString("completionDate", "").trim().ifBlank { if (isTechFinalized) nowUtcIso else "" }
-                val finishedIso = payload.optString("finishedAt", "").trim().ifBlank { completionIso }
-                val techFinalizedIso = payload.optString("techFinalizedAt", "").trim().ifBlank { completionIso }
-                val sigDateIso = payload.optString("clientSignatureDate", "").trim().ifBlank { if (isTechFinalized) nowUtcIso else "" }
                 val fiscalRep = payload.optString("clientRepresentative", "").trim()
                 val fiscalDoc = payload.optString("clientSigneeDoc", "").trim()
                     .ifBlank { payload.optString("clientSigneeRegistration", "").trim() }
@@ -875,6 +883,20 @@ class FirebaseSyncManager(private val context: Context) {
                     .ifBlank { payload.optString("clientSigneeContact", "").trim() }
                 val techReport = payload.optString("technicalReport", "").trim()
                     .ifBlank { payload.optString("routeNotes", "").trim() }
+
+                // Trava de segurança: só permite techFinalized=true se houver nome, matrícula e assinatura do fiscal válidos
+                val hasValidFiscalAndSig = fiscalRep.length >= 3 && fiscalDoc.length >= 2 && clientSig.trim().length > 50
+                val isTechFinalized = rawIsTechFinalized && hasValidFiscalAndSig
+                if (rawIsTechFinalized && !hasValidFiscalAndSig) {
+                    Log.e(TAG, "BLOQUEIO CREATE_SERVICE_ORDER $orderId: techFinalized rebaixado para aberta por falta de dados do fiscal/assinatura.")
+                }
+
+                val openedAtIso = payload.optString("openedAt", "").trim().ifBlank { nowUtcIso }
+                val createdAtIso = payload.optString("createdAt", "").trim().ifBlank { openedAtIso }
+                val completionIso = if (isTechFinalized) payload.optString("completionDate", "").trim().ifBlank { nowUtcIso } else ""
+                val finishedIso = if (isTechFinalized) payload.optString("finishedAt", "").trim().ifBlank { completionIso } else ""
+                val techFinalizedIso = if (isTechFinalized) payload.optString("techFinalizedAt", "").trim().ifBlank { completionIso } else ""
+                val sigDateIso = if (isTechFinalized) payload.optString("clientSignatureDate", "").trim().ifBlank { nowUtcIso } else ""
 
                 val rawPhotoPaths = parseJsonStringArray(payload.optJSONArray("localPhotoPaths"))
                 val encodedPhotos = encodePhotosToDataUrls(

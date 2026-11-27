@@ -104,6 +104,8 @@ fun CreateServiceOrderScreen(
     var fiscalContact by remember(formKey) { mutableStateOf(existingOrder?.fiscalContact ?: initialDraft?.fiscalContact.orEmpty()) }
     val signaturePaths = remember(formKey) { mutableStateListOf<SignaturePath>() }
     var hasSignature by remember(formKey) { mutableStateOf(false) }
+    var isDrawingSignature by remember { mutableStateOf(false) }
+    val formScrollState = rememberScrollState()
 
     // Fotos do Equipamento / Atendimento (até 4 imagens por O.S.)
     val maxPhotos = 4
@@ -523,23 +525,23 @@ fun CreateServiceOrderScreen(
                                 validationError = "Por favor, preencha a Solução aplicada."
                                 return@Button
                             }
-                            if (fiscalName.isBlank()) {
-                                validationError = "Por favor, informe o Nome do fiscal / responsável."
+                            if (fiscalName.trim().length < 4) {
+                                validationError = "Por favor, informe o Nome Completo do fiscal / responsável (mínimo de 4 caracteres)."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
                                 return@Button
                             }
-                            if (fiscalRegistration.isBlank()) {
-                                validationError = "Por favor, informe a Matrícula do fiscal / responsável."
+                            if (fiscalRegistration.trim().length < 3) {
+                                validationError = "Por favor, informe a Matrícula / Documento do fiscal (mínimo de 3 caracteres)."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
                                 return@Button
                             }
                             if (!hasSignature || signaturePaths.isEmpty()) {
                                 validationError = "Por favor, colha a Assinatura Digital do fiscal na tela."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
                                 return@Button
                             }
 
-                            isSubmitting = true
-                            validationError = null
-
-                            // Salva a assinatura digital localmente em PNG e converte em Base64
+                            // Salva a assinatura digital localmente em PNG e converte em Base64 com validação obrigatória
                             val sigTargetId = existingOrder?.orderId ?: "OS_${System.currentTimeMillis()}"
                             val sigFile = try {
                                 saveSignatureToLocalFile(
@@ -551,6 +553,14 @@ fun CreateServiceOrderScreen(
                                 null
                             }
                             val sigBase64 = sigFile?.let { fileToBase64(it) }
+                            if (sigFile == null || !sigFile.exists() || sigBase64.isNullOrBlank() || sigBase64.length <= 50) {
+                                validationError = "Não foi possível gravar a imagem da Assinatura Digital. Por favor, assine novamente na tela."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
+                                return@Button
+                            }
+
+                            isSubmitting = true
+                            validationError = null
 
                             if (existingOrder != null) {
                                 viewModel.finalizeExistingServiceOrder(
@@ -669,7 +679,7 @@ fun CreateServiceOrderScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(state = formScrollState, enabled = !isDrawingSignature)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -1614,6 +1624,9 @@ fun CreateServiceOrderScreen(
                             paths = signaturePaths,
                             onSignatureChanged = { signed ->
                                 hasSignature = signed
+                            },
+                            onDrawingActiveChanged = { active ->
+                                isDrawingSignature = active
                             }
                         )
                     }

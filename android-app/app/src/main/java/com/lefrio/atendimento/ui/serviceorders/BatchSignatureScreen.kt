@@ -50,6 +50,7 @@ fun BatchSignatureScreen(
     onBackClick: () -> Unit,
     onBatchFinished: (totalFinalized: Int) -> Unit
 ) {
+    val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val gpsManager = remember(context) { GpsAuditManager(context) }
@@ -88,6 +89,8 @@ fun BatchSignatureScreen(
 
     val signaturePaths = remember { mutableStateListOf<SignaturePath>() }
     var hasSignature by remember { mutableStateOf(false) }
+    var isDrawingSignature by remember { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
 
     var isItemsExpanded by remember { mutableStateOf(true) }
     var isSubmitting by remember { mutableStateOf(false) }
@@ -178,16 +181,19 @@ fun BatchSignatureScreen(
                                 validationError = "Nenhuma Ordem de Serviço selecionada para o lote."
                                 return@Button
                             }
-                            if (fiscalName.isBlank()) {
-                                validationError = "Informe o Nome do Responsável / Fiscal que está assinando o lote."
+                            if (fiscalName.trim().length < 4) {
+                                validationError = "Informe o Nome Completo do Responsável / Fiscal (mínimo de 4 caracteres)."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
                                 return@Button
                             }
-                            if (fiscalRegistration.isBlank()) {
-                                validationError = "Informe a Matrícula / Documento do Responsável / Fiscal."
+                            if (fiscalRegistration.trim().length < 3) {
+                                validationError = "Informe a Matrícula / Documento do Responsável / Fiscal (mínimo de 3 caracteres)."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
                                 return@Button
                             }
                             if (!hasSignature || signaturePaths.isEmpty()) {
                                 validationError = "Colha a Assinatura Digital única do fiscal na tela antes de finalizar."
+                                Toast.makeText(context, validationError, Toast.LENGTH_LONG).show()
                                 return@Button
                             }
 
@@ -212,7 +218,7 @@ fun BatchSignatureScreen(
                                         }
                                     }
 
-                                    // Gera imagem PNG + Base64 da assinatura UMA única vez
+                                    // Gera imagem PNG + Base64 da assinatura UMA única vez com validação obrigatória
                                     val batchSigId = "BATCH_OS_${System.currentTimeMillis()}"
                                     val sigFile = withContext(Dispatchers.IO) {
                                         saveSignatureToLocalFile(
@@ -223,6 +229,13 @@ fun BatchSignatureScreen(
                                     }
                                     val sigBase64 = withContext(Dispatchers.IO) {
                                         convertFileToBase64(sigFile)
+                                    }
+                                    if (!sigFile.exists() || sigBase64.isNullOrBlank() || sigBase64.length <= 50) {
+                                        isSubmitting = false
+                                        val msg = "Não foi possível gravar a imagem da Assinatura Digital. Por favor, assine novamente."
+                                        validationError = msg
+                                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        return@launch
                                     }
 
                                     viewModel.finalizeBatchOrders(
@@ -308,7 +321,7 @@ fun BatchSignatureScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(state = scrollState, enabled = !isDrawingSignature)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -480,14 +493,17 @@ fun BatchSignatureScreen(
                         }
 
                         openOrders.forEach { order ->
+                            val details = uiState.openOrderFormDetailsMap[order.id]
+                            val equipTitle = details?.equipmentDisplay?.ifBlank { details.equipmentName }.orEmpty()
+                                .ifBlank { order.type.ifBlank { "MANUTENÇÃO CORRETIVA" } }
                             BatchReviewItemBox(
                                 badgeText = "O.S. #${order.osNumber} (ADMIN)",
                                 badgeBg = Color(0xFFEDE9FE),
                                 badgeColor = Color(0xFF581C87),
-                                title = order.type.ifBlank { "MANUTENÇÃO CORRETIVA" },
-                                problem = order.generalNotes.orEmpty(),
-                                solution = "",
-                                photoCount = 0
+                                title = equipTitle,
+                                problem = details?.description?.ifBlank { order.generalNotes.orEmpty() } ?: order.generalNotes.orEmpty(),
+                                solution = details?.solution.orEmpty(),
+                                photoCount = details?.photoPaths?.size ?: 0
                             )
                         }
                     }
@@ -649,6 +665,9 @@ fun BatchSignatureScreen(
                             paths = signaturePaths,
                             onSignatureChanged = { signed ->
                                 hasSignature = signed
+                            },
+                            onDrawingActiveChanged = { active ->
+                                isDrawingSignature = active
                             }
                         )
                     }

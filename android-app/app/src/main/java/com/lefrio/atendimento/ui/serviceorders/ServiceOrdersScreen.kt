@@ -148,18 +148,24 @@ fun ServiceOrdersScreen(
                 isSameBatchLocation(anchor, draft.clientId, draft.clientName, draft.addressId, draft.addressStreet)
         }
         val matchingOrders = eligibleOpenOrders.filter { order ->
-            isSameBatchLocation(anchor, order.clientId, order.clientName, order.addressId, order.addressStreet)
+            viewModel.validateOpenOrderForBatch(order) == null &&
+                isSameBatchLocation(anchor, order.clientId, order.clientName, order.addressId, order.addressStreet)
         }
         selectedDraftIds = matchingDrafts.map { it.id }.toSet()
         selectedOrderIds = matchingOrders.map { it.id }.toSet()
-        val incompleteSameLocationCount = uiState.drafts.count { draft ->
+        val incompleteDraftsCount = uiState.drafts.count { draft ->
             viewModel.validateDraftForBatch(draft) != null &&
                 isSameBatchLocation(anchor, draft.clientId, draft.clientName, draft.addressId, draft.addressStreet)
         }
-        if (incompleteSameLocationCount > 0) {
+        val incompleteOpenOrdersCount = eligibleOpenOrders.count { order ->
+            viewModel.validateOpenOrderForBatch(order) != null &&
+                isSameBatchLocation(anchor, order.clientId, order.clientName, order.addressId, order.addressStreet)
+        }
+        val totalIncomplete = incompleteDraftsCount + incompleteOpenOrdersCount
+        if (totalIncomplete > 0) {
             Toast.makeText(
                 context,
-                "$incompleteSameLocationCount O.S. salva(s) deste endereço está(ão) incompleta(s) e não foi(foram) marcada(s).",
+                "$totalIncomplete O.S. deste endereço está(ão) incompleta(s) (sem diagnóstico/solução) e não foi(foram) marcada(s).",
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -758,6 +764,7 @@ fun ServiceOrdersScreen(
                     if (uiState.selectedTab != OSFilterTab.DRAFTS) {
                         items(uiState.filteredOrders, key = { it.id }) { order ->
                             val isEligible = isOrderEligibleForBatch(order)
+                            val orderMissingReason = if (isEligible) viewModel.validateOpenOrderForBatch(order) else null
                             val isOrderSelected = order.id in selectedOrderIds
                             val sameLoc = lockedLocation == null || isSameBatchLocation(
                                 lockedLocation,
@@ -766,13 +773,14 @@ fun ServiceOrdersScreen(
                                 order.addressId,
                                 order.addressStreet
                             )
-                            val canSelectOrder = isEligible && sameLoc
+                            val canSelectOrder = isEligible && orderMissingReason == null && sameLoc
 
                             ServiceOrderItemCard(
                                 order = order,
                                 isBatchMode = isBatchMode,
                                 isSelected = isOrderSelected,
                                 isSelectableInBatch = canSelectOrder,
+                                incompleteReason = if (isBatchMode && isEligible) orderMissingReason else null,
                                 onClick = {
                                     if (!isBatchMode) {
                                         onOrderClick(order.id)
@@ -782,6 +790,12 @@ fun ServiceOrdersScreen(
                                                 context,
                                                 "Esta O.S. já está concluída/cancelada e não entra no lote.",
                                                 Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else if (orderMissingReason != null) {
+                                            Toast.makeText(
+                                                context,
+                                                "Abra e complete esta O.S. antes de assinar em lote ($orderMissingReason).",
+                                                Toast.LENGTH_LONG
                                             ).show()
                                         } else if (!sameLoc) {
                                             Toast.makeText(
@@ -1254,6 +1268,7 @@ private fun ServiceOrderItemCard(
     isBatchMode: Boolean = false,
     isSelected: Boolean = false,
     isSelectableInBatch: Boolean = true,
+    incompleteReason: String? = null,
     onClick: () -> Unit
 ) {
     val statusColor = when (order.status) {
@@ -1452,6 +1467,25 @@ private fun ServiceOrderItemCard(
                         lineHeight = 16.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            if (!incompleteReason.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFFEF3C7))
+                        .border(1.dp, Color(0xFFFDE68A), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "Pendente para lote: $incompleteReason (abra e salve antes)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF92400E)
                     )
                 }
             }

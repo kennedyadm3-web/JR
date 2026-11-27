@@ -1572,6 +1572,40 @@ class ServiceOrderRepository(private val context: Context) {
         )
     }
 
+    suspend fun getServiceOrderFormDetailsMap(orderIds: List<String>): Map<String, ServiceOrderFormDetails> = withContext(Dispatchers.IO) {
+        val result = mutableMapOf<String, ServiceOrderFormDetails>()
+        for (id in orderIds.distinct()) {
+            getServiceOrderFormDetails(id)?.let { result[id] = it }
+        }
+        result
+    }
+
+    private fun validateMandatoryFiscalAndSignature(
+        signeeName: String?,
+        signeeDoc: String?,
+        signatureFilePath: String?,
+        signatureBase64: String?
+    ) {
+        val cleanName = signeeName?.trim().orEmpty()
+        val cleanDoc = signeeDoc?.trim().orEmpty()
+        if (cleanName.length < 4) {
+            throw IllegalArgumentException("Finalização bloqueada: informe o Nome Completo do fiscal (mínimo de 4 caracteres).")
+        }
+        if (cleanDoc.length < 3) {
+            throw IllegalArgumentException("Finalização bloqueada: informe a Matrícula/Documento do fiscal (mínimo de 3 caracteres).")
+        }
+        val hasValidBase64 = !signatureBase64.isNullOrBlank() && signatureBase64.trim().length > 50
+        val hasValidFile = !signatureFilePath.isNullOrBlank() && try {
+            val f = java.io.File(signatureFilePath)
+            f.exists() && f.length() > 0L
+        } catch (_: Exception) {
+            false
+        }
+        if (!hasValidBase64 && !hasValidFile) {
+            throw IllegalArgumentException("Finalização bloqueada: a Assinatura Digital do fiscal é obrigatória e não pôde ser validada.")
+        }
+    }
+
     suspend fun saveExistingOrderProgress(details: ServiceOrderFormDetails) = withContext(Dispatchers.IO) {
         val existing = orderDao.getOrderById(details.orderId) ?: return@withContext
         val now = System.currentTimeMillis()
@@ -1660,6 +1694,12 @@ class ServiceOrderRepository(private val context: Context) {
         longitude: Double = 0.0,
         accuracy: Float = 0f
     ): Boolean = withContext(Dispatchers.IO) {
+        validateMandatoryFiscalAndSignature(
+            signeeName = details.fiscalName,
+            signeeDoc = details.fiscalRegistration,
+            signatureFilePath = signaturePath,
+            signatureBase64 = signatureBase64
+        )
         saveExistingOrderProgress(details)
 
         val nowIso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.getDefault()).apply {
@@ -1950,6 +1990,14 @@ class ServiceOrderRepository(private val context: Context) {
         routeNotes: String? = null,
         otherPhotoPaths: List<String>? = null
     ): Boolean = withContext(Dispatchers.IO) {
+        // Trava obrigatória de integridade: nenhuma O.S. ou Preventiva pode ser finalizada sem nome, matrícula e assinatura do fiscal
+        validateMandatoryFiscalAndSignature(
+            signeeName = signeeName,
+            signeeDoc = signeeDoc,
+            signatureFilePath = signatureFilePath,
+            signatureBase64 = signatureBase64
+        )
+
         val existingOrder = orderDao.getOrderById(orderId)
         val isPreventive = orderId.startsWith("PREV_")
         val originalRecordId = existingOrder?.originalId ?: orderId.removePrefix("PREV_")
@@ -2159,6 +2207,14 @@ class ServiceOrderRepository(private val context: Context) {
         }.format(Date())
         val hasSignature = !params.signaturePath.isNullOrBlank() || !params.signatureBase64.isNullOrBlank()
         val isFinal = params.isFinalized || hasSignature
+        if (isFinal) {
+            validateMandatoryFiscalAndSignature(
+                signeeName = params.fiscalName,
+                signeeDoc = params.fiscalRegistration,
+                signatureFilePath = params.signaturePath,
+                signatureBase64 = params.signatureBase64
+            )
+        }
         val status = if (isFinal) "finalizada" else "aberta"
         val completionDate = if (isFinal) nowIso else null
 

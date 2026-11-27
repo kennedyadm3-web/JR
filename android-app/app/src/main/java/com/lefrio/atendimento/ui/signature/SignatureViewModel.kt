@@ -63,13 +63,13 @@ class SignatureViewModel(
         signeeDoc: String,
         signaturePaths: List<SignaturePath>
     ) {
-        if (signeeName.isBlank()) {
-            _uiState.value = SignatureUiState.Error("Informe o nome do recebedor.")
+        if (signeeName.trim().length < 4) {
+            _uiState.value = SignatureUiState.Error("Informe o nome completo do recebedor (mínimo de 4 caracteres).")
             return
         }
 
-        if (signeeDoc.isBlank()) {
-            _uiState.value = SignatureUiState.Error("Informe o documento (RG ou CPF) do recebedor.")
+        if (signeeDoc.trim().length < 3) {
+            _uiState.value = SignatureUiState.Error("Informe a matrícula ou documento do recebedor (mínimo de 3 caracteres).")
             return
         }
 
@@ -100,6 +100,10 @@ class SignatureViewModel(
                 }.format(Date())
 
                 val sigBase64 = com.lefrio.atendimento.ui.signature.components.convertFileToBase64(signatureFile)
+                if (sigBase64.isNullOrBlank() || sigBase64.length <= 50) {
+                    _uiState.value = SignatureUiState.Error("Não foi possível gravar a imagem da Assinatura Digital. Assine novamente.")
+                    return@launch
+                }
                 val checklistItems = repository.getChecklistForOrderSync(orderId)
 
                 // 3. Grava no Room, enfileira e envia IMEDIATAMENTE para o Firestore (com fallback offline)
